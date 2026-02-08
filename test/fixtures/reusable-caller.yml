@@ -1,0 +1,11 @@
+name: Caller Workflow
+
+on: push
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      username: test-user
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}

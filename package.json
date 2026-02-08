@@ -1,0 +1,51 @@
+{
+  "name": "@jabraf/actly",
+  "version": "0.1.2",
+  "description": "CLI tool to locally test GitHub Actions and workflows",
+  "main": "dist/index.js",
+  "bin": {
+    "actly": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "dev": "tsc --watch",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write .",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "github-actions",
+    "workflow",
+    "test",
+    "cli",
+    "actly"
+  ],
+  "author": {
+    "name": "Jabran Rafique",
+    "email": "hello@jabran.me"
+  },
+  "license": "MIT",
+  "prettier": "@jabraf/prettier",
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "commander": "^11.1.0",
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "@jabraf/prettier": "^3.0.1",
+    "@types/jest": "^29.5.11",
+    "@types/node": "^20.10.6",
+    "@typescript-eslint/eslint-plugin": "^6.17.0",
+    "@typescript-eslint/parser": "^6.17.0",
+    "eslint": "^8.56.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.3.3"
+  },
+  "volta": {
+    "node": "24.0.0"
+  }
+}

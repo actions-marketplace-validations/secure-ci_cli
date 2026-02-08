@@ -1,0 +1,337 @@
+import { executeWorkflow } from './executor';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
+
+describe('Executor', () => {
+  const fixturesDir = path.join(__dirname, '../../test/fixtures');
+  const tempTestDir = path.join(os.tmpdir(), 'actly-test');
+
+  describe('executeWorkflow', () => {
+    it('should execute a simple workflow with run commands', async () => {
+      const workflowPath = path.join(fixturesDir, 'echo-workflow.yml');
+
+      const result = await executeWorkflow(workflowPath, {
+        inputs: { 'test-input': 'Hello from test' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs.length).toBeGreaterThan(0);
+    });
+
+    it('should handle workflow execution with inputs', async () => {
+      const workflowPath = path.join(fixturesDir, 'echo-workflow.yml');
+
+      const result = await executeWorkflow(workflowPath, {
+        inputs: { 'test-input': 'Test message' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].success).toBe(true);
+    });
+
+    it('should handle workflow execution with secrets', async () => {
+      const workflowPath = path.join(fixturesDir, 'echo-workflow.yml');
+
+      const result = await executeWorkflow(workflowPath, {
+        inputs: { 'test-input': 'test value' }, // Still need inputs for the workflow
+        secrets: { TOKEN: 'secret-value' }
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should execute specific job when job option is provided', async () => {
+      const workflowPath = path.join(fixturesDir, 'echo-workflow.yml');
+
+      const result = await executeWorkflow(workflowPath, {
+        job: 'echo-test',
+        inputs: { 'test-input': 'test value' }
+      });
+
+      expect(result.jobs.length).toBe(1);
+    });
+
+    it('should handle step failure and stop execution', async () => {
+      // Create a temporary workflow with a failing step
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const failWorkflowPath = path.join(tempDir, 'fail-workflow.yml');
+      fs.writeFileSync(
+        failWorkflowPath,
+        `
+name: Fail Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Success step
+        run: echo "This works"
+      - name: Fail step
+        run: exit 1
+      - name: Should not run
+        run: echo "This should not run"
+`
+      );
+
+      const result = await executeWorkflow(failWorkflowPath);
+
+      expect(result.success).toBe(false);
+      expect(result.jobs[0].success).toBe(false);
+      expect(result.jobs[0].steps.length).toBe(2);
+
+      // Cleanup
+      fs.unlinkSync(failWorkflowPath);
+    });
+
+    it('should continue on error when continue-on-error is set', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const continueWorkflowPath = path.join(tempDir, 'continue-workflow.yml');
+      fs.writeFileSync(
+        continueWorkflowPath,
+        `
+name: Continue Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail but continue
+        run: exit 1
+        continue-on-error: true
+      - name: Should still run
+        run: echo "This runs"
+`
+      );
+
+      const result = await executeWorkflow(continueWorkflowPath);
+
+      expect(result.jobs[0].steps.length).toBe(2);
+
+      // Cleanup
+      fs.unlinkSync(continueWorkflowPath);
+    });
+
+    it('should handle composite action execution', async () => {
+      const actionPath = path.join(fixturesDir, 'simple-action.yml');
+
+      const result = await executeWorkflow(actionPath, {
+        inputs: { 'who-to-greet': 'Test User' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs.length).toBe(1);
+      expect(result.jobs[0].job).toBe('action');
+    });
+
+    it('should replace input placeholders in run commands', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const inputWorkflowPath = path.join(tempDir, 'input-workflow.yml');
+      fs.writeFileSync(
+        inputWorkflowPath,
+        `
+name: Input Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo input
+        run: echo "Message is \${{ inputs.message }}"
+`
+      );
+
+      const result = await executeWorkflow(inputWorkflowPath, {
+        inputs: { message: 'Hello World' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain('Hello World');
+
+      // Cleanup
+      fs.unlinkSync(inputWorkflowPath);
+    });
+
+    it('should replace secret placeholders in run commands', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const secretWorkflowPath = path.join(tempDir, 'secret-workflow.yml');
+      fs.writeFileSync(
+        secretWorkflowPath,
+        `
+name: Secret Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use secret
+        run: echo "Token is \${{ secrets.TOKEN }}"
+`
+      );
+
+      const result = await executeWorkflow(secretWorkflowPath, {
+        secrets: { TOKEN: 'secret123' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain('secret123');
+
+      // Cleanup
+      fs.unlinkSync(secretWorkflowPath);
+    });
+
+    it('should handle working directory in steps', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const workdirPath = path.join(tempDir, 'subdir');
+      if (!fs.existsSync(workdirPath)) {
+        fs.mkdirSync(workdirPath, { recursive: true });
+      }
+
+      const wdWorkflowPath = path.join(tempDir, 'wd-workflow.yml');
+      fs.writeFileSync(
+        wdWorkflowPath,
+        `
+name: Working Directory Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check directory
+        run: pwd
+        working-directory: ${workdirPath}
+`
+      );
+
+      const result = await executeWorkflow(wdWorkflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain('subdir');
+
+      // Cleanup
+      fs.unlinkSync(wdWorkflowPath);
+      fs.rmdirSync(workdirPath);
+    });
+
+    it('should record execution duration', async () => {
+      const workflowPath = path.join(fixturesDir, 'echo-workflow.yml');
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.duration).toBeGreaterThan(0);
+      expect(result.jobs[0].duration).toBeGreaterThan(0);
+      expect(result.jobs[0].steps[0].duration).toBeGreaterThan(0);
+    });
+
+    it('should handle errors gracefully', async () => {
+      const result = await executeWorkflow('/nonexistent/path.yml');
+
+      expect(result.success).toBe(false);
+      expect(result.jobs).toEqual([]);
+    });
+  });
+
+  describe('Remote Action Support', () => {
+    it('should attempt to fetch and execute remote actions', async () => {
+      // Create a simple workflow that uses remote actions but doesn't run npm test
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const remoteActionWorkflowPath = path.join(
+        tempDir,
+        'remote-action-workflow.yml'
+      );
+      fs.writeFileSync(
+        remoteActionWorkflowPath,
+        `
+name: Remote Action Test
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Setup Node
+        uses: actions/setup-node@v3
+      - name: Echo
+        run: echo "Done"
+`
+      );
+
+      const result = await executeWorkflow(remoteActionWorkflowPath);
+
+      // Remote actions will be fetched and attempted
+      // They may fail because they need GitHub context, but fetching should work
+      // The workflow may stop early if actions fail
+      expect(result.jobs.length).toBeGreaterThan(0);
+      expect(result.jobs[0].steps.length).toBeGreaterThan(0);
+
+      // Cleanup
+      fs.unlinkSync(remoteActionWorkflowPath);
+    }, 30000); // Increase timeout for remote fetching
+
+    it('should execute composite actions from remote', async () => {
+      // Skip this test unless network tests are enabled
+      if (process.env.CI || !process.env.RUN_NETWORK_TESTS) {
+        return;
+      }
+
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const compositeActionWorkflowPath = path.join(
+        tempDir,
+        'composite-action-workflow.yml'
+      );
+      fs.writeFileSync(
+        compositeActionWorkflowPath,
+        `
+name: Composite Action Test
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use composite action
+        uses: actions/hello-world-composite-action@v1
+        with:
+          who-to-greet: 'GitHub'
+`
+      );
+
+      const result = await executeWorkflow(compositeActionWorkflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps.length).toBe(1);
+      expect(result.jobs[0].steps[0].success).toBe(true);
+
+      // Cleanup
+      fs.unlinkSync(compositeActionWorkflowPath);
+    }, 60000); // 60 second timeout for network and execution
+  });
+});

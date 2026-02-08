@@ -1,0 +1,24 @@
+name: Hello World Action
+description: A simple hello world action
+author: Test Author
+
+inputs:
+  who-to-greet:
+    description: 'Who to greet'
+    required: true
+    default: 'World'
+
+outputs:
+  greeting:
+    description: 'The greeting message'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Greet
+      run: echo "Hello ${{ inputs.who-to-greet }}"
+      shell: bash
+
+    - name: Set output
+      run: echo "greeting=Hello ${{ inputs.who-to-greet }}" >> $GITHUB_OUTPUT
+      shell: bash
