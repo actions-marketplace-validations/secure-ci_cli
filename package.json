@@ -1,5 +1,5 @@
 {
-  "name": "@jabraf/actly",
+  "name": "actly",
   "version": "0.1.2",
   "description": "Validate and test GitHub actions and workflows locally",
   "main": "dist/index.js",
