@@ -15,13 +15,12 @@ A CLI tool to locally test GitHub Actions and workflows without pushing to remot
 ## Installation
 
 ```bash
-npm install -g @jabraf/actly
+npm install -g actly
 ```
 
 Or run locally:
 
 ```bash
-cd research-development/actly
 npm install
 npm run build
 ```
