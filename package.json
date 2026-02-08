@@ -1,7 +1,7 @@
 {
   "name": "@jabraf/actly",
   "version": "0.1.2",
-  "description": "CLI tool to locally test GitHub Actions and workflows",
+  "description": "Validate and test GitHub actions and workflows locally",
   "main": "dist/index.js",
   "bin": {
     "actly": "./dist/cli.js"
