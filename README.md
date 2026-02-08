@@ -112,4 +112,4 @@ actly .github/workflows/ci.yml
 
 ## License
 
-ISC
+MIT
