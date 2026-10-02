@@ -119,6 +119,16 @@ export interface RunOptions {
   secrets?: Record<string, string>;
   job?: string;
   verbose?: boolean;
+  /** Container runtime to use for isolating `run:` steps. Default: 'auto'. */
+  containerRuntime?: 'auto' | 'docker' | 'podman' | 'none';
+  /** Image to run steps in when a container runtime is used. */
+  containerImage?: string;
+  /** Per-step execution timeout in milliseconds when containerized. */
+  containerTimeoutMs?: number;
+  /** Memory limit (e.g. '512m') applied to the container, if supported. */
+  containerMemoryLimit?: string;
+  /** Disable container networking. Default: true. */
+  networkDisabled?: boolean;
 }
 
 export interface StepResult {

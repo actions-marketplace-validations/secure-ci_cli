@@ -31,6 +31,27 @@ program
   .option('-j, --job <name>', 'Run a specific job')
   .option('--verbose', 'Enable verbose logging')
   .option('-l, --list', 'List available workflows in .github/workflows/')
+  .option(
+    '--container-runtime <name>',
+    'Isolate run: steps in a container: auto|docker|podman|none (default: none)',
+    'none'
+  )
+  .option(
+    '--container-image <image>',
+    'Container image to run steps in (default: ubuntu:22.04)'
+  )
+  .option(
+    '--container-timeout <ms>',
+    'Per-step timeout in milliseconds when containerized'
+  )
+  .option(
+    '--container-memory <limit>',
+    'Memory limit for the container, e.g. 512m'
+  )
+  .option(
+    '--allow-network',
+    'Allow container network access (disabled by default)'
+  )
   .action(async (file, options) => {
     // Set log level
     if (options.verbose) {
@@ -106,7 +127,14 @@ program
         inputs,
         secrets,
         job: options.job,
-        verbose: options.verbose
+        verbose: options.verbose,
+        containerRuntime: options.containerRuntime,
+        containerImage: options.containerImage,
+        containerTimeoutMs: options.containerTimeout
+          ? Number(options.containerTimeout)
+          : undefined,
+        containerMemoryLimit: options.containerMemory,
+        networkDisabled: !options.allowNetwork
       });
 
       if (!result.success) {

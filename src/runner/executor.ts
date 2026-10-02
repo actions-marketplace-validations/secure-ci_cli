@@ -19,6 +19,13 @@ import {
   resolveExpressionValue,
   ExpressionContext
 } from './expression';
+import {
+  resolveContainerRuntime,
+  ContainerRuntime,
+  CONTAINER_EXCHANGE_DIR
+} from './container-runtime';
+
+const DEFAULT_CONTAINER_IMAGE = 'ubuntu:22.04';
 
 const execAsync = promisify(exec);
 
@@ -364,6 +371,23 @@ async function executeStep(
 
       logger.debug(`Executing: ${command}`);
 
+      const containerPreference = options.containerRuntime ?? 'none';
+      if (containerPreference !== 'none') {
+        const runtime = await resolveContainerRuntime(containerPreference);
+        if (runtime) {
+          return await executeInContainer(
+            runtime,
+            step,
+            options,
+            command,
+            startTime
+          );
+        }
+        logger.warn(
+          `No "${containerPreference}" container runtime available; falling back to host execution.`
+        );
+      }
+
       const outputFilePath = path.join(
         os.tmpdir(),
         `actly-output-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -447,6 +471,96 @@ async function executeStep(
       error: error instanceof Error ? error.message : 'Unknown error',
       duration: Date.now() - startTime
     };
+  }
+}
+
+/**
+ * Execute a `run:` step's command inside a container via the given runtime,
+ * for process/filesystem isolation from the host. Mounts the host's current
+ * working directory and a scratch "exchange" directory (used to carry
+ * `$GITHUB_OUTPUT` back out of the container) as volumes.
+ */
+async function executeInContainer(
+  runtime: ContainerRuntime,
+  step: Step,
+  options: RunOptions,
+  command: string,
+  startTime: number
+): Promise<StepResult> {
+  const exchangeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'actly-exchange-')
+  );
+  const containerOutputPath = `${CONTAINER_EXCHANGE_DIR}/output`;
+
+  try {
+    const workingDir = step['working-directory']
+      ? `cd '${step['working-directory'].replace(/'/g, "'\\''")}' && ${command}`
+      : command;
+
+    const result = await runtime.execute({
+      image: options.containerImage || DEFAULT_CONTAINER_IMAGE,
+      command: workingDir,
+      workingDir: process.cwd(),
+      exchangeDir,
+      env: {
+        ...step.env,
+        GITHUB_OUTPUT: containerOutputPath
+      },
+      timeoutMs: options.containerTimeoutMs,
+      memoryLimit: options.containerMemoryLimit,
+      networkDisabled: options.networkDisabled !== false
+    });
+
+    if (result.stdout) {
+      logger.info(result.stdout.trim());
+    }
+    if (result.stderr) {
+      logger[result.success ? 'warn' : 'error'](result.stderr.trim());
+    }
+
+    const outputs = parseGithubOutputFile(path.join(exchangeDir, 'output'));
+
+    if (result.timedOut) {
+      logger.error(
+        `Step timed out after ${options.containerTimeoutMs}ms (container: ${runtime.name})`
+      );
+      return {
+        step,
+        success: false,
+        error: `Timed out after ${options.containerTimeoutMs}ms`,
+        output: result.stdout,
+        outputs,
+        duration: Date.now() - startTime
+      };
+    }
+
+    if (!result.success) {
+      logger.error(
+        `Step failed (container: ${runtime.name}, exit code: ${result.exitCode})`
+      );
+      return {
+        step,
+        success: false,
+        error: `Command exited with code ${result.exitCode}`,
+        output: result.stdout,
+        outputs,
+        duration: Date.now() - startTime
+      };
+    }
+
+    logger.success(
+      `Step completed: ${step.name || 'unnamed'} (container: ${runtime.name})`
+    );
+
+    return {
+      step,
+      success: true,
+      output: result.stdout,
+      outputs,
+      duration: Date.now() - startTime
+    };
+  } finally {
+    fs.rmSync(exchangeDir, { recursive: true, force: true });
   }
 }
 

@@ -1,3 +1,14 @@
+const resolveContainerRuntimeMock = jest.fn();
+
+jest.mock('./container-runtime', () => {
+  const actual = jest.requireActual('./container-runtime');
+  return {
+    ...actual,
+    resolveContainerRuntime: (...args: unknown[]) =>
+      resolveContainerRuntimeMock(...args)
+  };
+});
+
 import { executeWorkflow } from './executor';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -6,6 +17,11 @@ import * as os from 'os';
 describe('Executor', () => {
   const fixturesDir = path.join(__dirname, '../../test/fixtures');
   const tempTestDir = path.join(os.tmpdir(), 'actly-test');
+
+  beforeEach(() => {
+    resolveContainerRuntimeMock.mockReset();
+    resolveContainerRuntimeMock.mockResolvedValue(null);
+  });
 
   describe('executeWorkflow', () => {
     it('should execute a simple workflow with run commands', async () => {
@@ -82,6 +98,95 @@ jobs:
         logSpy.mockRestore();
         fs.unlinkSync(secretWorkflowPath);
       }
+    });
+
+    it('should route run: steps through a container runtime when configured', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const containerWorkflowPath = path.join(
+        tempDir,
+        'container-workflow.yml'
+      );
+      fs.writeFileSync(
+        containerWorkflowPath,
+        `
+name: Container Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "hi"
+`
+      );
+
+      const fakeExecute = jest.fn().mockResolvedValue({
+        success: true,
+        stdout: 'hi\n',
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        durationMs: 5
+      });
+      resolveContainerRuntimeMock.mockResolvedValue({
+        name: 'docker',
+        isAvailable: jest.fn().mockResolvedValue(true),
+        execute: fakeExecute
+      });
+
+      const result = await executeWorkflow(containerWorkflowPath, {
+        containerRuntime: 'docker',
+        containerImage: 'node:20'
+      });
+
+      expect(result.success).toBe(true);
+      expect(resolveContainerRuntimeMock).toHaveBeenCalledWith('docker');
+      expect(fakeExecute).toHaveBeenCalledWith(
+        expect.objectContaining({
+          image: 'node:20',
+          command: 'echo "hi"',
+          networkDisabled: true
+        })
+      );
+
+      fs.unlinkSync(containerWorkflowPath);
+    });
+
+    it('should fall back to host execution when no container runtime is available', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const fallbackWorkflowPath = path.join(
+        tempDir,
+        'container-fallback-workflow.yml'
+      );
+      fs.writeFileSync(
+        fallbackWorkflowPath,
+        `
+name: Container Fallback Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "hi"
+`
+      );
+
+      resolveContainerRuntimeMock.mockResolvedValue(null);
+
+      const result = await executeWorkflow(fallbackWorkflowPath, {
+        containerRuntime: 'auto'
+      });
+
+      expect(result.success).toBe(true);
+
+      fs.unlinkSync(fallbackWorkflowPath);
     });
 
     it('should execute specific job when job option is provided', async () => {
