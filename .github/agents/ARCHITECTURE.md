@@ -99,7 +99,7 @@ actly/
 │
 ├── package.json                  # Node.js project configuration
 ├── tsconfig.json                 # TypeScript configuration
-├── jest.config.js                # Jest testing configuration
+├── vitest.config.mts             # Vitest testing configuration
 ├── .eslintrc.js                  # ESLint configuration
 ├── .gitignore                    # Git ignore rules
 ├── AGENTS.md                     # Main AI agent guidance

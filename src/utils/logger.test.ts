@@ -1,13 +1,14 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { logger, LogLevel } from './logger';
 
 describe('Logger secret masking', () => {
-  let logSpy: jest.SpyInstance;
-  let errorSpy: jest.SpyInstance;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     logger.setLevel(LogLevel.DEBUG);
-    logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
-    errorSpy = jest
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    errorSpy = vi
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
   });

@@ -1,9 +1,10 @@
 import { EventEmitter } from 'events';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 
-const execMock = jest.fn();
-const spawnMock = jest.fn();
+const execMock = vi.fn();
+const spawnMock = vi.fn();
 
-jest.mock('child_process', () => ({
+vi.mock('child_process', () => ({
   exec: (...args: unknown[]) => execMock(...args),
   spawn: (...args: unknown[]) => spawnMock(...args)
 }));
@@ -17,11 +18,11 @@ function fakeChildProcess() {
   const emitter = new EventEmitter() as EventEmitter & {
     stdout: EventEmitter;
     stderr: EventEmitter;
-    kill: jest.Mock;
+    kill: Mock;
   };
   emitter.stdout = new EventEmitter();
   emitter.stderr = new EventEmitter();
-  emitter.kill = jest.fn();
+  emitter.kill = vi.fn();
   return emitter;
 }
 
@@ -127,7 +128,7 @@ describe('container-runtime', () => {
     });
 
     it('marks the result as timed out and kills the process', async () => {
-      jest.useFakeTimers();
+      vi.useFakeTimers();
       execMock.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
       const child = fakeChildProcess();
       spawnMock.mockReturnValue(child);
@@ -141,7 +142,7 @@ describe('container-runtime', () => {
         timeoutMs: 50
       });
 
-      jest.advanceTimersByTime(50);
+      vi.advanceTimersByTime(50);
       expect(child.kill).toHaveBeenCalledWith('SIGKILL');
       child.emit('close', null);
 
@@ -149,7 +150,7 @@ describe('container-runtime', () => {
       expect(result?.timedOut).toBe(true);
       expect(result?.success).toBe(false);
 
-      jest.useRealTimers();
+      vi.useRealTimers();
     });
   });
 });

@@ -12,9 +12,9 @@ actly follows **Test-Driven Development (TDD)**:
 
 ## Test Framework
 
-> **Note for AI Agents**: This project uses **Jest** (via `ts-jest`) as the test framework. Confirm with `npm test` → `jest` in `package.json`.
+> **Note for AI Agents**: This project uses **Vitest** as the test framework, configured via `vitest.config.mts` using `@jabraf/dev`'s `baseVitestConfig()` factory merged with project-specific overrides (Node environment, `*.test.ts` glob, coverage thresholds). Confirm with `npm test` → `vitest run` in `package.json`.
 
-- **Framework**: Jest with `ts-jest` for TypeScript support
+- **Framework**: Vitest with native TypeScript support (no separate transpiler needed)
 - **Test Environment**: Node.js
 - **Location**: Tests are co-located with source files (`*.test.ts`)
 - **Fixtures**: Stored in `test/fixtures/` directory
@@ -198,33 +198,39 @@ const workflowPath = path.join(fixturesDir, 'simple-workflow.yml');
 const workflowContent = fs.readFileSync(workflowPath, 'utf-8');
 ```
 
-## Jest Configuration
+## Vitest Configuration
 
-From `jest.config.js`:
+From `vitest.config.mts`:
 
-```javascript
-module.exports = {
-  preset: 'ts-jest',
-  testEnvironment: 'node',
-  roots: ['<rootDir>/src'],
-  testMatch: ['**/__tests__/**/*.ts', '**/?(*.)+(spec|test).ts'],
-  collectCoverageFrom: [
-    'src/**/*.ts',
-    '!src/**/*.d.ts',
-    '!src/**/*.test.ts',
-    '!src/**/__tests__/**',
-    '!src/cli.ts',        // Excluded from coverage
-    '!src/index.ts'       // Excluded from coverage
-  ],
-  coverageThreshold: {
-    global: {
-      branches: 65,
-      functions: 80,
-      lines: 80,
-      statements: 80
+```typescript
+import { baseVitestConfig } from '@jabraf/dev/vitest';
+import { defineConfig, mergeConfig } from 'vitest/config';
+
+export default mergeConfig(
+  baseVitestConfig({ coverage: true }),
+  defineConfig({
+    test: {
+      environment: 'node',
+      include: ['src/**/*.test.ts'],
+      coverage: {
+        include: ['src/**/*.ts'],
+        exclude: [
+          'src/**/*.d.ts',
+          'src/**/*.test.ts',
+          'src/**/__tests__/**',
+          'src/cli.ts',        // Excluded from coverage
+          'src/index.ts'       // Excluded from coverage
+        ],
+        thresholds: {
+          branches: 65,
+          functions: 80,
+          lines: 80,
+          statements: 80
+        }
+      }
     }
-  }
-};
+  })
+);
 ```
 
 ## Coverage Requirements
@@ -343,11 +349,13 @@ expect(result).toBeTruthy();
 ### 5. Mock External Dependencies
 
 ```typescript
-jest.mock('fs');
-jest.mock('./external-module');
+import { vi } from 'vitest';
+
+vi.mock('fs');
+vi.mock('./external-module');
 
 it('should call external module', () => {
-  const mockFn = jest.fn();
+  const mockFn = vi.fn();
   // Test with mock
 });
 ```
@@ -529,9 +537,9 @@ Tests run automatically in CI:
 
 ## Resources
 
-- [Jest Documentation](https://jestjs.io/)
-- [Jest API Reference](https://jestjs.io/docs/api)
-- [ts-jest Documentation](https://kulshekhar.github.io/ts-jest/)
+- [Vitest Documentation](https://vitest.dev/)
+- [Vitest API Reference](https://vitest.dev/api/)
+- [@jabraf/dev Documentation](https://www.npmjs.com/package/@jabraf/dev)
 - [Testing Best Practices](https://github.com/goldbergyoni/javascript-testing-best-practices)
 
 ## Summary Checklist for AI Agents
@@ -543,7 +551,7 @@ When writing tests:
 - [ ] Test one thing per test
 - [ ] Include both success and error cases
 - [ ] Use fixtures for complex test data
-- [ ] Mock external dependencies using `jest.mock()`
+- [ ] Mock external dependencies using `vi.mock()`
 - [ ] Maintain coverage thresholds
 - [ ] Run tests before committing
 - [ ] Keep tests maintainable and clean

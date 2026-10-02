@@ -4,13 +4,13 @@
 
 ## Quick Start
 
-**Technology Stack:** TypeScript, Node.js, Jest, ESLint, Prettier
+**Technology Stack:** TypeScript, Node.js, Vitest, ESLint, Prettier
 
 **Essential Commands:**
 
 ```bash
 npm run build    # Compile TypeScript
-npm test         # Run tests (Jest)
+npm test         # Run tests (Vitest)
 npm run lint     # Check code style (ESLint)
 npm run format   # Format code (Prettier)
 ```

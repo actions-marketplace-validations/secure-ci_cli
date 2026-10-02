@@ -1,7 +1,9 @@
-const resolveContainerRuntimeMock = jest.fn();
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-jest.mock('./container-runtime', () => {
-  const actual = jest.requireActual('./container-runtime');
+const resolveContainerRuntimeMock = vi.fn();
+
+vi.mock('./container-runtime', async () => {
+  const actual = await vi.importActual('./container-runtime');
   return {
     ...actual,
     resolveContainerRuntime: (...args: unknown[]) =>
@@ -77,7 +79,7 @@ jobs:
 `
       );
 
-      const logSpy = jest
+      const logSpy = vi
         .spyOn(console, 'log')
         .mockImplementation(() => undefined);
 
@@ -123,7 +125,7 @@ jobs:
 `
       );
 
-      const fakeExecute = jest.fn().mockResolvedValue({
+      const fakeExecute = vi.fn().mockResolvedValue({
         success: true,
         stdout: 'hi\n',
         stderr: '',
@@ -133,7 +135,7 @@ jobs:
       });
       resolveContainerRuntimeMock.mockResolvedValue({
         name: 'docker',
-        isAvailable: jest.fn().mockResolvedValue(true),
+        isAvailable: vi.fn().mockResolvedValue(true),
         execute: fakeExecute
       });
 
