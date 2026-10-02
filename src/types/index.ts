@@ -124,7 +124,9 @@ export interface RunOptions {
 export interface StepResult {
   step: Step;
   success: boolean;
+  outcome?: 'success' | 'failure' | 'skipped';
   output?: string;
+  outputs?: Record<string, string>;
   error?: string;
   duration: number;
 }

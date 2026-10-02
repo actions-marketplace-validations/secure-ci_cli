@@ -9,9 +9,117 @@ import {
 } from '../types';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { fetchAction } from './action-fetcher';
+import {
+  createContext,
+  evaluateCondition,
+  resolveExpressionValue,
+  ExpressionContext
+} from './expression';
 
 const execAsync = promisify(exec);
+
+/**
+ * Parse a `$GITHUB_OUTPUT` file written by a step, supporting both the
+ * simple `name=value` form and the multiline heredoc form:
+ * `name<<DELIMITER` ... `DELIMITER`.
+ */
+function parseGithubOutputFile(filePath: string): Record<string, string> {
+  const outputs: Record<string, string> = {};
+
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return outputs;
+  }
+
+  const lines = content.split(/\r?\n/);
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line) {
+      i++;
+      continue;
+    }
+
+    const heredocMatch = line.match(/^([^=<]+)<<(.+)$/);
+    if (heredocMatch) {
+      const [, name, delimiter] = heredocMatch;
+      const valueLines: string[] = [];
+      i++;
+      while (i < lines.length && lines[i] !== delimiter) {
+        valueLines.push(lines[i]);
+        i++;
+      }
+      outputs[name.trim()] = valueLines.join('\n');
+      i++; // Skip the closing delimiter line
+      continue;
+    }
+
+    const eqIndex = line.indexOf('=');
+    if (eqIndex > -1) {
+      const name = line.slice(0, eqIndex).trim();
+      const value = line.slice(eqIndex + 1);
+      outputs[name] = value;
+    }
+    i++;
+  }
+
+  return outputs;
+}
+
+/**
+ * Order job IDs so dependencies (via `needs`) run before dependents, using
+ * Kahn's algorithm. Falls back to declaration order (with a warning) if a
+ * cycle is detected, since that indicates an invalid workflow.
+ */
+function topologicalJobOrder(
+  jobs: Record<string, { needs?: string | string[] }>
+): string[] {
+  const jobIds = Object.keys(jobs);
+  const needsOf = (id: string): string[] => {
+    const needs = jobs[id].needs;
+    if (!needs) return [];
+    return Array.isArray(needs) ? needs : [needs];
+  };
+
+  const inDegree = new Map<string, number>();
+  for (const id of jobIds) {
+    inDegree.set(id, needsOf(id).filter((dep) => jobIds.includes(dep)).length);
+  }
+
+  const queue = jobIds.filter((id) => inDegree.get(id) === 0);
+  const ordered: string[] = [];
+
+  while (queue.length > 0) {
+    const id = queue.shift() as string;
+    ordered.push(id);
+
+    for (const other of jobIds) {
+      if (needsOf(other).includes(id)) {
+        const remaining = (inDegree.get(other) || 0) - 1;
+        inDegree.set(other, remaining);
+        if (remaining === 0) {
+          queue.push(other);
+        }
+      }
+    }
+  }
+
+  if (ordered.length !== jobIds.length) {
+    logger.warn(
+      'Detected a cycle in job "needs" dependencies; falling back to declaration order.'
+    );
+    return jobIds;
+  }
+
+  return ordered;
+}
 
 /**
  * Execute a workflow or action file
@@ -22,6 +130,8 @@ export async function executeWorkflow(
 ): Promise<WorkflowResult> {
   const startTime = Date.now();
 
+  logger.registerSecrets(options.secrets);
+
   try {
     const parsed = parseFile(filePath);
 
@@ -29,11 +139,33 @@ export async function executeWorkflow(
       logger.info(`Executing workflow: ${parsed.file.name}`);
 
       const jobs: JobResult[] = [];
+      const jobSucceeded = new Map<string, boolean>();
+      const jobOrder = topologicalJobOrder(parsed.file.jobs);
 
-      for (const [jobId, job] of Object.entries(parsed.file.jobs)) {
+      for (const jobId of jobOrder) {
+        const job = parsed.file.jobs[jobId];
+
         // Skip if specific job requested and this isn't it
         if (options.job && jobId !== options.job) {
           continue;
+        }
+
+        // Skip jobs whose dependencies failed (or were themselves skipped)
+        if (!options.job) {
+          const needs = job.needs
+            ? Array.isArray(job.needs)
+              ? job.needs
+              : [job.needs]
+            : [];
+          const unmetDependency = needs.find(
+            (dep) => jobSucceeded.get(dep) === false
+          );
+          if (unmetDependency) {
+            logger.info(
+              `Skipping job: ${jobId} (dependency "${unmetDependency}" did not succeed)`
+            );
+            continue;
+          }
         }
 
         // Handle reusable workflow calls
@@ -44,40 +176,81 @@ export async function executeWorkflow(
           continue;
         }
 
+        const jobCtx = createContext(
+          { ...(parsed.file.env || {}), ...(job.env || {}) },
+          options.inputs,
+          options.secrets
+        );
+
+        if (!evaluateCondition(job.if, jobCtx)) {
+          logger.info(`Skipping job: ${jobId} (condition not met)`);
+          continue;
+        }
+
         logger.step(`Executing job: ${jobId}`);
         const jobStartTime = Date.now();
         const stepResults: StepResult[] = [];
 
         // Execute each step
         for (const step of job.steps || []) {
+          const stepCtx: ExpressionContext = {
+            ...jobCtx,
+            env: { ...jobCtx.env, ...(step.env || {}) }
+          };
+
+          if (!evaluateCondition(step.if, stepCtx)) {
+            logger.info(
+              `Skipping step: ${step.name || step.id || 'unnamed'} (condition not met)`
+            );
+            const skippedResult: StepResult = {
+              step,
+              success: true,
+              outcome: 'skipped',
+              output: 'Skipped: condition not met',
+              duration: 0
+            };
+            stepResults.push(skippedResult);
+            if (step.id) {
+              jobCtx.steps[step.id] = { outcome: 'skipped', outputs: {} };
+            }
+            continue;
+          }
+
           const stepResult = await executeStep(step, options);
           stepResults.push(stepResult);
 
+          if (step.id) {
+            jobCtx.steps[step.id] = {
+              outcome: stepResult.success ? 'success' : 'failure',
+              outputs: stepResult.outputs || {}
+            };
+          }
+
+          if (!stepResult.success) {
+            jobCtx.jobFailed = true;
+          }
+
           if (!stepResult.success && !step['continue-on-error']) {
             logger.error(`Step failed: ${step.name || 'unnamed'}`);
-            jobs.push({
-              job: jobId,
-              success: false,
-              steps: stepResults,
-              duration: Date.now() - jobStartTime
-            });
-
-            return {
-              success: false,
-              jobs,
-              duration: Date.now() - startTime
-            };
+            break;
           }
         }
 
+        const jobSuccess = stepResults.every(
+          (s) => s.success || s.step['continue-on-error']
+        );
+
         jobs.push({
           job: jobId,
-          success: true,
+          success: jobSuccess,
           steps: stepResults,
           duration: Date.now() - jobStartTime
         });
+        jobSucceeded.set(jobId, jobSuccess);
 
-        logger.success(`Job ${jobId} completed successfully`);
+        if (jobSuccess) {
+          logger.success(`Job ${jobId} completed successfully`);
+        }
       }
 
       return {
@@ -191,10 +364,21 @@ async function executeStep(
 
       logger.debug(`Executing: ${command}`);
 
+      const outputFilePath = path.join(
+        os.tmpdir(),
+        `actly-output-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      );
+      fs.writeFileSync(outputFilePath, '');
+
       try {
         const { stdout, stderr } = await execAsync(command, {
           cwd: step['working-directory'] || process.cwd(),
-          shell: step.shell || 'bash'
+          shell: step.shell || 'bash',
+          env: {
+            ...process.env,
+            ...step.env,
+            GITHUB_OUTPUT: outputFilePath
+          }
         });
 
         if (stdout) {
@@ -206,10 +390,13 @@ async function executeStep(
 
         logger.success(`Step completed: ${step.name || 'unnamed'}`);
 
+        const outputs = parseGithubOutputFile(outputFilePath);
+
         return {
           step,
           success: true,
           output: stdout,
+          outputs,
           duration: Date.now() - startTime
         };
       } catch (execError: unknown) {
@@ -227,13 +414,22 @@ async function executeStep(
           logger.error(error.stderr.trim());
         }
 
+        const outputs = parseGithubOutputFile(outputFilePath);
+
         return {
           step,
           success: false,
           error: error.message,
           output: error.stdout,
+          outputs,
           duration: Date.now() - startTime
         };
+      } finally {
+        try {
+          fs.unlinkSync(outputFilePath);
+        } catch {
+          // Ignore cleanup errors
+        }
       }
     }
 
@@ -307,6 +503,11 @@ async function executeAction(
 
       const compositeSteps = action.runs.steps || [];
       const outputs: Record<string, string> = {};
+      const actionCtx: ExpressionContext = createContext(
+        {},
+        {},
+        options.secrets
+      );
 
       for (const compositeStep of compositeSteps) {
         // Merge step inputs with action inputs
@@ -323,6 +524,25 @@ async function executeAction(
           }
         }
 
+        const stepCtx: ExpressionContext = {
+          ...actionCtx,
+          inputs: mergedInputs,
+          env: { ...actionCtx.env, ...(compositeStep.env || {}) }
+        };
+
+        if (!evaluateCondition(compositeStep.if, stepCtx)) {
+          logger.info(
+            `Skipping composite step: ${compositeStep.name || compositeStep.id || 'unnamed'} (condition not met)`
+          );
+          if (compositeStep.id) {
+            actionCtx.steps[compositeStep.id] = {
+              outcome: 'skipped',
+              outputs: {}
+            };
+          }
+          continue;
+        }
+
         const stepOptions: RunOptions = {
           ...options,
           inputs: mergedInputs
@@ -330,7 +550,15 @@ async function executeAction(
 
         const stepResult = await executeStep(compositeStep, stepOptions);
 
+        if (compositeStep.id) {
+          actionCtx.steps[compositeStep.id] = {
+            outcome: stepResult.success ? 'success' : 'failure',
+            outputs: stepResult.outputs || {}
+          };
+        }
+
         if (!stepResult.success) {
+          actionCtx.jobFailed = true;
           return {
             step,
             success: false,
@@ -339,14 +567,17 @@ async function executeAction(
           };
         }
 
-        // Collect outputs
-        if (stepResult.output) {
-          // Use step ID, name, or index as the output key
-          const outputKey =
-            compositeStep.id ||
-            compositeStep.name ||
-            `step-${compositeSteps.indexOf(compositeStep)}`;
-          outputs[outputKey] = stepResult.output;
+      }
+
+      // Resolve the action's declared outputs (e.g.
+      // `outputs.greeting.value: ${{ steps.greet.outputs.greeting }}`)
+      // against the accumulated step outcomes/outputs.
+      for (const [outputName, outputDef] of Object.entries(
+        action.outputs || {}
+      )) {
+        const resolved = resolveExpressionValue(outputDef.value, actionCtx);
+        if (resolved !== undefined) {
+          outputs[outputName] = String(resolved);
         }
       }
 
@@ -354,6 +585,7 @@ async function executeAction(
         step,
         success: true,
         output: JSON.stringify(outputs),
+        outputs,
         duration: Date.now() - startTime
       };
     } else if (action.runs.using.startsWith('node')) {

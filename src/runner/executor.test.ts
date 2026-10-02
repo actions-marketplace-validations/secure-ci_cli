@@ -41,6 +41,49 @@ describe('Executor', () => {
       expect(result.success).toBe(true);
     });
 
+    it('should mask secret values in log output', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const secretWorkflowPath = path.join(tempDir, 'secret-workflow.yml');
+      fs.writeFileSync(
+        secretWorkflowPath,
+        `
+name: Secret Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "token is super-secret-value-123"
+`
+      );
+
+      const logSpy = jest
+        .spyOn(console, 'log')
+        .mockImplementation(() => undefined);
+
+      try {
+        const result = await executeWorkflow(secretWorkflowPath, {
+          secrets: { TOKEN: 'super-secret-value-123' }
+        });
+
+        expect(result.success).toBe(true);
+        const loggedStrings = logSpy.mock.calls
+          .flat()
+          .filter((v): v is string => typeof v === 'string');
+        expect(
+          loggedStrings.some((s) => s.includes('super-secret-value-123'))
+        ).toBe(false);
+        expect(loggedStrings.some((s) => s.includes('***'))).toBe(true);
+      } finally {
+        logSpy.mockRestore();
+        fs.unlinkSync(secretWorkflowPath);
+      }
+    });
+
     it('should execute specific job when job option is provided', async () => {
       const workflowPath = path.join(fixturesDir, 'echo-workflow.yml');
 
@@ -130,6 +173,146 @@ jobs:
       expect(result.success).toBe(true);
       expect(result.jobs.length).toBe(1);
       expect(result.jobs[0].job).toBe('action');
+    });
+
+    it('should skip a step whose if condition evaluates to false', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const ifWorkflowPath = path.join(tempDir, 'if-skip-workflow.yml');
+      fs.writeFileSync(
+        ifWorkflowPath,
+        `
+name: If Skip Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Should skip
+        if: \${{ false }}
+        run: echo "should not run"
+      - name: Should run
+        run: echo "runs"
+`
+      );
+
+      const result = await executeWorkflow(ifWorkflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps.length).toBe(2);
+      expect(result.jobs[0].steps[0].outcome).toBe('skipped');
+      expect(result.jobs[0].steps[0].success).toBe(true);
+      expect(result.jobs[0].steps[1].outcome).not.toBe('skipped');
+
+      fs.unlinkSync(ifWorkflowPath);
+    });
+
+    it('should skip an entire job whose if condition evaluates to false', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const ifJobWorkflowPath = path.join(
+        tempDir,
+        'if-skip-job-workflow.yml'
+      );
+      fs.writeFileSync(
+        ifJobWorkflowPath,
+        `
+name: If Skip Job Workflow
+on: push
+jobs:
+  skipped-job:
+    if: \${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "should not run"
+  active-job:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "runs"
+`
+      );
+
+      const result = await executeWorkflow(ifJobWorkflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs.length).toBe(1);
+      expect(result.jobs[0].job).toBe('active-job');
+
+      fs.unlinkSync(ifJobWorkflowPath);
+    });
+
+    it('should skip a job whose needs dependency failed', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const needsWorkflowPath = path.join(tempDir, 'needs-workflow.yml');
+      fs.writeFileSync(
+        needsWorkflowPath,
+        `
+name: Needs Workflow
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "should not run"
+`
+      );
+
+      const result = await executeWorkflow(needsWorkflowPath);
+
+      expect(result.success).toBe(false);
+      expect(result.jobs.length).toBe(1);
+      expect(result.jobs[0].job).toBe('build');
+      expect(result.jobs[0].success).toBe(false);
+
+      fs.unlinkSync(needsWorkflowPath);
+    });
+
+    it('should run jobs in dependency order regardless of declaration order', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const orderWorkflowPath = path.join(tempDir, 'order-workflow.yml');
+      fs.writeFileSync(
+        orderWorkflowPath,
+        `
+name: Order Workflow
+on: push
+jobs:
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "deploying"
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "building"
+`
+      );
+
+      const result = await executeWorkflow(orderWorkflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs.map((j) => j.job)).toEqual(['build', 'deploy']);
+
+      fs.unlinkSync(orderWorkflowPath);
     });
 
     it('should replace input placeholders in run commands', async () => {
@@ -253,6 +436,11 @@ jobs:
 
   describe('Remote Action Support', () => {
     it('should attempt to fetch and execute remote actions', async () => {
+      // This test requires network access to fetch real remote actions
+      if (process.env.CI || !process.env.RUN_NETWORK_TESTS) {
+        return;
+      }
+
       // Create a simple workflow that uses remote actions but doesn't run npm test
       const tempDir = tempTestDir;
       if (!fs.existsSync(tempDir)) {
