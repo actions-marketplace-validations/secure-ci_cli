@@ -12,9 +12,9 @@ actly follows **Test-Driven Development (TDD)**:
 
 ## Test Framework
 
-> **Note for AI Agents**: This project uses **Vitest** as the test framework. Vitest is a modern, fast test runner with excellent TypeScript support and compatibility with Jest APIs.
+> **Note for AI Agents**: This project uses **Jest** (via `ts-jest`) as the test framework. Confirm with `npm test` → `jest` in `package.json`.
 
-- **Framework**: Vitest with TypeScript support
+- **Framework**: Jest with `ts-jest` for TypeScript support
 - **Test Environment**: Node.js
 - **Location**: Tests are co-located with source files (`*.test.ts`)
 - **Fixtures**: Stored in `test/fixtures/` directory
@@ -198,39 +198,34 @@ const workflowPath = path.join(fixturesDir, 'simple-workflow.yml');
 const workflowContent = fs.readFileSync(workflowPath, 'utf-8');
 ```
 
-## Vitest Configuration
+## Jest Configuration
 
-From `vitest.config.ts`:
+From `jest.config.js`:
 
-```typescript
-{
-  test: {
-    environment: 'node',
-    include: ['src/**/*.{test,spec}.ts'],
-    exclude: ['node_modules', 'dist'],
-    coverage: {
-      provider: 'v8', // or 'istanbul'
-      reporter: ['text', 'json', 'html'],
-      include: ['src/**/*.ts'],
-      exclude: [
-        'src/**/*.d.ts',
-        'src/**/*.test.ts',
-        'src/**/__tests__/**',
-        'src/cli.ts',        // Excluded from coverage
-        'src/index.ts'       // Excluded from coverage
-      ],
-      thresholds: {
-        branches: 65,
-        functions: 80,
-        lines: 80,
-        statements: 80
-      }
+```javascript
+module.exports = {
+  preset: 'ts-jest',
+  testEnvironment: 'node',
+  roots: ['<rootDir>/src'],
+  testMatch: ['**/__tests__/**/*.ts', '**/?(*.)+(spec|test).ts'],
+  collectCoverageFrom: [
+    'src/**/*.ts',
+    '!src/**/*.d.ts',
+    '!src/**/*.test.ts',
+    '!src/**/__tests__/**',
+    '!src/cli.ts',        // Excluded from coverage
+    '!src/index.ts'       // Excluded from coverage
+  ],
+  coverageThreshold: {
+    global: {
+      branches: 65,
+      functions: 80,
+      lines: 80,
+      statements: 80
     }
   }
-}
+};
 ```
-
-> **Note**: Vitest uses the same assertion syntax as Jest, so tests remain compatible. The key difference is faster execution and native ESM support.
 
 ## Coverage Requirements
 
@@ -348,13 +343,11 @@ expect(result).toBeTruthy();
 ### 5. Mock External Dependencies
 
 ```typescript
-import { vi } from 'vitest';
-
-vi.mock('fs');
-vi.mock('./external-module');
+jest.mock('fs');
+jest.mock('./external-module');
 
 it('should call external module', () => {
-  const mockFn = vi.fn();
+  const mockFn = jest.fn();
   // Test with mock
 });
 ```
@@ -536,8 +529,9 @@ Tests run automatically in CI:
 
 ## Resources
 
-- [Vitest Documentation](https://vitest.dev/)
-- [Vitest API Reference](https://vitest.dev/api/)
+- [Jest Documentation](https://jestjs.io/)
+- [Jest API Reference](https://jestjs.io/docs/api)
+- [ts-jest Documentation](https://kulshekhar.github.io/ts-jest/)
 - [Testing Best Practices](https://github.com/goldbergyoni/javascript-testing-best-practices)
 
 ## Summary Checklist for AI Agents
@@ -549,7 +543,7 @@ When writing tests:
 - [ ] Test one thing per test
 - [ ] Include both success and error cases
 - [ ] Use fixtures for complex test data
-- [ ] Mock external dependencies using `vi.mock()`
+- [ ] Mock external dependencies using `jest.mock()`
 - [ ] Maintain coverage thresholds
 - [ ] Run tests before committing
 - [ ] Keep tests maintainable and clean

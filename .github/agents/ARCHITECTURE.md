@@ -60,15 +60,18 @@ actly/
 │   ├── runner/                   # Execution layer
 │   │   ├── dry-run.ts            # Dry-run mode implementation
 │   │   ├── dry-run.test.ts
-│   │   ├── executor.ts           # Execute workflows and actions
+│   │   ├── executor.ts           # Execute jobs/steps; if:, needs:, outputs
 │   │   ├── executor.test.ts
+│   │   ├── expression.ts         # ${{ ... }} expression parsing/evaluation
+│   │   ├── expression.test.ts
+│   │   ├── container-runtime.ts  # Docker/Podman CLI-based isolation
+│   │   ├── container-runtime.test.ts
 │   │   ├── action-fetcher.ts     # Fetch remote actions from GitHub
 │   │   └── action-fetcher.test.ts
 │   │
 │   ├── utils/                    # Utility layer
-│   │   ├── logger.ts             # Logging utility with chalk
-│   │   ├── inputs.ts             # Handle workflow inputs (future)
-│   │   └── secrets.ts            # Handle workflow secrets (future)
+│   │   ├── logger.ts             # Logging utility with chalk + secret masking
+│   │   └── logger.test.ts
 │   │
 │   └── types/                    # Type definitions
 │       └── index.ts              # Shared TypeScript interfaces and types
@@ -96,7 +99,7 @@ actly/
 │
 ├── package.json                  # Node.js project configuration
 ├── tsconfig.json                 # TypeScript configuration
-├── vitest.config.ts              # Vitest testing configuration
+├── jest.config.js                # Jest testing configuration
 ├── .eslintrc.js                  # ESLint configuration
 ├── .gitignore                    # Git ignore rules
 ├── AGENTS.md                     # Main AI agent guidance
@@ -221,9 +224,11 @@ interface ValidationResult {
 
 **Responsibilities**:
 
-- Execute workflow jobs and steps sequentially
+- Order jobs via `needs:` (topological sort, Kahn's algorithm) before execution
+- Evaluate `if:` conditions on jobs and steps (skipping when false) using `expression.ts`
 - Handle inputs and secrets
-- Run shell commands and scripts
+- Run shell commands and scripts, optionally inside a container (via `container-runtime.ts`)
+- Capture step outputs written to `$GITHUB_OUTPUT` into `StepResult.outputs`
 - Execute remote actions (via action-fetcher)
 - Report execution status and results
 
@@ -231,9 +236,49 @@ interface ValidationResult {
 
 ```typescript
 async function executeWorkflow(
-  workflow: Workflow,
-  options: ExecutionOptions
-): Promise<ExecutionResult>;
+  filePath: string,
+  options: RunOptions
+): Promise<WorkflowResult>;
+```
+
+#### Expression Engine (`runner/expression.ts`)
+
+**Purpose**: Parse and evaluate GitHub Actions-style `${{ ... }}` expressions used in `if:` conditions and output references.
+
+**Responsibilities**:
+
+- Resolve `env.*`, `inputs.*`, `secrets.*`, `steps.<id>.outputs.*`
+- Evaluate `success()`, `failure()`, `always()` and comparison operators (`==`, `!=`, `&&`, `||`)
+- Resolve a single expression value against accumulated step outcomes (used for composite action outputs)
+
+**Key Functions**:
+
+```typescript
+function evaluateExpression(expr: string, context: ExpressionContext): boolean;
+function resolveExpressionValue(expr: string, context: ExpressionContext): string;
+```
+
+#### Container Runtime (`runner/container-runtime.ts`)
+
+**Purpose**: Optionally isolate `run:` steps inside a Docker or Podman container.
+
+**Responsibilities**:
+
+- Detect and cache availability of `docker`/`podman` CLIs
+- Shell out to `docker run` / `podman run` (CLI-compatible) with volume mounts for working directory and `$GITHUB_OUTPUT` exchange
+- Apply memory limits, timeouts, custom images, and network isolation (disabled by default; opt-in via `--allow-network`)
+- Fall back to host execution with a warning when the requested/auto-detected runtime is unavailable
+
+**Key Functions**:
+
+```typescript
+interface ContainerRuntime {
+  isAvailable(): Promise<boolean>;
+  execute(options: ContainerExecOptions): Promise<ContainerExecResult>;
+}
+function resolveContainerRuntime(
+  preference: 'auto' | 'docker' | 'podman' | 'none'
+): Promise<ContainerRuntime | null>;
 ```
 
 #### Action Fetcher (`runner/action-fetcher.ts`)
@@ -295,58 +340,74 @@ logger.error('✗ Execution failed', error);
 
 ```typescript
 // Workflow Types
-interface Workflow {
+interface WorkflowFile {
   name: string;
-  on: string | string[] | TriggerConfig;
+  on: WorkflowTrigger;
   jobs: Record<string, Job>;
   env?: Record<string, string>;
 }
 
 interface Job {
   name?: string;
-  'runs-on': string;
-  steps: Step[];
-  needs?: string | string[];
-  if?: string;
+  'runs-on'?: string | string[];
+  steps?: Step[];
+  needs?: string | string[]; // Job dependency ordering
+  if?: string; // ${{ ... }} expression
   env?: Record<string, string>;
 }
 
 interface Step {
+  id?: string; // Referenced by steps.<id>.outputs.* in later expressions
   name?: string;
   run?: string;
   uses?: string;
-  with?: Record<string, string>;
+  with?: Record<string, string | number | boolean>;
   env?: Record<string, string>;
-  if?: string;
+  if?: string; // ${{ ... }} expression
 }
 
 // Action Types
-interface Action {
+interface ActionFile {
   name: string;
-  description?: string;
+  description: string;
   inputs?: Record<string, ActionInput>;
   outputs?: Record<string, ActionOutput>;
   runs: ActionRuns;
 }
 
 interface ActionRuns {
-  using: 'composite' | 'node12' | 'node16' | 'node20' | 'docker';
+  using: 'composite' | 'node12' | 'node16' | 'node20' | 'node22' | 'docker';
   steps?: Step[]; // For composite actions
   main?: string; // For JavaScript actions
   image?: string; // For Docker actions
 }
 
 // Execution Types
-interface ExecutionOptions {
-  dryRun: boolean;
-  inputs: Record<string, string>;
-  secrets: Record<string, string>;
+interface RunOptions {
+  dryRun?: boolean;
+  inputs?: Record<string, string>;
+  secrets?: Record<string, string>; // Automatically masked in log output
+  job?: string; // Run a single job by name
+  containerRuntime?: 'auto' | 'docker' | 'podman' | 'none'; // Default: 'none'
+  containerImage?: string;
+  containerTimeoutMs?: number;
+  containerMemoryLimit?: string;
+  networkDisabled?: boolean; // Default: true
 }
 
-interface ExecutionResult {
+interface StepResult {
+  step: Step;
   success: boolean;
-  steps: StepResult[];
+  outcome?: 'success' | 'failure' | 'skipped';
+  outputs?: Record<string, string>; // Parsed from $GITHUB_OUTPUT
   error?: string;
+  duration: number;
+}
+
+interface WorkflowResult {
+  success: boolean;
+  jobs: JobResult[];
+  duration: number;
 }
 ```
 
@@ -379,13 +440,20 @@ graph TD
     A[User Command] --> B[CLI Parser<br/>cli.ts]
     B --> C[Workflow Parser<br/>workflow-parser.ts]
     C --> D[Read YAML file]
-    C --> E[Parse to Workflow type]
+    C --> E[Parse to WorkflowFile type]
     D --> F[Executor<br/>executor.ts]
     E --> F
-    F --> G{For each job}
-    G --> H{For each step}
-    H --> I{Step type?}
-    I -->|step.run| J[Execute shell command]
+    F --> F1[Order jobs via needs:<br/>topological sort]
+    F1 --> G{For each job}
+    G --> G0{job.if evaluates<br/>truthy?}
+    G0 -->|No| G1[Skip job]
+    G0 -->|Yes| H{For each step}
+    H --> H0{step.if evaluates<br/>truthy?}
+    H0 -->|No| H1[Skip step]
+    H0 -->|Yes| I{Step type?}
+    I -->|step.run, containerRuntime set| J0[Container Runtime<br/>container-runtime.ts]
+    I -->|step.run, no container| J[Execute shell command]
+    J0 --> J
     I -->|step.uses| K[Action Fetcher<br/>action-fetcher.ts]
     K --> L{Cached?}
     L -->|No| M[Fetch from GitHub]
@@ -399,13 +467,15 @@ graph TD
     Q --> T[Return result]
     R --> T
     S --> T
-    J --> U[Collect step results]
+    J --> U[Capture $GITHUB_OUTPUT<br/>mask secrets in logs]
     T --> U
+    H1 --> V
     U --> V{More steps?}
     V -->|Yes| H
     V -->|No| W{More jobs?}
+    G1 --> W
     W -->|Yes| G
-    W -->|No| X[Return ExecutionResult]
+    W -->|No| X[Return WorkflowResult]
     X --> Y[Display Results<br/>CLI]
 ```
 
@@ -520,7 +590,7 @@ async function fetchAction(ref: string): Promise<Action> {
 
 ### Optimization Opportunities
 
-1. **Parallel Job Execution**: Currently sequential, could be parallelized
+1. **Parallel Job Execution**: Independent jobs (no shared `needs:` chain) currently still run sequentially within `needs:`-sorted order; true parallel execution could be added
 2. **Incremental Parsing**: Parse only required sections
 3. **Lazy Loading**: Load remote actions only when needed
 4. **Cache Invalidation**: Smart cache expiration strategy
@@ -529,14 +599,13 @@ async function fetchAction(ref: string): Promise<Action> {
 
 ### Secrets Handling
 
-- Secrets should never be logged
-- Secrets should be masked in output
-- Secrets stored securely (environment variables or secure input)
+- **Implemented**: Secrets registered via `--secret` are masked (`***`) across all `Logger` methods (`src/utils/logger.ts`)
+- Secrets stored only in-memory for the duration of the run (passed via CLI, not persisted)
 
 ### Remote Action Execution
 
 - Verify action source before execution
-- Sandboxing for action execution (future enhancement)
+- Container isolation (`--container-runtime`) covers `run:` steps but not yet the execution of fetched remote actions themselves (future enhancement)
 - Limit permissions for executed actions
 
 ### File System Access
@@ -581,10 +650,11 @@ See [TESTING.md](./TESTING.md) for comprehensive testing guidelines.
 1. **Plugin System**: Allow custom action types
 2. **Workflow Templates**: Reusable workflow patterns
 3. **Remote Workflow Support**: Fetch workflows from GitHub
-4. **Parallel Execution**: Run independent jobs in parallel
-5. **Docker Support**: Full Docker action support
-6. **Workflow Visualization**: Generate workflow diagrams
-7. **Interactive Mode**: Step-by-step execution with breakpoints
+4. **Parallel Execution**: Run independent jobs in parallel (currently sequential, but `needs:`-ordered)
+5. **Docker Action Type Support**: Full support for `runs.using: docker` actions (distinct from the already-implemented `--container-runtime` step isolation)
+6. **Matrix Strategy**: Execute `strategy.matrix` job variants (type exists in `JobStrategy`, not yet executed)
+7. **Workflow Visualization**: Generate workflow diagrams
+8. **Interactive Mode**: Step-by-step execution with breakpoints
 
 ### Scalability Considerations
 

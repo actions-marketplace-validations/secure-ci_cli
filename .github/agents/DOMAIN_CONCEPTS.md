@@ -80,7 +80,7 @@ Actions that run in Docker containers.
 - Provides isolated environment
 - Slower startup time
 
-**Support in actly:** Currently shows warning (future enhancement planned).
+**Support in actly:** Currently shows a warning (future enhancement planned). Note: this is distinct from actly's `--container-runtime` flag, which isolates `run:` steps in a container regardless of action type (see [Container Isolation](#container-isolation) below).
 
 ## Remote Actions
 
@@ -169,8 +169,8 @@ Jobs are collections of steps that run on the same runner.
 **Key properties:**
 
 - `runs-on`: Specifies runner environment (e.g., `ubuntu-latest`)
-- `needs`: Specifies job dependencies
-- `if`: Conditional execution
+- `needs`: Specifies job dependencies — actly orders jobs via topological sort (Kahn's algorithm) so dependent jobs always run after the jobs they depend on
+- `if`: Conditional execution (`${{ ... }}` expression; see below). A job whose `if:` evaluates falsy is skipped entirely
 - `steps`: Array of steps to execute
 
 ### Steps
@@ -195,27 +195,85 @@ Steps are individual tasks within a job.
        node-version: '20'
    ```
 
+**Additional step properties supported by actly:**
+
+- `id`: Names the step so its outputs can be referenced as `steps.<id>.outputs.<name>`
+- `if`: Conditional execution; a falsy step is skipped (marked `outcome: 'skipped'`)
+
+## Conditional Execution (`if:`)
+
+Jobs and steps can be conditionally skipped using `${{ ... }}` expressions, evaluated by actly's expression engine (`src/runner/expression.ts`).
+
+**Supported references:**
+
+- `env.<NAME>` — environment variables
+- `inputs.<name>` — workflow/action inputs
+- `secrets.<NAME>` — secret values
+- `steps.<id>.outputs.<name>` — outputs from a previous step
+- `success()`, `failure()`, `always()` — outcome-based functions
+- Comparison/logical operators: `==`, `!=`, `&&`, `||`
+
+**Example:**
+
+```yaml
+steps:
+  - id: build
+    run: echo "status=ok" >> $GITHUB_OUTPUT
+  - if: ${{ steps.build.outputs.status == 'ok' }}
+    run: echo "Build succeeded"
+```
+
+## Step Outputs (`$GITHUB_OUTPUT`)
+
+A step can write `name=value` pairs (or multiline `name<<EOF ... EOF` blocks) to the file path in the `$GITHUB_OUTPUT` environment variable. actly injects a temporary file for this on every step and parses it afterward into `StepResult.outputs`, making the values available to later steps/jobs via `${{ steps.<id>.outputs.<name> }}`.
+
+```yaml
+- id: version
+  run: echo "value=1.2.3" >> $GITHUB_OUTPUT
+- if: ${{ steps.version.outputs.value == '1.2.3' }}
+  run: echo "Matched expected version"
+```
+
+## Secret Masking
+
+Any value passed via `--secret KEY=value` is registered with actly's `Logger` and automatically masked (replaced with `***`) wherever it would otherwise appear in console output — including stdout/stderr captured from shell commands.
+
+## Container Isolation
+
+`run:` steps can optionally be executed inside a Docker or Podman container instead of directly on the host, via `src/runner/container-runtime.ts`.
+
+- **Opt-in**: Defaults to `none` (host execution) for backward compatibility; enable with `--container-runtime=auto|docker|podman`
+- **`auto`**: Tries Docker first, then Podman
+- **Isolation options**: `--container-image`, `--container-memory`, `--container-timeout`, and network access disabled by default (`--allow-network` to opt in)
+- **Fallback**: If the requested/detected runtime is unavailable, actly logs a warning and falls back to host execution
+- **Output exchange**: The working directory and a `$GITHUB_OUTPUT` exchange directory are bind-mounted into the container so outputs and conditionals work identically to host execution
+
 ## Execution Model
 
 actly executes workflows locally:
 
 1. Parse workflow YAML
 2. Validate structure
-3. For each job (currently sequential):
+3. Order jobs by `needs:` (topological sort)
+4. For each job in order:
+   - Skip the job if its `if:` expression evaluates falsy
    - For each step:
-     - If `run`: Execute shell command
+     - Skip the step if its `if:` expression evaluates falsy
+     - If `run`: Execute shell command (optionally inside a container) and capture `$GITHUB_OUTPUT`
      - If `uses`: Fetch action, then execute
-4. Report results
+5. Mask any registered secrets across all log output
+6. Report results
 
 ## Key Differences from GitHub Actions
 
 When running locally with actly:
 
-- **No runner images:** Runs on your local machine
+- **No runner images:** Runs on your local machine (or an opt-in Docker/Podman container for `run:` steps)
 - **No GitHub context:** Limited access to GitHub API
-- **Sequential execution:** Jobs run one at a time (not in parallel)
+- **Sequential job execution:** Jobs run one at a time, ordered by `needs:` (not in parallel)
 - **Local caching:** Actions cached locally instead of GitHub servers
-- **Limited secrets:** Secrets passed via CLI (not GitHub Secrets)
+- **Limited secrets:** Secrets passed via CLI (not GitHub Secrets), masked in log output
+- **Docker action type unsupported:** `runs.using: docker` actions show a warning; this is separate from the `--container-runtime` step-isolation feature
 
 ## Resources
 

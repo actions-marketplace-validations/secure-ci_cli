@@ -8,7 +8,12 @@ A CLI tool to locally test GitHub Actions and workflows without pushing to remot
 - 📝 Pass inputs and secrets via CLI
 - 🔄 Support for reusable workflows and actions
 - ⛓️ Execute chained workflows and actions
-- 🚀 **NEW**: Fetch and run remote GitHub Actions (composite and JavaScript actions)
+- 🚦 `if:` conditional execution for jobs and steps (supports `env.*`, `inputs.*`, `secrets.*`, `steps.*.outputs.*`, `success()`, `failure()`, `always()`)
+- 🔗 `needs:` job dependency ordering (topological sort)
+- 📤 Step outputs via `$GITHUB_OUTPUT`, consumable by later steps/jobs
+- 🔒 Automatic secret masking in all log output
+- 📦 Optional container isolation for `run:` steps (Docker or Podman)
+- 🚀 Fetch and run remote GitHub Actions (composite and JavaScript actions)
 - 💾 Action caching for faster execution
 - 🎯 Minimal dependencies, focused on MVP
 
@@ -39,7 +44,65 @@ actly .github/workflows/deploy.yml --secret TOKEN=xxx
 
 # Validate workflow syntax
 actly --validate .github/workflows/ci.yml
+
+# Run a specific job
+actly .github/workflows/ci.yml --job build
+
+# List workflows in .github/workflows/
+actly --list
+
+# Run with container isolation (Docker or Podman)
+actly .github/workflows/ci.yml --container-runtime=auto
+actly .github/workflows/ci.yml --container-runtime=docker --container-image=node:20-alpine
+actly .github/workflows/ci.yml --container-runtime=podman --container-memory=512m --allow-network
 ```
+
+### Container Isolation Flags
+
+| Flag | Description |
+|---|---|
+| `--container-runtime <name>` | `auto`\|`docker`\|`podman`\|`none` (default: `none`, i.e. host execution) |
+| `--container-image <image>` | Image to run steps in (default: `ubuntu:22.04`) |
+| `--container-timeout <ms>` | Per-step timeout in milliseconds |
+| `--container-memory <limit>` | Memory limit, e.g. `512m` |
+| `--allow-network` | Allow container network access (disabled by default) |
+
+## Workflow Features
+
+### Conditional Execution (`if:`)
+
+Jobs and steps support `if:` expressions referencing `env.*`, `inputs.*`, `secrets.*`, `steps.<id>.outputs.*`, and the functions `success()`, `failure()`, `always()`:
+
+```yaml
+steps:
+  - id: build
+    run: echo "status=ok" >> $GITHUB_OUTPUT
+  - if: ${{ steps.build.outputs.status == 'ok' }}
+    run: echo "Build succeeded"
+```
+
+### Job Dependencies (`needs:`)
+
+Jobs declaring `needs:` are executed in dependency order (topological sort):
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [...]
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps: [...]
+```
+
+### Step Outputs
+
+Steps can write to `$GITHUB_OUTPUT` to expose values to later steps via `${{ steps.<id>.outputs.<name> }}`.
+
+### Secret Masking
+
+Any value passed via `--secret` is automatically masked (`***`) wherever it appears in log output.
 
 ## Development
 
@@ -79,12 +142,12 @@ src/
 │   └── validator.ts          # Validate syntax
 ├── runner/
 │   ├── dry-run.ts            # Dry run mode
-│   ├── executor.ts           # Execute steps and remote actions
+│   ├── executor.ts           # Execute jobs/steps, if:/needs:, outputs
+│   ├── expression.ts         # ${{ ... }} expression evaluation
+│   ├── container-runtime.ts  # Docker/Podman container isolation
 │   └── action-fetcher.ts     # Fetch remote actions from GitHub
 ├── utils/
-│   ├── inputs.ts             # Handle inputs
-│   ├── secrets.ts            # Handle secrets
-│   └── logger.ts             # Logging utility
+│   └── logger.ts             # Logging utility with secret masking
 └── types/
     └── index.ts              # TypeScript types
 ```
@@ -95,7 +158,7 @@ actly now supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps
 - **JavaScript Actions** (node12, node16, node20, node22+): Executes JavaScript-based actions with Node.js
-- **Docker Actions**: Currently shows a warning (future enhancement)
+- **Docker Actions** (action type `runs.using: docker`): Currently shows a warning (future enhancement). Note: this is distinct from `--container-runtime`, which isolates `run:` steps in a container regardless of action type.
 - **Action Caching**: Downloaded actions are cached in `~/.actly/actions-cache` for faster subsequent runs
 
 ### Example with Remote Actions
