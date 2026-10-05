@@ -174,7 +174,7 @@ function expandMatrix(
  * Kahn's algorithm. Falls back to declaration order (with a warning) if a
  * cycle is detected, since that indicates an invalid workflow.
  */
-function topologicalJobOrder(
+export function topologicalJobOrder(
   jobs: Record<string, { needs?: string | string[] }>
 ): string[] {
   const jobIds = Object.keys(jobs);

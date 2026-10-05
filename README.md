@@ -6,6 +6,7 @@ A CLI tool to locally test GitHub Actions and workflows without pushing to remot
 
 - 🔍 Dry run mode for sanity checks
 - 📝 Pass inputs and secrets via CLI
+- 📐 Validate a caller workflow against a central pipeline contract (`--contract`)
 - 🔄 Support for reusable workflows and actions
 - ⛓️ Execute chained workflows and actions
 - 🚦 `if:` conditional execution for jobs and steps (supports `env.*`, `inputs.*`, `secrets.*`, `steps.*.outputs.*`, `success()`, `failure()`, `always()`)
@@ -45,6 +46,9 @@ actly .github/workflows/deploy.yml --secret TOKEN=xxx
 # Validate workflow syntax
 actly --validate .github/workflows/ci.yml
 
+# Validate a caller workflow against a central pipeline contract
+actly --contract contracts/platform-standard.yml .github/workflows/deploy.yml
+
 # Run a specific job
 actly .github/workflows/ci.yml --job build
 
@@ -82,6 +86,32 @@ actly config path                           # print the config file location
 ```
 
 Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`.
+
+### Pipeline Contracts (`--contract`)
+
+In organizations with a central repo of reusable workflows/actions, a platform team can define a minimum pipeline standard — required actions, forbidden actions, and (optionally) the order required actions must run in — and have actly check a caller's workflow against it.
+
+```yaml
+# contracts/platform-standard.yml
+ordering: relative # or "strict" (default: relative)
+required:
+  - uses: org/security-scan
+    min-version: v1.2.0
+  - uses: org/deploy
+forbidden:
+  - uses: org/legacy-deploy # forbid entirely, any version
+  - uses: org/deploy
+    version: v1 # forbid only this exact version
+```
+
+```bash
+actly --contract contracts/platform-standard.yml .github/workflows/deploy.yml
+```
+
+- Only `uses:` steps declared directly in the given workflow file are considered — in whole-workflow order, resolving job order via `needs:` and then step order within each job. Steps inside a called reusable workflow or composite action are **not** resolved/recursed into.
+- `ordering: relative` (default): required actions must appear in that relative order, with any other steps allowed in between. `ordering: strict`: required actions must run back-to-back, with no other step in between.
+- A missing required action, a required action below `min-version`, an ordering violation, or any forbidden-action match is an **error** (validation fails). A required action whose version can't be compared (e.g. pinned to a branch or SHA) is a **warning**.
+- `--contract` implies `--validate` and currently applies to workflow files only (not standalone actions, since the contract is about a job/step sequence).
 
 ## Workflow Features
 

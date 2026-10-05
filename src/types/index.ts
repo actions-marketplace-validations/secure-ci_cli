@@ -93,6 +93,33 @@ export interface ValidationResult {
   errors: ValidationError[];
 }
 
+/**
+ * A central/platform-team-authored contract describing the minimum set of
+ * actions a calling workflow must (or must not) use, and optionally the
+ * order they must run in. Used by `actly --contract <file>` to enforce
+ * organization-wide pipeline standards on top of a reusable workflow/action.
+ */
+export interface PipelineContractSpec {
+  /**
+   * 'relative' (default): required actions must appear in the given order,
+   * but other steps may run in between.
+   * 'strict': required actions must run back-to-back, with no other step
+   * (of any kind) in between.
+   */
+  ordering?: 'relative' | 'strict';
+  required?: PipelineContractEntry[];
+  forbidden?: PipelineContractEntry[];
+}
+
+export interface PipelineContractEntry {
+  /** Action reference without the version pin, e.g. "org/security-scan". */
+  uses: string;
+  /** required-only: the matched step's version must be >= this (best-effort semver compare). */
+  'min-version'?: string;
+  /** forbidden-only: forbid this exact version only; omit to forbid the action entirely. */
+  version?: string;
+}
+
 export interface ValidationError {
   path: string;
   message: string;

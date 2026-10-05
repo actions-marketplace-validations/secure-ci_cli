@@ -5,6 +5,8 @@ import { dryRun } from './runner/dry-run';
 import { executeWorkflow } from './runner/executor';
 import { validateWorkflow, validateAction } from './parser/validator';
 import { parseFile } from './parser/workflow-parser';
+import { parsePipelineContract } from './parser/pipeline-contract-parser';
+import { validatePipelineContract } from './parser/pipeline-contract-validator';
 import { logger, LogLevel } from './utils/logger';
 import {
   loadConfig,
@@ -30,6 +32,10 @@ program
   .argument('[file]', 'Path to workflow or action YAML file')
   .option('-d, --dry-run', 'Perform a dry run without executing')
   .option('-v, --validate', 'Validate the YAML file syntax')
+  .option(
+    '--contract <file>',
+    'Validate the workflow against a central pipeline contract (required/forbidden actions, ordering)'
+  )
   .option(
     '-i, --input <key=value...>',
     'Pass input values (can be used multiple times)'
@@ -97,9 +103,9 @@ program
     }
 
     try {
-      // Validate mode
-      if (options.validate) {
-        validateFile(file);
+      // Validate mode (also triggered by --contract on its own)
+      if (options.validate || options.contract) {
+        validateFile(file, options.contract);
         return;
       }
 
@@ -167,7 +173,7 @@ program
     }
   });
 
-function validateFile(filePath: string): void {
+function validateFile(filePath: string, contractFile?: string): void {
   try {
     const parsed = parseFile(filePath);
     let result;
@@ -180,8 +186,38 @@ function validateFile(filePath: string): void {
       logger.info('Validating action...');
     }
 
+    if (contractFile) {
+      logger.info(`Validating against pipeline contract: ${contractFile}`);
+      if (parsed.type !== 'workflow') {
+        result = {
+          valid: false,
+          errors: [
+            ...result.errors,
+            {
+              path: 'root',
+              message:
+                'Pipeline contracts validate job/step sequences and only apply to workflow files, not actions',
+              severity: 'error' as const
+            }
+          ]
+        };
+      } else {
+        const spec = parsePipelineContract(contractFile);
+        const contractResult = validatePipelineContract(parsed, spec);
+        result = {
+          valid: result.valid && contractResult.valid,
+          errors: [...result.errors, ...contractResult.errors]
+        };
+      }
+    }
+
     if (result.valid) {
       logger.success('Validation passed!');
+      result.errors.forEach((error) => {
+        logger.warn(
+          `  [${error.severity.toUpperCase()}] ${error.path}: ${error.message}`
+        );
+      });
     } else {
       logger.error('Validation failed:');
       result.errors.forEach((error) => {
