@@ -152,6 +152,104 @@ describe('container-runtime', () => {
 
       vi.useRealTimers();
     });
+
+    it('passes discrete argv entries and an entrypoint override when provided', async () => {
+      execMock.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
+      const child = fakeChildProcess();
+      spawnMock.mockReturnValue(child);
+
+      const runtime = await resolveContainerRuntime('docker');
+      const resultPromise = runtime?.execute({
+        image: 'my-action:latest',
+        args: ['--flag', 'value'],
+        entrypoint: '/entrypoint.sh',
+        workingDir: '/host/work',
+        exchangeDir: '/host/exchange'
+      });
+
+      child.emit('close', 0);
+      await resultPromise;
+
+      expect(spawnMock).toHaveBeenCalledWith(
+        'docker',
+        expect.arrayContaining([
+          '--entrypoint',
+          '/entrypoint.sh',
+          'my-action:latest',
+          '--flag',
+          'value'
+        ])
+      );
+    });
+  });
+
+  describe('build', () => {
+    it('invokes "<bin> build -t <tag> <contextDir>" and resolves success', async () => {
+      execMock.mockImplementation((...args: unknown[]) => {
+        const cb = args[args.length - 1] as (
+          err: unknown,
+          stdout?: string,
+          stderr?: string
+        ) => void;
+        cb(null, 'built\n', '');
+      });
+
+      const runtime = await resolveContainerRuntime('docker');
+      const result = await runtime?.build(
+        '/host/action-dir',
+        'actly-action-abc123'
+      );
+
+      expect(execMock).toHaveBeenCalledWith(
+        expect.stringContaining('docker build -t'),
+        expect.any(Function)
+      );
+      expect(result?.success).toBe(true);
+    });
+
+    it('resolves with success: false and an error message on build failure', async () => {
+      execMock.mockImplementation((...args: unknown[]) => {
+        const cmd = args[0] as string;
+        const cb = args[args.length - 1] as (err: unknown) => void;
+        if (cmd.includes('version')) {
+          cb(null);
+        } else {
+          cb(
+            Object.assign(new Error('build failed'), {
+              stdout: '',
+              stderr: 'no such file'
+            })
+          );
+        }
+      });
+
+      const runtime = await resolveContainerRuntime('docker');
+      const result = await runtime?.build(
+        '/host/action-dir',
+        'actly-action-abc123'
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.error).toBe('build failed');
+    });
+
+    it('includes a -f flag when a non-default Dockerfile name is given', async () => {
+      execMock.mockImplementation((...args: unknown[]) => {
+        const cb = args[args.length - 1] as (
+          err: unknown,
+          stdout?: string,
+          stderr?: string
+        ) => void;
+        cb(null, '', '');
+      });
+
+      const runtime = await resolveContainerRuntime('docker');
+      await runtime?.build('/host/action-dir', 'tag', 'Dockerfile.alpine');
+
+      expect(execMock).toHaveBeenCalledWith(
+        expect.stringContaining("-f 'Dockerfile.alpine'"),
+        expect.any(Function)
+      );
+    });
   });
 });
-

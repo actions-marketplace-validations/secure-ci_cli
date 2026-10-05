@@ -5,13 +5,15 @@ import {
   WorkflowResult,
   JobResult,
   StepResult,
-  Step
+  Step,
+  ActionFile
 } from '../types';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { fetchAction } from './action-fetcher';
 import {
   createContext,
@@ -777,6 +779,163 @@ async function executeInContainer(
 }
 
 /**
+ * Execute a Docker-type action (`runs.using: docker`). Unlike `run:` steps,
+ * container isolation is mandatory here (the image *is* the action) - there
+ * is no safe host-execution fallback, so this fails the step (rather than
+ * skip-as-success) if no container runtime is available.
+ */
+async function executeDockerAction(
+  action: ActionFile,
+  actionPath: string,
+  step: Step,
+  options: RunOptions,
+  startTime: number
+): Promise<StepResult> {
+  const runtime = await resolveContainerRuntime(
+    options.containerRuntime ?? 'auto'
+  );
+  if (!runtime) {
+    logger.error(
+      `Docker action "${step.uses}" requires a container runtime (docker/podman), but none is available.`
+    );
+    return {
+      step,
+      success: false,
+      error: 'No container runtime (docker/podman) available for Docker action',
+      duration: Date.now() - startTime
+    };
+  }
+
+  const actionDir = path.dirname(actionPath);
+  const rawImage = action.runs.image;
+  if (!rawImage) {
+    return {
+      step,
+      success: false,
+      error: 'No image specified for Docker action',
+      duration: Date.now() - startTime
+    };
+  }
+
+  let image: string;
+  if (rawImage.startsWith('docker://')) {
+    image = rawImage.slice('docker://'.length);
+  } else {
+    const dockerfileRelative =
+      rawImage === 'Dockerfile' ? 'Dockerfile' : rawImage;
+    const dockerfilePath = path.join(actionDir, dockerfileRelative);
+    if (!fs.existsSync(dockerfilePath)) {
+      return {
+        step,
+        success: false,
+        error: `Dockerfile not found for action: ${dockerfilePath}`,
+        duration: Date.now() - startTime
+      };
+    }
+
+    const tag = `actly-action-${crypto.createHash('sha1').update(actionDir).digest('hex').slice(0, 12)}`;
+    logger.info(`Building Docker action image: ${action.name} (${tag})`);
+    const buildResult = await runtime.build(actionDir, tag, dockerfileRelative);
+    if (!buildResult.success) {
+      logger.error(`Docker action image build failed: ${buildResult.error}`);
+      if (buildResult.stderr) logger.error(buildResult.stderr.trim());
+      return {
+        step,
+        success: false,
+        error: `Docker action image build failed: ${buildResult.error}`,
+        duration: Date.now() - startTime
+      };
+    }
+    image = tag;
+  }
+
+  // Inputs are passed as INPUT_<NAME> env vars, matching GitHub's own
+  // convention (same one actly already uses for JS actions).
+  const mergedInputs: Record<string, string> = {};
+  const env: Record<string, string> = {};
+  if (step.with) {
+    for (const [key, value] of Object.entries(step.with)) {
+      mergedInputs[key] = String(value);
+      env[`INPUT_${key.toUpperCase().replace(/-/g, '_')}`] = String(value);
+    }
+  }
+
+  // `runs.args` may reference ${{ inputs.* }} / ${{ secrets.* }}.
+  const actionCtx = createContext({}, mergedInputs, options.secrets);
+  const args = (action.runs.args || []).map((arg) =>
+    substituteExpressions(arg, actionCtx)
+  );
+
+  logger.info(`Executing Docker action: ${action.name}`);
+
+  const exchangeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'actly-exchange-'));
+  const containerOutputPath = `${CONTAINER_EXCHANGE_DIR}/output`;
+
+  try {
+    const result = await runtime.execute({
+      image,
+      args,
+      entrypoint: action.runs.entrypoint,
+      workingDir: process.cwd(),
+      exchangeDir,
+      env: { ...env, GITHUB_OUTPUT: containerOutputPath },
+      timeoutMs: options.containerTimeoutMs,
+      memoryLimit: options.containerMemoryLimit,
+      networkDisabled: options.networkDisabled !== false
+    });
+
+    if (result.stdout) {
+      logger.info(result.stdout.trim());
+    }
+    if (result.stderr) {
+      logger[result.success ? 'warn' : 'error'](result.stderr.trim());
+    }
+
+    const outputs = parseGithubOutputFile(path.join(exchangeDir, 'output'));
+
+    if (result.timedOut) {
+      logger.error(
+        `Docker action timed out after ${options.containerTimeoutMs}ms (${runtime.name})`
+      );
+      return {
+        step,
+        success: false,
+        error: `Timed out after ${options.containerTimeoutMs}ms`,
+        output: result.stdout,
+        outputs,
+        duration: Date.now() - startTime
+      };
+    }
+
+    if (!result.success) {
+      logger.error(
+        `Docker action failed (${runtime.name}, exit code: ${result.exitCode})`
+      );
+      return {
+        step,
+        success: false,
+        error: `Command exited with code ${result.exitCode}`,
+        output: result.stdout,
+        outputs,
+        duration: Date.now() - startTime
+      };
+    }
+
+    logger.success(`Docker action completed: ${action.name}`);
+
+    return {
+      step,
+      success: true,
+      output: result.stdout,
+      outputs,
+      duration: Date.now() - startTime
+    };
+  } finally {
+    fs.rmSync(exchangeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Execute a remote action
  */
 async function executeAction(
@@ -983,14 +1142,13 @@ async function executeAction(
         };
       }
     } else if (action.runs.using === 'docker') {
-      // Docker actions not yet supported
-      logger.warn(`Docker actions not yet supported: ${step.uses}`);
-      return {
+      return await executeDockerAction(
+        action,
+        actionPath,
         step,
-        success: true,
-        output: 'Skipped - Docker actions not yet supported',
-        duration: Date.now() - startTime
-      };
+        options,
+        startTime
+      );
     } else {
       logger.warn(`Unknown action type: ${action.runs.using}`);
       return {

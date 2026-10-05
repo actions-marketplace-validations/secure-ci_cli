@@ -1,0 +1,12 @@
+name: Docker Echo Action
+description: Echoes a message via a Docker-type action
+inputs:
+  message:
+    description: 'Message to echo'
+    required: true
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - ${{ inputs.message }}

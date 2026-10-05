@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const resolveContainerRuntimeMock = vi.fn();
+const fetchActionMock = vi.fn();
 
 vi.mock('./container-runtime', async () => {
   const actual = await vi.importActual('./container-runtime');
@@ -8,6 +9,17 @@ vi.mock('./container-runtime', async () => {
     ...actual,
     resolveContainerRuntime: (...args: unknown[]) =>
       resolveContainerRuntimeMock(...args)
+  };
+});
+
+vi.mock('./action-fetcher', async () => {
+  const actual =
+    await vi.importActual<typeof import('./action-fetcher')>(
+      './action-fetcher'
+    );
+  return {
+    ...actual,
+    fetchAction: (...args: [string]) => fetchActionMock(...args)
   };
 });
 
@@ -20,9 +32,20 @@ describe('Executor', () => {
   const fixturesDir = path.join(__dirname, '../../test/fixtures');
   const tempTestDir = path.join(os.tmpdir(), 'actly-test');
 
-  beforeEach(() => {
+  beforeEach(async () => {
     resolveContainerRuntimeMock.mockReset();
     resolveContainerRuntimeMock.mockResolvedValue(null);
+
+    // Default fetchAction to the real implementation; individual tests can
+    // override with fetchActionMock.mockResolvedValueOnce(...).
+    const actual =
+      await vi.importActual<typeof import('./action-fetcher')>(
+        './action-fetcher'
+      );
+    fetchActionMock.mockReset();
+    fetchActionMock.mockImplementation((uses: string) =>
+      actual.fetchAction(uses)
+    );
   });
 
   describe('executeWorkflow', () => {
@@ -810,6 +833,116 @@ jobs:
       expect(result.jobs[0].steps.length).toBe(0);
 
       fs.unlinkSync(remoteCallerPath);
+    });
+
+    it('should build and run a Docker-type action, substituting input expressions into args', async () => {
+      const dockerActionPath = path.join(
+        fixturesDir,
+        'docker-action',
+        'action.yml'
+      );
+      fetchActionMock.mockResolvedValueOnce(dockerActionPath);
+
+      const buildMock = vi
+        .fn()
+        .mockResolvedValue({ success: true, stdout: '', stderr: '' });
+      const executeMock = vi.fn().mockResolvedValue({
+        success: true,
+        stdout: 'hello docker\n',
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        durationMs: 10
+      });
+      resolveContainerRuntimeMock.mockResolvedValue({
+        name: 'docker',
+        isAvailable: vi.fn().mockResolvedValue(true),
+        build: buildMock,
+        execute: executeMock
+      });
+
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+      const workflowPath = path.join(tempDir, 'docker-action-workflow.yml');
+      fs.writeFileSync(
+        workflowPath,
+        `
+name: Docker Action Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run docker action
+        uses: test-org/docker-action@v1
+        with:
+          message: 'hello docker'
+`
+      );
+
+      const result = await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker'
+      });
+
+      expect(buildMock).toHaveBeenCalledTimes(1);
+      expect(buildMock).toHaveBeenCalledWith(
+        path.dirname(dockerActionPath),
+        expect.stringMatching(/^actly-action-/),
+        'Dockerfile'
+      );
+
+      expect(executeMock).toHaveBeenCalledTimes(1);
+      const executeArgs = executeMock.mock.calls[0][0];
+      expect(executeArgs.args).toEqual(['hello docker']);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain('hello docker');
+
+      fs.unlinkSync(workflowPath);
+    });
+
+    it('should fail (not skip) a Docker action step when no container runtime is available', async () => {
+      const dockerActionPath = path.join(
+        fixturesDir,
+        'docker-action',
+        'action.yml'
+      );
+      fetchActionMock.mockResolvedValueOnce(dockerActionPath);
+      resolveContainerRuntimeMock.mockResolvedValue(null);
+
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+      const workflowPath = path.join(
+        tempDir,
+        'docker-action-no-runtime-workflow.yml'
+      );
+      fs.writeFileSync(
+        workflowPath,
+        `
+name: Docker Action No Runtime Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run docker action
+        uses: test-org/docker-action@v1
+        with:
+          message: 'hello docker'
+`
+      );
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(false);
+      expect(result.jobs[0].steps[0].success).toBe(false);
+      expect(result.jobs[0].steps[0].error).toContain('No container runtime');
+
+      fs.unlinkSync(workflowPath);
     });
   });
 });

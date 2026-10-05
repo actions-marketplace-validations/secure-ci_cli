@@ -14,15 +14,24 @@ const execAsync = promisify(exec);
  */
 
 export type ContainerRuntimeName = 'docker' | 'podman';
-export type ContainerRuntimePreference =
-  | 'auto'
-  | 'docker'
-  | 'podman'
-  | 'none';
+export type ContainerRuntimePreference = 'auto' | 'docker' | 'podman' | 'none';
 
 export interface ContainerExecOptions {
   image: string;
-  command: string;
+  /**
+   * Shell command string, run via `sh -c "<command>"`. Ignored if `args` is
+   * provided instead (used for Docker-type actions, which pass discrete
+   * argv entries to the image's entrypoint rather than a shell string).
+   */
+  command?: string;
+  /**
+   * Discrete argv entries passed to the container's (possibly overridden)
+   * entrypoint, for Docker-type actions' `runs.args`. Takes precedence over
+   * `command` when set.
+   */
+  args?: string[];
+  /** Overrides the image's default entrypoint, for `runs.entrypoint`. */
+  entrypoint?: string;
   /** Host directory mounted as the container's working directory. */
   workingDir: string;
   /** Host directory mounted read-write for exchanging $GITHUB_OUTPUT etc. */
@@ -31,6 +40,13 @@ export interface ContainerExecOptions {
   timeoutMs?: number;
   memoryLimit?: string;
   networkDisabled?: boolean;
+}
+
+export interface ContainerBuildResult {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  error?: string;
 }
 
 export interface ContainerExecResult {
@@ -46,6 +62,12 @@ export interface ContainerRuntime {
   readonly name: ContainerRuntimeName;
   isAvailable(): Promise<boolean>;
   execute(options: ContainerExecOptions): Promise<ContainerExecResult>;
+  /** Build an image from a Dockerfile directory, for Docker-type actions. */
+  build(
+    contextDir: string,
+    tag: string,
+    dockerfile?: string
+  ): Promise<ContainerBuildResult>;
 }
 
 const CONTAINER_WORKDIR = '/actly-workspace';
@@ -95,11 +117,20 @@ class CliContainerRuntime implements ContainerRuntime {
       args.push('--memory', options.memoryLimit);
     }
 
+    if (options.entrypoint) {
+      args.push('--entrypoint', options.entrypoint);
+    }
+
     for (const [key, value] of Object.entries(options.env || {})) {
       args.push('-e', `${key}=${value}`);
     }
 
-    args.push(options.image, 'sh', '-c', options.command);
+    args.push(options.image);
+    if (options.args) {
+      args.push(...options.args);
+    } else {
+      args.push('sh', '-c', options.command || '');
+    }
 
     return new Promise<ContainerExecResult>((resolve) => {
       const child = spawn(this.name, args);
@@ -142,6 +173,37 @@ class CliContainerRuntime implements ContainerRuntime {
       });
     });
   }
+
+  async build(
+    contextDir: string,
+    tag: string,
+    dockerfile?: string
+  ): Promise<ContainerBuildResult> {
+    const quote = (value: string): string =>
+      `'${value.replace(/'/g, "'\\''")}'`;
+    const dockerfileArg =
+      dockerfile && dockerfile !== 'Dockerfile'
+        ? `-f ${quote(dockerfile)} `
+        : '';
+    try {
+      const { stdout, stderr } = await execAsync(
+        `${this.name} build -t ${quote(tag)} ${dockerfileArg}${quote(contextDir)}`
+      );
+      return { success: true, stdout, stderr };
+    } catch (error: unknown) {
+      const err = error as {
+        message: string;
+        stdout?: string;
+        stderr?: string;
+      };
+      return {
+        success: false,
+        stdout: err.stdout || '',
+        stderr: err.stderr || '',
+        error: err.message
+      };
+    }
+  }
 }
 
 const runtimeInstances: Record<ContainerRuntimeName, ContainerRuntime> = {
@@ -180,4 +242,3 @@ export function _resetRuntimeCacheForTests(): void {
     (runtime as CliContainerRuntime)['availableCache'] = undefined;
   }
 }
-
