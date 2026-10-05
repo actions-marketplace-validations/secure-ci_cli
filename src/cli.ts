@@ -8,6 +8,7 @@ import { parseFile } from './parser/workflow-parser';
 import { parsePipelineContract } from './parser/pipeline-contract-parser';
 import { validatePipelineContract } from './parser/pipeline-contract-validator';
 import { logger, LogLevel } from './utils/logger';
+import { parseKeyValuePairs } from './utils/key-value';
 import {
   loadConfig,
   saveConfig,
@@ -118,33 +119,10 @@ program
         return;
       }
 
-      // Parse inputs
-      const inputs: Record<string, string> = {};
-      if (options.input) {
-        const inputArray = Array.isArray(options.input)
-          ? options.input
-          : [options.input];
-        inputArray.forEach((input: string) => {
-          const [key, value] = input.split('=');
-          if (key && value) {
-            inputs[key] = value;
-          }
-        });
-      }
-
-      // Parse secrets
-      const secrets: Record<string, string> = {};
-      if (options.secret) {
-        const secretArray = Array.isArray(options.secret)
-          ? options.secret
-          : [options.secret];
-        secretArray.forEach((secret: string) => {
-          const [key, value] = secret.split('=');
-          if (key && value) {
-            secrets[key] = value;
-          }
-        });
-      }
+      const inputs = parseKeyValuePairs(options.input, '--input');
+      const secrets = parseKeyValuePairs(options.secret, '--secret', {
+        redact: true
+      });
 
       // Execute the workflow/action
       const result = await executeWorkflow(file, {
