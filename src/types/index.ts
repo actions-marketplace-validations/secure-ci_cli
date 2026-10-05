@@ -119,8 +119,8 @@ export interface RunOptions {
   secrets?: Record<string, string>;
   job?: string;
   verbose?: boolean;
-  /** Container runtime to use for isolating `run:` steps. Default: 'auto'. */
-  containerRuntime?: 'auto' | 'docker' | 'podman' | 'none';
+  /** Container runtime to use for isolating `run:` steps. Default: 'docker'. */
+  containerRuntime?: 'auto' | 'docker' | 'podman' | 'containerd' | 'none';
   /** Image to run steps in when a container runtime is used. */
   containerImage?: string;
   /** Per-step execution timeout in milliseconds when containerized. */

@@ -6,15 +6,24 @@ const execAsync = promisify(exec);
 /**
  * Pluggable container runtime support for isolating `run:` steps.
  *
- * Docker and Podman both expose (near-)identical CLI surfaces (`<bin> run
- * --rm -v ... -e ... <image> sh -c "<command>"`), so a single CLI-based
- * implementation covers both engines without any extra npm dependency —
- * in line with this project's minimal-dependency philosophy. Other
- * Docker-CLI-compatible tools (e.g. `nerdctl`) can be added the same way.
+ * Docker, Podman, and containerd (via its Docker-CLI-compatible front-end,
+ * `nerdctl`) all expose (near-)identical CLI surfaces (`<bin> run --rm -v
+ * ... -e ... <image> sh -c "<command>"`), so a single CLI-based
+ * implementation covers all three engines without any extra npm
+ * dependency — in line with this project's minimal-dependency philosophy.
  */
 
-export type ContainerRuntimeName = 'docker' | 'podman';
-export type ContainerRuntimePreference = 'auto' | 'docker' | 'podman' | 'none';
+export type ContainerRuntimeName = 'docker' | 'podman' | 'containerd';
+export type ContainerRuntimePreference =
+  'auto' | 'docker' | 'podman' | 'containerd' | 'none';
+
+/** The CLI binary invoked for each runtime. `containerd` has no Docker-CLI-
+ * compatible binary of its own, so `nerdctl` is used as its front-end. */
+const RUNTIME_BINARIES: Record<ContainerRuntimeName, string> = {
+  docker: 'docker',
+  podman: 'podman',
+  containerd: 'nerdctl'
+};
 
 export interface ContainerExecOptions {
   image: string;
@@ -78,14 +87,20 @@ const PROBE_TIMEOUT_MS = 3000;
 
 class CliContainerRuntime implements ContainerRuntime {
   private availableCache: boolean | undefined;
+  private readonly binary: string;
 
-  constructor(public readonly name: ContainerRuntimeName) {}
+  constructor(public readonly name: ContainerRuntimeName) {
+    this.binary = RUNTIME_BINARIES[name];
+  }
 
   async isAvailable(): Promise<boolean> {
     if (this.availableCache !== undefined) return this.availableCache;
 
     try {
-      await execAsync(`${this.name} version --format '{{.Server.Version}}'`, {
+      // Plain `version` (no --format) to stay compatible across engines
+      // (nerdctl's version output format differs from docker/podman's);
+      // we only care whether the daemon responds, not the output.
+      await execAsync(`${this.binary} version`, {
         timeout: PROBE_TIMEOUT_MS
       });
       this.availableCache = true;
@@ -133,7 +148,7 @@ class CliContainerRuntime implements ContainerRuntime {
     }
 
     return new Promise<ContainerExecResult>((resolve) => {
-      const child = spawn(this.name, args);
+      const child = spawn(this.binary, args);
       let stdout = '';
       let stderr = '';
       let timedOut = false;
@@ -187,7 +202,7 @@ class CliContainerRuntime implements ContainerRuntime {
         : '';
     try {
       const { stdout, stderr } = await execAsync(
-        `${this.name} build -t ${quote(tag)} ${dockerfileArg}${quote(contextDir)}`
+        `${this.binary} build -t ${quote(tag)} ${dockerfileArg}${quote(contextDir)}`
       );
       return { success: true, stdout, stderr };
     } catch (error: unknown) {
@@ -208,27 +223,35 @@ class CliContainerRuntime implements ContainerRuntime {
 
 const runtimeInstances: Record<ContainerRuntimeName, ContainerRuntime> = {
   docker: new CliContainerRuntime('docker'),
-  podman: new CliContainerRuntime('podman')
+  podman: new CliContainerRuntime('podman'),
+  containerd: new CliContainerRuntime('containerd')
 };
+
+const AUTO_DETECT_ORDER: ContainerRuntimeName[] = [
+  'docker',
+  'podman',
+  'containerd'
+];
 
 /**
  * Resolve a usable container runtime according to preference:
  * - 'none' → no isolation (caller should fall back to host execution).
- * - 'docker' | 'podman' → that engine specifically, or null if unavailable.
- * - 'auto' (default) → first available of docker, then podman; null if
- *   neither is installed/running (caller falls back to host execution).
+ * - 'docker' | 'podman' | 'containerd' → that engine specifically, or null
+ *   if unavailable.
+ * - 'auto' → first available of docker, podman, then containerd; null if
+ *   none is installed/running (caller falls back to host execution).
  */
 export async function resolveContainerRuntime(
   preference: ContainerRuntimePreference = 'auto'
 ): Promise<ContainerRuntime | null> {
   if (preference === 'none') return null;
 
-  if (preference === 'docker' || preference === 'podman') {
+  if (preference !== 'auto') {
     const runtime = runtimeInstances[preference];
     return (await runtime.isAvailable()) ? runtime : null;
   }
 
-  for (const name of ['docker', 'podman'] as ContainerRuntimeName[]) {
+  for (const name of AUTO_DETECT_ORDER) {
     const runtime = runtimeInstances[name];
     if (await runtime.isAvailable()) return runtime;
   }

@@ -73,6 +73,34 @@ describe('container-runtime', () => {
       expect(runtime?.name).toBe('podman');
     });
 
+    it('auto mode falls back to containerd (nerdctl) if docker and podman are unavailable', async () => {
+      execMock.mockImplementation((cmd: string, _opts, cb) => {
+        if (cmd.startsWith('nerdctl')) {
+          cb(null, '', '');
+        } else {
+          cb(new Error('not found'));
+        }
+      });
+
+      const runtime = await resolveContainerRuntime('auto');
+
+      expect(runtime?.name).toBe('containerd');
+    });
+
+    it('returns containerd (backed by nerdctl) when explicitly requested and available', async () => {
+      execMock.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
+
+      const runtime = await resolveContainerRuntime('containerd');
+
+      expect(runtime).not.toBeNull();
+      expect(runtime?.name).toBe('containerd');
+      expect(execMock).toHaveBeenCalledWith(
+        expect.stringContaining('nerdctl version'),
+        expect.any(Object),
+        expect.any(Function)
+      );
+    });
+
     it('auto mode returns null if neither engine is available', async () => {
       execMock.mockImplementation((_cmd, _opts, cb) =>
         cb(new Error('not found'))
@@ -179,6 +207,28 @@ describe('container-runtime', () => {
           '--flag',
           'value'
         ])
+      );
+    });
+
+    it('spawns the "nerdctl" binary for the containerd runtime', async () => {
+      execMock.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
+      const child = fakeChildProcess();
+      spawnMock.mockReturnValue(child);
+
+      const runtime = await resolveContainerRuntime('containerd');
+      const resultPromise = runtime?.execute({
+        image: 'ubuntu:22.04',
+        command: 'echo hi',
+        workingDir: '/host/work',
+        exchangeDir: '/host/exchange'
+      });
+
+      child.emit('close', 0);
+      await resultPromise;
+
+      expect(spawnMock).toHaveBeenCalledWith(
+        'nerdctl',
+        expect.arrayContaining(['run', '--rm', 'ubuntu:22.04'])
       );
     });
   });

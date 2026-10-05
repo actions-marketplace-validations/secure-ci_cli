@@ -1,15 +1,25 @@
 #!/usr/bin/env node
 
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { dryRun } from './runner/dry-run';
 import { executeWorkflow } from './runner/executor';
 import { validateWorkflow, validateAction } from './parser/validator';
 import { parseFile } from './parser/workflow-parser';
 import { logger, LogLevel } from './utils/logger';
+import {
+  loadConfig,
+  saveConfig,
+  getConfigFilePath,
+  getDefaultContainerRuntime,
+  isValidConfigKey,
+  parseConfigValue,
+  CONFIG_KEYS
+} from './config';
 import * as fs from 'fs';
 import * as path from 'path';
 
 const program = new Command();
+const globalConfig = loadConfig();
 
 program
   .name('actly')
@@ -31,26 +41,35 @@ program
   .option('-j, --job <name>', 'Run a specific job')
   .option('--verbose', 'Enable verbose logging')
   .option('-l, --list', 'List available workflows in .github/workflows/')
-  .option(
-    '--container-runtime <name>',
-    'Isolate run: steps in a container: auto|docker|podman|none (default: none)',
-    'none'
+  .addOption(
+    new Option(
+      '--container-runtime <name>',
+      `Isolate run: steps in a container (default: "${getDefaultContainerRuntime(globalConfig)}", from ~/.actly/config.yml or built-in default; use "none" for the old host-execution default)`
+    )
+      .choices(['auto', 'docker', 'podman', 'containerd', 'none'])
+      .default(getDefaultContainerRuntime(globalConfig))
   )
   .option(
     '--container-image <image>',
-    'Container image to run steps in (default: ubuntu:22.04)'
+    'Container image to run steps in (default: ubuntu:22.04)',
+    globalConfig['container-image']
   )
   .option(
     '--container-timeout <ms>',
-    'Per-step timeout in milliseconds when containerized'
+    'Per-step timeout in milliseconds when containerized',
+    globalConfig['container-timeout'] !== undefined
+      ? String(globalConfig['container-timeout'])
+      : undefined
   )
   .option(
     '--container-memory <limit>',
-    'Memory limit for the container, e.g. 512m'
+    'Memory limit for the container, e.g. 512m',
+    globalConfig['container-memory']
   )
   .option(
     '--allow-network',
-    'Allow container network access (disabled by default)'
+    'Allow container network access (disabled by default)',
+    globalConfig['allow-network'] ?? false
   )
   .action(async (file, options) => {
     // Set log level
@@ -210,5 +229,79 @@ function listWorkflows(): void {
     }
   });
 }
+
+const configCmd = program
+  .command('config')
+  .description('Manage actly global configuration (~/.actly/config.yml)');
+
+configCmd
+  .command('path')
+  .description('Print the path to the global config file')
+  .action(() => {
+    logger.info(getConfigFilePath());
+  });
+
+configCmd
+  .command('list')
+  .description('List effective config values (config file + built-in defaults)')
+  .action(() => {
+    const config = loadConfig();
+    for (const key of CONFIG_KEYS) {
+      const value = config[key];
+      logger.info(`${key}=${value === undefined ? '(unset)' : value}`);
+    }
+  });
+
+configCmd
+  .command('get <key>')
+  .description('Print the value of a config key')
+  .action((key: string) => {
+    if (!isValidConfigKey(key)) {
+      logger.error(
+        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}`
+      );
+      process.exit(1);
+    }
+    const value = loadConfig()[key];
+    logger.info(value === undefined ? '(unset)' : String(value));
+  });
+
+configCmd
+  .command('set <key> <value>')
+  .description('Set a config key and persist it to the global config file')
+  .action((key: string, value: string) => {
+    if (!isValidConfigKey(key)) {
+      logger.error(
+        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}`
+      );
+      process.exit(1);
+    }
+    try {
+      const parsedValue = parseConfigValue(key, value);
+      const config = loadConfig();
+      config[key] = parsedValue as never;
+      saveConfig(config);
+      logger.success(`Set ${key}=${parsedValue} in ${getConfigFilePath()}`);
+    } catch (error) {
+      logger.error(error instanceof Error ? error.message : 'Invalid value');
+      process.exit(1);
+    }
+  });
+
+configCmd
+  .command('unset <key>')
+  .description('Remove a config key, reverting to the built-in default')
+  .action((key: string) => {
+    if (!isValidConfigKey(key)) {
+      logger.error(
+        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}`
+      );
+      process.exit(1);
+    }
+    const config = loadConfig();
+    delete config[key];
+    saveConfig(config);
+    logger.success(`Unset ${key} in ${getConfigFilePath()}`);
+  });
 
 program.parse();

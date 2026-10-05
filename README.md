@@ -59,13 +59,29 @@ actly .github/workflows/ci.yml --container-runtime=podman --container-memory=512
 
 ### Container Isolation Flags
 
-| Flag | Description |
-|---|---|
-| `--container-runtime <name>` | `auto`\|`docker`\|`podman`\|`none` (default: `none`, i.e. host execution) |
-| `--container-image <image>` | Image to run steps in (default: `ubuntu:22.04`) |
-| `--container-timeout <ms>` | Per-step timeout in milliseconds |
-| `--container-memory <limit>` | Memory limit, e.g. `512m` |
-| `--allow-network` | Allow container network access (disabled by default) |
+| Flag                         | Description                                                                                                                                                |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--container-runtime <name>` | `auto`\|`docker`\|`podman`\|`containerd`\|`none` (default: `docker`, overridable via `~/.actly/config.yml`; use `none` for the old host-execution default) |
+| `--container-image <image>`  | Image to run steps in (default: `ubuntu:22.04`)                                                                                                            |
+| `--container-timeout <ms>`   | Per-step timeout in milliseconds                                                                                                                           |
+| `--container-memory <limit>` | Memory limit, e.g. `512m`                                                                                                                                  |
+| `--allow-network`            | Allow container network access (disabled by default)                                                                                                       |
+
+`containerd` is driven via its Docker-CLI-compatible front-end, [`nerdctl`](https://github.com/containerd/nerdctl).
+
+### Global Configuration
+
+actly reads defaults from `~/.actly/config.yml` (created on first `actly config set`, or editable by hand). Config keys match the CLI flag names (kebab-case, minus the leading `--`). CLI flags always take precedence over the config file.
+
+```bash
+actly config set container-runtime podman   # persist a default
+actly config get container-runtime
+actly config list
+actly config unset container-runtime        # revert to the built-in default (docker)
+actly config path                           # print the config file location
+```
+
+Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`.
 
 ## Workflow Features
 
@@ -158,7 +174,7 @@ actly now supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps
 - **JavaScript Actions** (node12, node16, node20, node22+): Executes JavaScript-based actions with Node.js
-- **Docker Actions** (action type `runs.using: docker`): Currently shows a warning (future enhancement). Note: this is distinct from `--container-runtime`, which isolates `run:` steps in a container regardless of action type.
+- **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it directly. Note: this is distinct from `--container-runtime`, which isolates `run:` steps in a container regardless of action type.
 - **Action Caching**: Downloaded actions are cached in `~/.actly/actions-cache` for faster subsequent runs
 
 ### Example with Remote Actions
