@@ -1,4 +1,8 @@
-import { createContext, evaluateCondition } from './expression';
+import {
+  createContext,
+  evaluateCondition,
+  substituteExpressions
+} from './expression';
 
 describe('evaluateCondition', () => {
   it('returns true when condition is undefined', () => {
@@ -89,5 +93,52 @@ describe('evaluateCondition', () => {
     expect(evaluateCondition('inputs.a ===', ctx)).toBe(true);
     expect(evaluateCondition('unknownFunc()', ctx)).toBe(true);
   });
+
+  it('resolves matrix values', () => {
+    const ctx = createContext({}, {}, {}, {}, { node: '18' });
+    expect(evaluateCondition("matrix.node == '18'", ctx)).toBe(true);
+    expect(evaluateCondition("matrix.node == '16'", ctx)).toBe(false);
+  });
+
+  it('resolves github context values', () => {
+    const ctx = createContext({}, {}, {}, { ref_name: 'main' });
+    expect(evaluateCondition("github.ref_name == 'main'", ctx)).toBe(true);
+  });
 });
 
+describe('substituteExpressions', () => {
+  it('replaces env/inputs/secrets/matrix/github references', () => {
+    const ctx = createContext(
+      { FOO: 'bar' },
+      { name: 'World' },
+      { TOKEN: 'secret' },
+      { sha: 'abc123' },
+      { node: '18' }
+    );
+    expect(substituteExpressions('Hello ${{ inputs.name }}', ctx)).toBe(
+      'Hello World'
+    );
+    expect(substituteExpressions('env=${{ env.FOO }}', ctx)).toBe('env=bar');
+    expect(substituteExpressions('token=${{ secrets.TOKEN }}', ctx)).toBe(
+      'token=secret'
+    );
+    expect(substituteExpressions('node=${{ matrix.node }}', ctx)).toBe(
+      'node=18'
+    );
+    expect(substituteExpressions('sha=${{ github.sha }}', ctx)).toBe(
+      'sha=abc123'
+    );
+  });
+
+  it('replaces unresolved references with an empty string', () => {
+    const ctx = createContext();
+    expect(substituteExpressions('value=${{ inputs.missing }}', ctx)).toBe(
+      'value='
+    );
+  });
+
+  it('leaves non-expression text untouched', () => {
+    const ctx = createContext();
+    expect(substituteExpressions('plain text', ctx)).toBe('plain text');
+  });
+});

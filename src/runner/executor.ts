@@ -17,8 +17,11 @@ import {
   createContext,
   evaluateCondition,
   resolveExpressionValue,
-  ExpressionContext
+  substituteExpressions,
+  ExpressionContext,
+  GithubContext
 } from './expression';
+import { execSync } from 'child_process';
 import {
   resolveContainerRuntime,
   ContainerRuntime,
@@ -81,6 +84,90 @@ function parseGithubOutputFile(filePath: string): Record<string, string> {
 }
 
 /**
+ * Best-effort local git lookup, used to populate `github.sha` / `github.ref`.
+ * Returns undefined if git isn't available or the directory isn't a repo.
+ */
+function tryGit(command: string, cwd: string): string | undefined {
+  try {
+    return execSync(command, { cwd, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Build a (best-effort, local-only) `github.*` context object. Real GitHub
+ * Actions populates this from the live Actions run; locally we fall back to
+ * `GITHUB_*` environment variables (if the user has set them) and local git
+ * state, matching act's approach of approximating the context for local runs.
+ */
+function buildGithubContext(
+  workflowName: string,
+  jobId: string,
+  cwd: string
+): GithubContext {
+  const env = process.env;
+  const sha = env.GITHUB_SHA || tryGit('git rev-parse HEAD', cwd) || '';
+  const ref =
+    env.GITHUB_REF ||
+    (() => {
+      const branch = tryGit('git rev-parse --abbrev-ref HEAD', cwd);
+      return branch ? `refs/heads/${branch}` : '';
+    })();
+  const refName =
+    env.GITHUB_REF_NAME || ref.replace(/^refs\/(heads|tags)\//, '');
+
+  return {
+    workflow: workflowName,
+    job: jobId,
+    sha,
+    ref,
+    ref_name: refName,
+    event_name: env.GITHUB_EVENT_NAME || 'workflow_dispatch',
+    actor: env.GITHUB_ACTOR || os.userInfo().username,
+    repository: env.GITHUB_REPOSITORY || path.basename(cwd),
+    repository_owner: env.GITHUB_REPOSITORY_OWNER || '',
+    run_id: env.GITHUB_RUN_ID || String(Date.now()),
+    run_number: env.GITHUB_RUN_NUMBER || '1',
+    run_attempt: env.GITHUB_RUN_ATTEMPT || '1',
+    workspace: env.GITHUB_WORKSPACE || cwd,
+    server_url: env.GITHUB_SERVER_URL || 'https://github.com',
+    api_url: env.GITHUB_API_URL || 'https://api.github.com'
+  };
+}
+
+/**
+ * Expand a job's `strategy.matrix` into the list of concrete variable
+ * combinations to run the job with, via a cartesian product of each axis'
+ * values. `include`/`exclude` entries are not yet supported.
+ */
+function expandMatrix(
+  matrix: Record<string, unknown> | undefined
+): Array<Record<string, unknown>> {
+  if (!matrix) return [{}];
+
+  const axes = Object.entries(matrix).filter(
+    ([key]) => key !== 'include' && key !== 'exclude'
+  );
+  if (axes.length === 0) return [{}];
+
+  let combinations: Array<Record<string, unknown>> = [{}];
+  for (const [key, rawValues] of axes) {
+    const values = Array.isArray(rawValues) ? rawValues : [rawValues];
+    const next: Array<Record<string, unknown>> = [];
+    for (const combo of combinations) {
+      for (const value of values) {
+        next.push({ ...combo, [key]: value });
+      }
+    }
+    combinations = next;
+  }
+  return combinations;
+}
+
+/**
  * Order job IDs so dependencies (via `needs`) run before dependents, using
  * Kahn's algorithm. Falls back to declaration order (with a warning) if a
  * cycle is detected, since that indicates an invalid workflow.
@@ -126,6 +213,83 @@ function topologicalJobOrder(
   }
 
   return ordered;
+}
+
+/**
+ * Execute a reusable workflow called via `jobs.<id>.uses:`. Only local
+ * workflow paths (e.g. `./.github/workflows/reusable.yml`) are supported;
+ * remote references (`owner/repo/.github/workflows/x.yml@ref`) are warned
+ * and skipped, matching the previous behavior for that case.
+ */
+async function executeReusableWorkflowJob(
+  jobId: string,
+  job: {
+    uses?: string;
+    with?: Record<string, string | number | boolean>;
+    secrets?: Record<string, string> | 'inherit';
+  },
+  workflowDir: string,
+  options: RunOptions
+): Promise<JobResult> {
+  const startTime = Date.now();
+  const uses = job.uses as string;
+
+  if (!uses.startsWith('.')) {
+    logger.warn(
+      `Skipping reusable workflow call: ${uses} (only local workflow paths are supported)`
+    );
+    return {
+      job: jobId,
+      success: true,
+      steps: [],
+      duration: Date.now() - startTime
+    };
+  }
+
+  const resolvedPath = path.resolve(workflowDir, uses);
+  if (!fs.existsSync(resolvedPath)) {
+    logger.error(`Reusable workflow not found: ${resolvedPath}`);
+    return {
+      job: jobId,
+      success: false,
+      steps: [],
+      duration: Date.now() - startTime
+    };
+  }
+
+  const inputs: Record<string, string> = {};
+  for (const [key, value] of Object.entries(job.with || {})) {
+    inputs[key] = String(value);
+  }
+
+  let secrets: Record<string, string> = {};
+  if (job.secrets === 'inherit') {
+    secrets = { ...(options.secrets || {}) };
+  } else if (job.secrets) {
+    const callerCtx = createContext({}, options.inputs, options.secrets);
+    for (const [key, value] of Object.entries(job.secrets)) {
+      const resolved = resolveExpressionValue(value, callerCtx);
+      secrets[key] = resolved === undefined ? value : String(resolved);
+    }
+  }
+
+  logger.step(`Executing reusable workflow: ${uses} (job: ${jobId})`);
+
+  const subResult = await executeWorkflow(resolvedPath, {
+    ...options,
+    inputs,
+    secrets,
+    job: undefined
+  });
+
+  const steps = subResult.jobs.flatMap((j) => j.steps);
+
+  return {
+    job: jobId,
+    success: subResult.success,
+    steps,
+    duration: Date.now() - startTime
+  };
 }
 
 /**
@@ -175,84 +339,128 @@ export async function executeWorkflow(
           }
         }
 
-        // Handle reusable workflow calls
-        if (job.uses) {
-          logger.warn(
-            `Skipping reusable workflow call: ${job.uses} (not yet implemented)`
-          );
-          continue;
-        }
-
-        const jobCtx = createContext(
-          { ...(parsed.file.env || {}), ...(job.env || {}) },
-          options.inputs,
-          options.secrets
+        const workflowDir = path.dirname(filePath);
+        const github = buildGithubContext(
+          parsed.file.name,
+          jobId,
+          process.cwd()
         );
 
-        if (!evaluateCondition(job.if, jobCtx)) {
-          logger.info(`Skipping job: ${jobId} (condition not met)`);
+        // Handle reusable workflow calls
+        if (job.uses) {
+          const reusableResult = await executeReusableWorkflowJob(
+            jobId,
+            job,
+            workflowDir,
+            options
+          );
+          jobs.push(reusableResult);
+          jobSucceeded.set(jobId, reusableResult.success);
+          if (reusableResult.success) {
+            logger.success(`Job ${jobId} completed successfully`);
+          }
           continue;
         }
 
-        logger.step(`Executing job: ${jobId}`);
-        const jobStartTime = Date.now();
-        const stepResults: StepResult[] = [];
+        const matrixCombinations = expandMatrix(job.strategy?.matrix);
+        const failFast = job.strategy?.['fail-fast'] !== false;
+        let matrixFailed = false;
 
-        // Execute each step
-        for (const step of job.steps || []) {
-          const stepCtx: ExpressionContext = {
-            ...jobCtx,
-            env: { ...jobCtx.env, ...(step.env || {}) }
-          };
-
-          if (!evaluateCondition(step.if, stepCtx)) {
+        for (const matrixValues of matrixCombinations) {
+          if (matrixFailed && failFast) {
             logger.info(
-              `Skipping step: ${step.name || step.id || 'unnamed'} (condition not met)`
+              `Skipping remaining matrix jobs for ${jobId} (fail-fast)`
             );
-            const skippedResult: StepResult = {
-              step,
-              success: true,
-              outcome: 'skipped',
-              output: 'Skipped: condition not met',
-              duration: 0
-            };
-            stepResults.push(skippedResult);
-            if (step.id) {
-              jobCtx.steps[step.id] = { outcome: 'skipped', outputs: {} };
-            }
+            break;
+          }
+
+          const matrixSuffix =
+            matrixCombinations.length > 1
+              ? ` (${Object.entries(matrixValues)
+                  .map(([k, v]) => `${k}: ${v}`)
+                  .join(', ')})`
+              : '';
+          const jobLabel = `${jobId}${matrixSuffix}`;
+
+          const jobCtx = createContext(
+            { ...(parsed.file.env || {}), ...(job.env || {}) },
+            options.inputs,
+            options.secrets,
+            github,
+            matrixValues
+          );
+
+          if (!evaluateCondition(job.if, jobCtx)) {
+            logger.info(`Skipping job: ${jobLabel} (condition not met)`);
             continue;
           }
 
-          const stepResult = await executeStep(step, options);
-          stepResults.push(stepResult);
+          logger.step(`Executing job: ${jobLabel}`);
+          const jobStartTime = Date.now();
+          const stepResults: StepResult[] = [];
 
-          if (step.id) {
-            jobCtx.steps[step.id] = {
-              outcome: stepResult.success ? 'success' : 'failure',
-              outputs: stepResult.outputs || {}
+          // Execute each step
+          for (const step of job.steps || []) {
+            const stepCtx: ExpressionContext = {
+              ...jobCtx,
+              env: { ...jobCtx.env, ...(step.env || {}) }
             };
+
+            if (!evaluateCondition(step.if, stepCtx)) {
+              logger.info(
+                `Skipping step: ${step.name || step.id || 'unnamed'} (condition not met)`
+              );
+              const skippedResult: StepResult = {
+                step,
+                success: true,
+                outcome: 'skipped',
+                output: 'Skipped: condition not met',
+                duration: 0
+              };
+              stepResults.push(skippedResult);
+              if (step.id) {
+                jobCtx.steps[step.id] = { outcome: 'skipped', outputs: {} };
+              }
+              continue;
+            }
+
+            const stepResult = await executeStep(step, options, stepCtx);
+            stepResults.push(stepResult);
+
+            if (step.id) {
+              jobCtx.steps[step.id] = {
+                outcome: stepResult.success ? 'success' : 'failure',
+                outputs: stepResult.outputs || {}
+              };
+            }
+
+            if (!stepResult.success) {
+              jobCtx.jobFailed = true;
+            }
+
+            if (!stepResult.success && !step['continue-on-error']) {
+              logger.error(`Step failed: ${step.name || 'unnamed'}`);
+              break;
+            }
           }
 
-          if (!stepResult.success) {
-            jobCtx.jobFailed = true;
-          }
+          const jobSuccess = stepResults.every(
+            (s) => s.success || s.step['continue-on-error']
+          );
 
-          if (!stepResult.success && !step['continue-on-error']) {
-            logger.error(`Step failed: ${step.name || 'unnamed'}`);
-            break;
+          jobs.push({
+            job: jobLabel,
+            success: jobSuccess,
+            steps: stepResults,
+            duration: Date.now() - jobStartTime
+          });
+
+          if (!jobSuccess) {
+            matrixFailed = true;
           }
         }
 
-        const jobSuccess = stepResults.every(
-          (s) => s.success || s.step['continue-on-error']
-        );
-
-        jobs.push({
-          job: jobId,
-          success: jobSuccess,
-          steps: stepResults,
-          duration: Date.now() - jobStartTime
-        });
+        const jobSuccess = !matrixFailed;
         jobSucceeded.set(jobId, jobSuccess);
 
         if (jobSuccess) {
@@ -330,7 +538,8 @@ export async function executeWorkflow(
  */
 async function executeStep(
   step: Step,
-  options: RunOptions
+  options: RunOptions,
+  ctx?: ExpressionContext
 ): Promise<StepResult> {
   const startTime = Date.now();
 
@@ -346,26 +555,31 @@ async function executeStep(
 
     // Handle 'run' commands
     if (step.run) {
-      // Replace basic environment variables
       let command = step.run;
 
-      // Replace inputs if provided
-      if (options.inputs) {
-        for (const [key, value] of Object.entries(options.inputs)) {
-          command = command.replace(
-            new RegExp(`\\$\\{\\{\\s*inputs\\.${key}\\s*\\}\\}`, 'g'),
-            value
-          );
+      if (ctx) {
+        // Resolve all ${{ }} expressions (env/inputs/secrets/steps/
+        // github/matrix) against the full step context.
+        command = substituteExpressions(command, ctx);
+      } else {
+        // No context available (e.g. action steps run outside a job) -
+        // fall back to direct inputs/secrets substitution.
+        if (options.inputs) {
+          for (const [key, value] of Object.entries(options.inputs)) {
+            command = command.replace(
+              new RegExp(`\\$\\{\\{\\s*inputs\\.${key}\\s*\\}\\}`, 'g'),
+              value
+            );
+          }
         }
-      }
 
-      // Replace secrets if provided
-      if (options.secrets) {
-        for (const [key, value] of Object.entries(options.secrets)) {
-          command = command.replace(
-            new RegExp(`\\$\\{\\{\\s*secrets\\.${key}\\s*\\}\\}`, 'g'),
-            value
-          );
+        if (options.secrets) {
+          for (const [key, value] of Object.entries(options.secrets)) {
+            command = command.replace(
+              new RegExp(`\\$\\{\\{\\s*secrets\\.${key}\\s*\\}\\}`, 'g'),
+              value
+            );
+          }
         }
       }
 
@@ -487,9 +701,7 @@ async function executeInContainer(
   command: string,
   startTime: number
 ): Promise<StepResult> {
-  const exchangeDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'actly-exchange-')
-  );
+  const exchangeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'actly-exchange-'));
   const containerOutputPath = `${CONTAINER_EXCHANGE_DIR}/output`;
 
   try {
@@ -662,7 +874,11 @@ async function executeAction(
           inputs: mergedInputs
         };
 
-        const stepResult = await executeStep(compositeStep, stepOptions);
+        const stepResult = await executeStep(
+          compositeStep,
+          stepOptions,
+          stepCtx
+        );
 
         if (compositeStep.id) {
           actionCtx.steps[compositeStep.id] = {
@@ -680,7 +896,6 @@ async function executeAction(
             duration: Date.now() - startTime
           };
         }
-
       }
 
       // Resolve the action's declared outputs (e.g.

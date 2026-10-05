@@ -8,7 +8,11 @@ import { logger } from '../utils/logger';
  * failure()/always()/cancelled(), ==, !=, &&, ||, !, parentheses, and
  * string/number/boolean literals.
  *
- * Not supported (yet): contains(), format(), hashFiles(), github.*, matrix.*.
+ * Supports env/inputs/secrets/steps/github/matrix member access, success()/
+ * failure()/always()/cancelled(), ==, !=, &&, ||, !, parentheses, and
+ * string/number/boolean literals.
+ *
+ * Not supported (yet): contains(), format(), hashFiles().
  */
 
 export interface StepOutcomeInfo {
@@ -16,20 +20,32 @@ export interface StepOutcomeInfo {
   outputs: Record<string, string>;
 }
 
+/**
+ * Subset of the `github` context object exposed by GitHub Actions.
+ * https://docs.github.com/en/actions/learn-github-actions/contexts#github-context
+ */
+export interface GithubContext {
+  [key: string]: string | undefined;
+}
+
 export interface ExpressionContext {
   env: Record<string, string>;
   inputs: Record<string, string>;
   secrets: Record<string, string>;
   steps: Record<string, StepOutcomeInfo>;
+  github: GithubContext;
+  matrix: Record<string, unknown>;
   jobFailed: boolean;
 }
 
 export function createContext(
   env: Record<string, string> = {},
   inputs: Record<string, string> = {},
-  secrets: Record<string, string> = {}
+  secrets: Record<string, string> = {},
+  github: GithubContext = {},
+  matrix: Record<string, unknown> = {}
 ): ExpressionContext {
-  return { env, inputs, secrets, steps: {}, jobFailed: false };
+  return { env, inputs, secrets, steps: {}, github, matrix, jobFailed: false };
 }
 
 type Token =
@@ -164,6 +180,10 @@ function resolveChain(parts: string[], ctx: ExpressionContext): unknown {
       if (field === 'outputs' && outputKey) return step.outputs[outputKey];
       return undefined;
     }
+    case 'github':
+      return rest.length === 1 ? ctx.github[rest[0]] : undefined;
+    case 'matrix':
+      return rest.length === 1 ? ctx.matrix[rest[0]] : undefined;
     default:
       return undefined;
   }
@@ -213,7 +233,10 @@ class Parser {
 
   private parseOr(): unknown {
     let left = this.parseAnd();
-    while (this.peek().type === 'op' && (this.peek() as { value: string }).value === '||') {
+    while (
+      this.peek().type === 'op' &&
+      (this.peek() as { value: string }).value === '||'
+    ) {
       this.next();
       const right = this.parseAnd();
       left = toBoolean(left) || toBoolean(right);
@@ -223,7 +246,10 @@ class Parser {
 
   private parseAnd(): unknown {
     let left = this.parseEquality();
-    while (this.peek().type === 'op' && (this.peek() as { value: string }).value === '&&') {
+    while (
+      this.peek().type === 'op' &&
+      (this.peek() as { value: string }).value === '&&'
+    ) {
       this.next();
       const right = this.parseEquality();
       left = toBoolean(left) && toBoolean(right);
@@ -247,7 +273,10 @@ class Parser {
   }
 
   private parseUnary(): unknown {
-    if (this.peek().type === 'op' && (this.peek() as { value: string }).value === '!') {
+    if (
+      this.peek().type === 'op' &&
+      (this.peek() as { value: string }).value === '!'
+    ) {
       this.next();
       return !toBoolean(this.parseUnary());
     }
@@ -333,6 +362,31 @@ export function resolveExpressionValue(
 }
 
 /**
+ * Replace every `${{ expr }}` occurrence within a string with its resolved
+ * value. Used for substituting env/inputs/secrets/steps/github/matrix
+ * references inside `run:` command text. Expressions that fail to resolve
+ * are left as `undefined` -> empty string, matching GitHub Actions behavior
+ * for unresolved references.
+ */
+export function substituteExpressions(
+  input: string,
+  ctx: ExpressionContext
+): string {
+  return input.replace(/\$\{\{([\s\S]*?)\}\}/g, (full, inner: string) => {
+    try {
+      const tokens = tokenize(inner.trim());
+      const value = new Parser(tokens, ctx).parseExpression();
+      return value === undefined ? '' : String(value);
+    } catch (error) {
+      logger.warn(
+        `Failed to resolve expression "${full}": ${error instanceof Error ? error.message : 'unknown error'}.`
+      );
+      return full;
+    }
+  });
+}
+
+/**
  * Evaluate an `if:` condition string against the given context.
  * Returns true when the condition is undefined/empty, or when it fails to
  * parse (fails open, with a warning, to avoid unexpectedly skipping steps).
@@ -359,4 +413,3 @@ export function evaluateCondition(
     return true;
   }
 }
-

@@ -323,10 +323,7 @@ jobs:
         fs.mkdirSync(tempDir, { recursive: true });
       }
 
-      const ifJobWorkflowPath = path.join(
-        tempDir,
-        'if-skip-job-workflow.yml'
-      );
+      const ifJobWorkflowPath = path.join(tempDir, 'if-skip-job-workflow.yml');
       fs.writeFileSync(
         ifJobWorkflowPath,
         `
@@ -628,5 +625,191 @@ jobs:
       // Cleanup
       fs.unlinkSync(compositeActionWorkflowPath);
     }, 60000); // 60 second timeout for network and execution
+
+    it('should run a job once per matrix combination', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const matrixWorkflowPath = path.join(tempDir, 'matrix-workflow.yml');
+      fs.writeFileSync(
+        matrixWorkflowPath,
+        `
+name: Matrix Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [16, 18]
+        os: [linux]
+    steps:
+      - name: Print matrix
+        run: echo "node=\${{ matrix.node }} os=\${{ matrix.os }}"
+`
+      );
+
+      const result = await executeWorkflow(matrixWorkflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs.length).toBe(2);
+      expect(result.jobs[0].job).toContain('node: 16');
+      expect(result.jobs[1].job).toContain('node: 18');
+      expect(result.jobs[0].steps[0].output).toContain('node=16 os=linux');
+      expect(result.jobs[1].steps[0].output).toContain('node=18 os=linux');
+
+      fs.unlinkSync(matrixWorkflowPath);
+    });
+
+    it('should stop remaining matrix combinations on failure when fail-fast is enabled', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const matrixFailWorkflowPath = path.join(
+        tempDir,
+        'matrix-fail-workflow.yml'
+      );
+      fs.writeFileSync(
+        matrixFailWorkflowPath,
+        `
+name: Matrix Fail Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [16, 18]
+    steps:
+      - name: Fail on 16
+        run: '[ "\${{ matrix.node }}" = "18" ] || exit 1'
+`
+      );
+
+      const result = await executeWorkflow(matrixFailWorkflowPath);
+
+      expect(result.success).toBe(false);
+      expect(result.jobs.length).toBe(1);
+      expect(result.jobs[0].job).toContain('node: 16');
+
+      fs.unlinkSync(matrixFailWorkflowPath);
+    });
+
+    it('should expose github context values in run commands', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const githubCtxWorkflowPath = path.join(
+        tempDir,
+        'github-context-workflow.yml'
+      );
+      fs.writeFileSync(
+        githubCtxWorkflowPath,
+        `
+name: Github Context Workflow
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print workflow name
+        run: echo "workflow=\${{ github.workflow }} job=\${{ github.job }}"
+`
+      );
+
+      const result = await executeWorkflow(githubCtxWorkflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain(
+        'workflow=Github Context Workflow job=test'
+      );
+
+      fs.unlinkSync(githubCtxWorkflowPath);
+    });
+
+    it('should execute a local reusable workflow call', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const reusableWorkflowPath = path.join(tempDir, 'reusable-target.yml');
+      fs.writeFileSync(
+        reusableWorkflowPath,
+        `
+name: Reusable Target
+on:
+  workflow_call:
+    inputs:
+      username:
+        required: true
+        type: string
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Greet
+        run: echo "Hello \${{ inputs.username }}"
+`
+      );
+
+      const callerWorkflowPath = path.join(tempDir, 'reusable-caller.yml');
+      fs.writeFileSync(
+        callerWorkflowPath,
+        `
+name: Reusable Caller
+on: push
+jobs:
+  call-reusable:
+    uses: ./reusable-target.yml
+    with:
+      username: test-user
+`
+      );
+
+      const result = await executeWorkflow(callerWorkflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs.length).toBe(1);
+      expect(result.jobs[0].job).toBe('call-reusable');
+      expect(result.jobs[0].steps[0].output).toContain('Hello test-user');
+
+      fs.unlinkSync(reusableWorkflowPath);
+      fs.unlinkSync(callerWorkflowPath);
+    });
+
+    it('should warn and skip remote reusable workflow calls', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const remoteCallerPath = path.join(tempDir, 'remote-reusable-caller.yml');
+      fs.writeFileSync(
+        remoteCallerPath,
+        `
+name: Remote Reusable Caller
+on: push
+jobs:
+  call-remote:
+    uses: some-org/some-repo/.github/workflows/reusable.yml@main
+`
+      );
+
+      const result = await executeWorkflow(remoteCallerPath);
+
+      expect(result.jobs.length).toBe(1);
+      expect(result.jobs[0].job).toBe('call-remote');
+      expect(result.jobs[0].success).toBe(true);
+      expect(result.jobs[0].steps.length).toBe(0);
+
+      fs.unlinkSync(remoteCallerPath);
+    });
   });
 });
