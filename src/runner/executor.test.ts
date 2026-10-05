@@ -1152,5 +1152,90 @@ jobs:
       expect(result.success).toBe(true);
       expect(result.jobs[0].steps[0].outputs).toEqual({ said: 'hi-there' });
     });
+
+    it('does not leak workflow inputs into a composite action and applies input defaults', async () => {
+      const actionPath = writeAction('composite-inputs', {
+        'action.yml': `
+name: Composite Inputs
+description: Echo inputs
+inputs:
+  greeting:
+    description: greeting
+    default: hello-\${{ github.event_name }}
+  q:
+    description: shadowed by a workflow input of the same name
+outputs:
+  said:
+    value: \${{ steps.say.outputs.said }}
+runs:
+  using: composite
+  steps:
+    - id: say
+      shell: bash
+      run: echo "said=\${{ inputs.greeting }}/\${{ inputs.q }}/$CALLER" >> $GITHUB_OUTPUT
+`
+      });
+      fetchActionMock.mockResolvedValueOnce(actionPath);
+
+      const workflowPath = writeWorkflow(`
+name: Composite Inputs
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    env:
+      CALLER: from-job
+    steps:
+      - uses: local/composite-inputs@v1
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        inputs: { q: 'workflow-input' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].outputs).toEqual({
+        said: 'hello-workflow_dispatch//from-job'
+      });
+    });
+
+    it('applies action input defaults for JavaScript actions', async () => {
+      const actionPath = writeAction('js-defaults', {
+        'action.yml': `
+name: JS Defaults
+description: Echo inputs
+inputs:
+  greeting:
+    description: greeting
+    default: hi
+  who:
+    description: who
+    default: nobody
+runs:
+  using: node20
+  main: index.js
+`,
+        'index.js':
+          'console.log(process.env.INPUT_GREETING + "/" + process.env.INPUT_WHO);'
+      });
+      fetchActionMock.mockResolvedValueOnce(actionPath);
+
+      const workflowPath = writeWorkflow(`
+name: JS Defaults
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: local/js-defaults@v1
+        with:
+          who: world
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain('hi/world');
+    });
   });
 });

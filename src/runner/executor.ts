@@ -813,7 +813,7 @@ async function executeDockerAction(
   action: ActionFile,
   actionPath: string,
   step: Step,
-  withInputs: Record<string, string>,
+  actionInputs: Record<string, string>,
   options: RunOptions,
   startTime: number
 ): Promise<StepResult> {
@@ -879,7 +879,7 @@ async function executeDockerAction(
   // convention (same one ghact already uses for JS actions).
   const mergedInputs: Record<string, string> = {};
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(withInputs)) {
+  for (const [key, value] of Object.entries(actionInputs)) {
     mergedInputs[key] = value;
     env[`INPUT_${key.toUpperCase().replace(/-/g, '_')}`] = value;
   }
@@ -960,6 +960,25 @@ async function executeDockerAction(
 }
 
 /**
+ * Build an action's `inputs.*`: the step's `with:` values (resolved against
+ * the calling step's context), falling back to each declared input's
+ * `default` (which may itself contain expressions, e.g. `${{ github.token }}`).
+ */
+function resolveActionInputs(
+  action: ActionFile,
+  withValues: Record<string, unknown> | undefined,
+  callerCtx: ExpressionContext
+): Record<string, string> {
+  const inputs: Record<string, string> = {};
+  for (const [name, def] of Object.entries(action.inputs || {})) {
+    if (def?.default !== undefined) {
+      inputs[name] = substituteExpressions(String(def.default), callerCtx);
+    }
+  }
+  return { ...inputs, ...substituteRecord(withValues, callerCtx) };
+}
+
+/**
  * Execute a remote action
  */
 async function executeAction(
@@ -1008,9 +1027,8 @@ async function executeAction(
 
     // Resolve `with:` values against the calling step's context before they
     // become the action's inputs (INPUT_* env vars / `inputs.*`).
-    const withInputs = ctx
-      ? substituteRecord(step.with, ctx)
-      : substituteRecord(step.with, createContext());
+    const callerCtx = ctx ?? createContext({}, {}, options.secrets);
+    const actionInputs = resolveActionInputs(action, step.with, callerCtx);
 
     // Handle different action types
     if (action.runs.using === 'composite') {
@@ -1019,32 +1037,21 @@ async function executeAction(
 
       const compositeSteps = action.runs.steps || [];
       const outputs: Record<string, string> = {};
+      // Composite steps see only the action's own inputs, plus the
+      // caller's env and github context - never the workflow's inputs.
       const actionCtx: ExpressionContext = createContext(
-        {},
-        {},
-        options.secrets
+        { ...callerCtx.env },
+        actionInputs,
+        options.secrets,
+        callerCtx.github
       );
 
       for (const compositeStep of compositeSteps) {
-        // Merge step inputs with action inputs
-        // Convert all input values to strings for compatibility
-        const mergedInputs: Record<string, string> = {};
-
-        if (options.inputs) {
-          Object.assign(mergedInputs, options.inputs);
-        }
-
-        Object.assign(mergedInputs, withInputs);
-
-        const inputsCtx: ExpressionContext = {
-          ...actionCtx,
-          inputs: mergedInputs
-        };
         const stepCtx: ExpressionContext = {
-          ...inputsCtx,
+          ...actionCtx,
           env: {
             ...actionCtx.env,
-            ...substituteRecord(compositeStep.env, inputsCtx)
+            ...substituteRecord(compositeStep.env, actionCtx)
           }
         };
 
@@ -1063,7 +1070,7 @@ async function executeAction(
 
         const stepOptions: RunOptions = {
           ...options,
-          inputs: mergedInputs
+          inputs: actionInputs
         };
 
         const stepResult = await executeStep(
@@ -1132,7 +1139,7 @@ async function executeAction(
       // Prepare environment variables for inputs
       const env = { ...process.env };
 
-      for (const [key, value] of Object.entries(withInputs)) {
+      for (const [key, value] of Object.entries(actionInputs)) {
         env[`INPUT_${key.toUpperCase().replace(/-/g, '_')}`] = value;
       }
 
@@ -1177,7 +1184,7 @@ async function executeAction(
         action,
         actionPath,
         step,
-        withInputs,
+        actionInputs,
         options,
         startTime
       );
