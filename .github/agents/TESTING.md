@@ -1,10 +1,10 @@
-# Testing Guidelines for actly
+# Testing Guidelines for ghact
 
-This document provides comprehensive testing guidelines for AI agents and developers working on actly.
+This document provides comprehensive testing guidelines for AI agents and developers working on ghact.
 
 ## Testing Philosophy
 
-actly follows **Test-Driven Development (TDD)**:
+ghact follows **Test-Driven Development (TDD)**:
 
 1. Write tests first (Red)
 2. Implement features to pass tests (Green)
@@ -72,7 +72,7 @@ describe('ModuleName', () => {
 });
 ```
 
-### Example from actly
+### Example from ghact
 
 ```typescript
 import { validateWorkflow } from './validator';

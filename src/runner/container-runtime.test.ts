@@ -138,9 +138,9 @@ describe('container-runtime', () => {
           'run',
           '--rm',
           '-v',
-          '/host/work:/actly-workspace',
+          '/host/work:/ghact-workspace',
           '-v',
-          '/host/exchange:/actly-exchange',
+          '/host/exchange:/ghact-exchange',
           '--network',
           'none',
           '-e',
@@ -247,7 +247,7 @@ describe('container-runtime', () => {
       const runtime = await resolveContainerRuntime('docker');
       const result = await runtime?.build(
         '/host/action-dir',
-        'actly-action-abc123'
+        'ghact-action-abc123'
       );
 
       expect(execMock).toHaveBeenCalledWith(
@@ -276,7 +276,7 @@ describe('container-runtime', () => {
       const runtime = await resolveContainerRuntime('docker');
       const result = await runtime?.build(
         '/host/action-dir',
-        'actly-action-abc123'
+        'ghact-action-abc123'
       );
 
       expect(result?.success).toBe(false);

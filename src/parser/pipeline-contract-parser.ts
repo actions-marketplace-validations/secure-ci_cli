@@ -3,7 +3,7 @@ import * as YAML from 'yaml';
 import { PipelineContractEntry, PipelineContractSpec } from '../types';
 
 /**
- * Parse a pipeline contract file (`actly --contract <file>`).
+ * Parse a pipeline contract file (`ghact --contract <file>`).
  *
  * Shape:
  * ```yaml

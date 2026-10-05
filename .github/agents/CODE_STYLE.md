@@ -1,10 +1,10 @@
-# Code Style and Formatting Guidelines for actly
+# Code Style and Formatting Guidelines for ghact
 
-This document outlines code styling and formatting conventions for the actly codebase.
+This document outlines code styling and formatting conventions for the ghact codebase.
 
 ## Overview
 
-actly uses automated tools to maintain consistent code style:
+ghact uses automated tools to maintain consistent code style:
 
 - **ESLint**: For code quality and style enforcement
 - **Prettier**: For automatic code formatting
@@ -320,11 +320,11 @@ Code should be self-documenting. Use comments only when necessary.
 ```typescript
 // ✅ Good - comment explains WHY, not WHAT
 // GitHub API requires user agent header to avoid rate limiting
-headers['User-Agent'] = 'actly';
+headers['User-Agent'] = 'ghact';
 
 // ❌ Bad - comment states the obvious
 // Set the user agent
-headers['User-Agent'] = 'actly';
+headers['User-Agent'] = 'ghact';
 ```
 
 #### JSDoc for Public APIs
@@ -474,7 +474,7 @@ git add .
 git commit -m "Your commit message"
 ```
 
-## Common Patterns in actly
+## Common Patterns in ghact
 
 ### File Reading
 

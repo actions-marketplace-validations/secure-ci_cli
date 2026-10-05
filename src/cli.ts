@@ -25,7 +25,7 @@ const program = new Command();
 const globalConfig = loadConfig();
 
 program
-  .name('actly')
+  .name('ghact')
   .description('CLI tool to locally test GitHub Actions and workflows')
   .version('0.1.0');
 
@@ -51,7 +51,7 @@ program
   .addOption(
     new Option(
       '--container-runtime <name>',
-      `Isolate run: steps in a container (default: "${getDefaultContainerRuntime(globalConfig)}", from ~/.actly/config.yml or built-in default; use "none" for the old host-execution default)`
+      `Isolate run: steps in a container (default: "${getDefaultContainerRuntime(globalConfig)}", from ~/.ghact/config.yml or built-in default; use "none" for the old host-execution default)`
     )
       .choices(['auto', 'docker', 'podman', 'containerd', 'none'])
       .default(getDefaultContainerRuntime(globalConfig))
@@ -246,7 +246,7 @@ function listWorkflows(): void {
 
 const configCmd = program
   .command('config')
-  .description('Manage actly global configuration (~/.actly/config.yml)');
+  .description('Manage ghact global configuration (~/.ghact/config.yml)');
 
 configCmd
   .command('path')

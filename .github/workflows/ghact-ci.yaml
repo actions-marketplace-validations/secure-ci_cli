@@ -1,4 +1,4 @@
-name: Actly CI/CD
+name: ghact CI/CD
 
 on:
   workflow_dispatch:
@@ -140,7 +140,7 @@ jobs:
           tag_name: v${{ steps.package-version.outputs.version }}
           release_name: Release v${{ steps.package-version.outputs.version }}
           body: |
-            Release of actly v${{ steps.package-version.outputs.version }}
+            Release of ghact v${{ steps.package-version.outputs.version }}
 
             See [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
           draft: false

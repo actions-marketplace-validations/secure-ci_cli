@@ -1,6 +1,6 @@
-# Domain Concepts for actly
+# Domain Concepts for ghact
 
-This document explains GitHub Actions concepts relevant to understanding actly.
+This document explains GitHub Actions concepts relevant to understanding ghact.
 
 ## Workflows
 
@@ -67,7 +67,7 @@ Node.js-based actions that run JavaScript code.
 - Can use Node.js APIs and npm packages
 - Faster than Docker actions
 
-**Support in actly:** Full support for all Node.js versions.
+**Support in ghact:** Full support for all Node.js versions.
 
 #### 3. Docker Actions
 
@@ -80,7 +80,7 @@ Actions that run in Docker containers.
 - Provides isolated environment
 - Slower startup time
 
-**Support in actly:** Currently shows a warning (future enhancement planned). Note: this is distinct from actly's `--container-runtime` flag, which isolates `run:` steps in a container regardless of action type (see [Container Isolation](#container-isolation) below).
+**Support in ghact:** Currently shows a warning (future enhancement planned). Note: this is distinct from ghact's `--container-runtime` flag, which isolates `run:` steps in a container regardless of action type (see [Container Isolation](#container-isolation) below).
 
 ## Remote Actions
 
@@ -102,16 +102,16 @@ owner/repo/path@ref
 
 ### Action Caching
 
-actly caches downloaded actions for performance:
+ghact caches downloaded actions for performance:
 
-- **Cache location:** `~/.actly/actions-cache/`
+- **Cache location:** `~/.ghact/actions-cache/`
 - **Cache key:** `owner/repo@ref`
 - **Cache hit:** Instant load from local filesystem
 - **Cache miss:** Download from GitHub, then cache
 
 ### Action Discovery
 
-When actly encounters a `uses` step:
+When ghact encounters a `uses` step:
 
 1. Parse the action reference
 2. Check local cache
@@ -128,7 +128,7 @@ Key-value pairs passed to workflows or actions.
 **In CLI:**
 
 ```bash
-actly workflow.yml --input KEY=value --input ANOTHER=value
+ghact workflow.yml --input KEY=value --input ANOTHER=value
 ```
 
 **In workflow YAML:**
@@ -150,7 +150,7 @@ Sensitive values (API keys, tokens, passwords).
 **In CLI:**
 
 ```bash
-actly workflow.yml --secret TOKEN=xxx --secret API_KEY=yyy
+ghact workflow.yml --secret TOKEN=xxx --secret API_KEY=yyy
 ```
 
 **In workflow YAML:**
@@ -169,7 +169,7 @@ Jobs are collections of steps that run on the same runner.
 **Key properties:**
 
 - `runs-on`: Specifies runner environment (e.g., `ubuntu-latest`)
-- `needs`: Specifies job dependencies — actly orders jobs via topological sort (Kahn's algorithm) so dependent jobs always run after the jobs they depend on
+- `needs`: Specifies job dependencies — ghact orders jobs via topological sort (Kahn's algorithm) so dependent jobs always run after the jobs they depend on
 - `if`: Conditional execution (`${{ ... }}` expression; see below). A job whose `if:` evaluates falsy is skipped entirely
 - `steps`: Array of steps to execute
 
@@ -195,14 +195,14 @@ Steps are individual tasks within a job.
        node-version: '20'
    ```
 
-**Additional step properties supported by actly:**
+**Additional step properties supported by ghact:**
 
 - `id`: Names the step so its outputs can be referenced as `steps.<id>.outputs.<name>`
 - `if`: Conditional execution; a falsy step is skipped (marked `outcome: 'skipped'`)
 
 ## Conditional Execution (`if:`)
 
-Jobs and steps can be conditionally skipped using `${{ ... }}` expressions, evaluated by actly's expression engine (`src/runner/expression.ts`).
+Jobs and steps can be conditionally skipped using `${{ ... }}` expressions, evaluated by ghact's expression engine (`src/runner/expression.ts`).
 
 **Supported references:**
 
@@ -225,7 +225,7 @@ steps:
 
 ## Step Outputs (`$GITHUB_OUTPUT`)
 
-A step can write `name=value` pairs (or multiline `name<<EOF ... EOF` blocks) to the file path in the `$GITHUB_OUTPUT` environment variable. actly injects a temporary file for this on every step and parses it afterward into `StepResult.outputs`, making the values available to later steps/jobs via `${{ steps.<id>.outputs.<name> }}`.
+A step can write `name=value` pairs (or multiline `name<<EOF ... EOF` blocks) to the file path in the `$GITHUB_OUTPUT` environment variable. ghact injects a temporary file for this on every step and parses it afterward into `StepResult.outputs`, making the values available to later steps/jobs via `${{ steps.<id>.outputs.<name> }}`.
 
 ```yaml
 - id: version
@@ -236,7 +236,7 @@ A step can write `name=value` pairs (or multiline `name<<EOF ... EOF` blocks) to
 
 ## Secret Masking
 
-Any value passed via `--secret KEY=value` is registered with actly's `Logger` and automatically masked (replaced with `***`) wherever it would otherwise appear in console output — including stdout/stderr captured from shell commands.
+Any value passed via `--secret KEY=value` is registered with ghact's `Logger` and automatically masked (replaced with `***`) wherever it would otherwise appear in console output — including stdout/stderr captured from shell commands.
 
 ## Container Isolation
 
@@ -245,12 +245,12 @@ Any value passed via `--secret KEY=value` is registered with actly's `Logger` an
 - **Opt-in**: Defaults to `none` (host execution) for backward compatibility; enable with `--container-runtime=auto|docker|podman`
 - **`auto`**: Tries Docker first, then Podman
 - **Isolation options**: `--container-image`, `--container-memory`, `--container-timeout`, and network access disabled by default (`--allow-network` to opt in)
-- **Fallback**: If the requested/detected runtime is unavailable, actly logs a warning and falls back to host execution
+- **Fallback**: If the requested/detected runtime is unavailable, ghact logs a warning and falls back to host execution
 - **Output exchange**: The working directory and a `$GITHUB_OUTPUT` exchange directory are bind-mounted into the container so outputs and conditionals work identically to host execution
 
 ## Execution Model
 
-actly executes workflows locally:
+ghact executes workflows locally:
 
 1. Parse workflow YAML
 2. Validate structure
@@ -266,7 +266,7 @@ actly executes workflows locally:
 
 ## Key Differences from GitHub Actions
 
-When running locally with actly:
+When running locally with ghact:
 
 - **No runner images:** Runs on your local machine (or an opt-in Docker/Podman container for `run:` steps)
 - **No GitHub context:** Limited access to GitHub API

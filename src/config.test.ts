@@ -9,7 +9,7 @@ describe('config', () => {
 
   beforeEach(() => {
     vi.resetModules();
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actly-config-test-'));
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-config-test-'));
     originalHome = process.env.HOME;
     process.env.HOME = tempHome;
   });
@@ -19,11 +19,49 @@ describe('config', () => {
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
-  it('getConfigFilePath points at ~/.actly/config.yml', async () => {
+  it('getConfigFilePath points at ~/.ghact/config.yml', async () => {
     const { getConfigFilePath } = await import('./config');
     expect(getConfigFilePath()).toBe(
-      path.join(tempHome, '.actly', 'config.yml')
+      path.join(tempHome, '.ghact', 'config.yml')
     );
+  });
+
+  it('loadConfig falls back to the legacy ~/.actly/config.yml', async () => {
+    const { loadConfig } = await import('./config');
+    const legacyDir = path.join(tempHome, '.actly');
+    fs.mkdirSync(legacyDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(legacyDir, 'config.yml'),
+      'container-runtime: podman\n'
+    );
+
+    expect(loadConfig()).toEqual({ 'container-runtime': 'podman' });
+  });
+
+  it('loadConfig prefers ~/.ghact/config.yml over the legacy file', async () => {
+    const { loadConfig, getConfigFilePath } = await import('./config');
+    const legacyDir = path.join(tempHome, '.actly');
+    fs.mkdirSync(legacyDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(legacyDir, 'config.yml'),
+      'container-runtime: podman\n'
+    );
+    fs.mkdirSync(path.dirname(getConfigFilePath()), { recursive: true });
+    fs.writeFileSync(getConfigFilePath(), 'container-runtime: none\n');
+
+    expect(loadConfig()).toEqual({ 'container-runtime': 'none' });
+  });
+
+  it('saveConfig writes to ~/.ghact even when only a legacy file exists', async () => {
+    const { saveConfig, getConfigFilePath } = await import('./config');
+    const legacyFile = path.join(tempHome, '.actly', 'config.yml');
+    fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+    fs.writeFileSync(legacyFile, 'container-runtime: podman\n');
+
+    saveConfig({ 'container-runtime': 'auto' });
+
+    expect(fs.readFileSync(getConfigFilePath(), 'utf-8')).toContain('auto');
+    expect(fs.readFileSync(legacyFile, 'utf-8')).toContain('podman');
   });
 
   it('loadConfig returns {} when the config file does not exist', async () => {

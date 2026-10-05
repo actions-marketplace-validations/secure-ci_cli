@@ -30,7 +30,7 @@ import * as os from 'os';
 
 describe('Executor', () => {
   const fixturesDir = path.join(__dirname, '../../test/fixtures');
-  const tempTestDir = path.join(os.tmpdir(), 'actly-test');
+  const tempTestDir = path.join(os.tmpdir(), 'ghact-test');
 
   beforeEach(async () => {
     resolveContainerRuntimeMock.mockReset();
@@ -925,7 +925,7 @@ jobs:
       expect(buildMock).toHaveBeenCalledTimes(1);
       expect(buildMock).toHaveBeenCalledWith(
         path.dirname(dockerActionPath),
-        expect.stringMatching(/^actly-action-/),
+        expect.stringMatching(/^ghact-action-/),
         'Dockerfile'
       );
 

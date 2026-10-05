@@ -1,6 +1,6 @@
-# Development Workflow for actly
+# Development Workflow for ghact
 
-This document covers the development workflow and common tasks for working on actly.
+This document covers the development workflow and common tasks for working on ghact.
 
 ## Before You Start
 
@@ -263,7 +263,7 @@ node --inspect-brk dist/cli.js --dry-run workflow.yml
 
 ## Contributing Philosophy
 
-When working on actly, keep these principles in mind:
+When working on ghact, keep these principles in mind:
 
 ### Minimal Dependencies
 

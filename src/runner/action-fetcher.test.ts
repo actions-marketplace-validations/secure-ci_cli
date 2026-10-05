@@ -99,7 +99,7 @@ describe('Action Fetcher', () => {
     it('should clear the action cache', () => {
       // Create a test cache directory
       const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
-      const cacheDir = path.join(homeDir, '.actly', 'actions-cache');
+      const cacheDir = path.join(homeDir, '.ghact', 'actions-cache');
 
       if (!fs.existsSync(cacheDir)) {
         fs.mkdirSync(cacheDir, { recursive: true });

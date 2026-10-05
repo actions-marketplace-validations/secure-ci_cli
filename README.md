@@ -1,4 +1,4 @@
-# actly
+# ghact
 
 A CLI tool to locally test GitHub Actions and workflows without pushing to remote.
 
@@ -21,7 +21,7 @@ A CLI tool to locally test GitHub Actions and workflows without pushing to remot
 ## Installation
 
 ```bash
-npm install -g actly
+npm install -g ghact
 ```
 
 Or run locally:
@@ -35,37 +35,37 @@ npm run build
 
 ```bash
 # Dry run a workflow
-actly --dry-run .github/workflows/ci.yml
+ghact --dry-run .github/workflows/ci.yml
 
 # Execute a workflow
-actly .github/workflows/build.yml --input key=value
+ghact .github/workflows/build.yml --input key=value
 
 # Run with secrets
-actly .github/workflows/deploy.yml --secret TOKEN=xxx
+ghact .github/workflows/deploy.yml --secret TOKEN=xxx
 
 # Validate workflow syntax
-actly --validate .github/workflows/ci.yml
+ghact --validate .github/workflows/ci.yml
 
 # Validate a caller workflow against a central pipeline contract
-actly --contract contracts/platform-standard.yml .github/workflows/deploy.yml
+ghact --contract contracts/platform-standard.yml .github/workflows/deploy.yml
 
 # Run a specific job
-actly .github/workflows/ci.yml --job build
+ghact .github/workflows/ci.yml --job build
 
 # List workflows in .github/workflows/
-actly --list
+ghact --list
 
 # Run with container isolation (Docker or Podman)
-actly .github/workflows/ci.yml --container-runtime=auto
-actly .github/workflows/ci.yml --container-runtime=docker --container-image=node:20-alpine
-actly .github/workflows/ci.yml --container-runtime=podman --container-memory=512m --allow-network
+ghact .github/workflows/ci.yml --container-runtime=auto
+ghact .github/workflows/ci.yml --container-runtime=docker --container-image=node:20-alpine
+ghact .github/workflows/ci.yml --container-runtime=podman --container-memory=512m --allow-network
 ```
 
 ### Container Isolation Flags
 
 | Flag                         | Description                                                                                                                                                |
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--container-runtime <name>` | `auto`\|`docker`\|`podman`\|`containerd`\|`none` (default: `docker`, overridable via `~/.actly/config.yml`; use `none` for the old host-execution default) |
+| `--container-runtime <name>` | `auto`\|`docker`\|`podman`\|`containerd`\|`none` (default: `docker`, overridable via `~/.ghact/config.yml`; use `none` for the old host-execution default) |
 | `--container-image <image>`  | Image to run steps in (default: `ubuntu:22.04`)                                                                                                            |
 | `--container-timeout <ms>`   | Per-step timeout in milliseconds                                                                                                                           |
 | `--container-memory <limit>` | Memory limit, e.g. `512m`                                                                                                                                  |
@@ -75,21 +75,23 @@ actly .github/workflows/ci.yml --container-runtime=podman --container-memory=512
 
 ### Global Configuration
 
-actly reads defaults from `~/.actly/config.yml` (created on first `actly config set`, or editable by hand). Config keys match the CLI flag names (kebab-case, minus the leading `--`). CLI flags always take precedence over the config file.
+ghact reads defaults from `~/.ghact/config.yml` (created on first `ghact config set`, or editable by hand). Config keys match the CLI flag names (kebab-case, minus the leading `--`). CLI flags always take precedence over the config file.
+
+> **Renamed from `actly`:** if `~/.ghact/config.yml` doesn't exist, ghact reads the legacy `~/.actly/config.yml` instead. The next `ghact config set`/`unset` writes to `~/.ghact/config.yml`. Downloaded actions are cached in the new `~/.ghact/actions-cache`, so the old `~/.actly` directory can be deleted once your config has moved.
 
 ```bash
-actly config set container-runtime podman   # persist a default
-actly config get container-runtime
-actly config list
-actly config unset container-runtime        # revert to the built-in default (docker)
-actly config path                           # print the config file location
+ghact config set container-runtime podman   # persist a default
+ghact config get container-runtime
+ghact config list
+ghact config unset container-runtime        # revert to the built-in default (docker)
+ghact config path                           # print the config file location
 ```
 
 Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`.
 
 ### Pipeline Contracts (`--contract`)
 
-In organizations with a central repo of reusable workflows/actions, a platform team can define a minimum pipeline standard — required actions, forbidden actions, and (optionally) the order required actions must run in — and have actly check a caller's workflow against it.
+In organizations with a central repo of reusable workflows/actions, a platform team can define a minimum pipeline standard — required actions, forbidden actions, and (optionally) the order required actions must run in — and have ghact check a caller's workflow against it.
 
 ```yaml
 # contracts/platform-standard.yml
@@ -105,7 +107,7 @@ forbidden:
 ```
 
 ```bash
-actly --contract contracts/platform-standard.yml .github/workflows/deploy.yml
+ghact --contract contracts/platform-standard.yml .github/workflows/deploy.yml
 ```
 
 If the caller's workflow calls `org/deploy` before `org/security-scan` (or uses `org/legacy-deploy`, or omits a required action, or pins `org/security-scan` below `v1.2.0`), the command exits non-zero with a message like:
@@ -216,18 +218,18 @@ src/
 
 ## Remote Action Support
 
-actly now supports fetching and executing remote GitHub Actions:
+ghact now supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps
 - **JavaScript Actions** (node12, node16, node20, node22+): Executes JavaScript-based actions with Node.js
 - **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it directly. Note: this is distinct from `--container-runtime`, which isolates `run:` steps in a container regardless of action type.
-- **Action Caching**: Downloaded actions are cached in `~/.actly/actions-cache` for faster subsequent runs
+- **Action Caching**: Downloaded actions are cached in `~/.ghact/actions-cache` for faster subsequent runs
 
 ### Example with Remote Actions
 
 ```bash
 # Execute a workflow that uses remote actions
-actly .github/workflows/ci.yml
+ghact .github/workflows/ci.yml
 
 # The workflow can include:
 # - uses: actions/checkout@v3

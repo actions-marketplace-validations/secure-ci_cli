@@ -41,7 +41,7 @@ export function parseActionReference(uses: string): ActionReference | null {
  */
 function getActionCacheDir(): string {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
-  const cacheDir = path.join(homeDir, '.actly', 'actions-cache');
+  const cacheDir = path.join(homeDir, '.ghact', 'actions-cache');
 
   if (!fs.existsSync(cacheDir)) {
     fs.mkdirSync(cacheDir, { recursive: true });

@@ -613,7 +613,7 @@ async function executeStep(
 
       const outputFilePath = path.join(
         os.tmpdir(),
-        `actly-output-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        `ghact-output-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
       );
       fs.writeFileSync(outputFilePath, '');
 
@@ -711,7 +711,7 @@ async function executeInContainer(
   startTime: number,
   mergedEnv?: Record<string, string>
 ): Promise<StepResult> {
-  const exchangeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'actly-exchange-'));
+  const exchangeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-exchange-'));
   const containerOutputPath = `${CONTAINER_EXCHANGE_DIR}/output`;
 
   try {
@@ -841,7 +841,7 @@ async function executeDockerAction(
       };
     }
 
-    const tag = `actly-action-${crypto.createHash('sha1').update(actionDir).digest('hex').slice(0, 12)}`;
+    const tag = `ghact-action-${crypto.createHash('sha1').update(actionDir).digest('hex').slice(0, 12)}`;
     logger.info(`Building Docker action image: ${action.name} (${tag})`);
     const buildResult = await runtime.build(actionDir, tag, dockerfileRelative);
     if (!buildResult.success) {
@@ -858,7 +858,7 @@ async function executeDockerAction(
   }
 
   // Inputs are passed as INPUT_<NAME> env vars, matching GitHub's own
-  // convention (same one actly already uses for JS actions).
+  // convention (same one ghact already uses for JS actions).
   const mergedInputs: Record<string, string> = {};
   const env: Record<string, string> = {};
   if (step.with) {
@@ -876,7 +876,7 @@ async function executeDockerAction(
 
   logger.info(`Executing Docker action: ${action.name}`);
 
-  const exchangeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'actly-exchange-'));
+  const exchangeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-exchange-'));
   const containerOutputPath = `${CONTAINER_EXCHANGE_DIR}/output`;
 
   try {

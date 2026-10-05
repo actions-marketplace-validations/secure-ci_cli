@@ -38,7 +38,7 @@ describe('cli --contract', () => {
 
   beforeAll(() => {
     execFileSync('npx', ['tsc'], { cwd: path.join(__dirname, '..') });
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'actly-cli-contract-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-cli-contract-'));
 
     workflow = write(
       'caller.yml',

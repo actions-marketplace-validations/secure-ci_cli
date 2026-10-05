@@ -4,15 +4,15 @@ import * as YAML from 'yaml';
 import type { ContainerRuntimePreference } from './runner/container-runtime';
 
 /**
- * Global actly configuration, stored as YAML at `~/.actly/config.yml`.
- * Can be edited by hand or managed via `actly config get|set|unset|list`.
+ * Global ghact configuration, stored as YAML at `~/.ghact/config.yml`.
+ * Can be edited by hand or managed via `ghact config get|set|unset|list`.
  * Values here are used as defaults, overridden by explicit CLI flags.
  *
  * Keys match the CLI flag names (kebab-case, minus the leading `--`) so
- * `actly config set container-runtime podman` mirrors `actly
+ * `ghact config set container-runtime podman` mirrors `ghact
  * --container-runtime podman` directly.
  */
-export interface ActlyConfig {
+export interface GhactConfig {
   'container-runtime'?: ContainerRuntimePreference;
   'container-image'?: string;
   'container-timeout'?: number;
@@ -21,8 +21,8 @@ export interface ActlyConfig {
 }
 
 /** Built-in defaults, used when a key is absent from the config file. */
-export const DEFAULT_CONFIG: Required<Pick<ActlyConfig, 'container-runtime'>> &
-  ActlyConfig = {
+export const DEFAULT_CONFIG: Required<Pick<GhactConfig, 'container-runtime'>> &
+  GhactConfig = {
   'container-runtime': 'docker'
 };
 
@@ -34,31 +34,46 @@ const CONTAINER_RUNTIME_VALUES: ContainerRuntimePreference[] = [
   'none'
 ];
 
+function getHomeDir(): string {
+  return process.env.HOME || process.env.USERPROFILE || '/tmp';
+}
+
 function getConfigDir(): string {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
-  return path.join(homeDir, '.actly');
+  return path.join(getHomeDir(), '.ghact');
 }
 
 export function getConfigFilePath(): string {
   return path.join(getConfigDir(), 'config.yml');
 }
 
-/** Load the global config file, returning `{}` if absent or unreadable. */
-export function loadConfig(): ActlyConfig {
-  const configFile = getConfigFilePath();
-  if (!fs.existsSync(configFile)) return {};
+/** Config location used before the project was renamed from actly. */
+function getLegacyConfigFilePath(): string {
+  return path.join(getHomeDir(), '.actly', 'config.yml');
+}
+
+/**
+ * Load the global config file, returning `{}` if absent or unreadable.
+ * Falls back to the legacy `~/.actly/config.yml` when `~/.ghact/config.yml`
+ * doesn't exist; the next `saveConfig` then writes to the new location.
+ */
+export function loadConfig(): GhactConfig {
+  let configFile = getConfigFilePath();
+  if (!fs.existsSync(configFile)) {
+    configFile = getLegacyConfigFilePath();
+    if (!fs.existsSync(configFile)) return {};
+  }
 
   try {
     const raw = fs.readFileSync(configFile, 'utf-8');
     const parsed: unknown = YAML.parse(raw);
-    return parsed && typeof parsed === 'object' ? (parsed as ActlyConfig) : {};
+    return parsed && typeof parsed === 'object' ? (parsed as GhactConfig) : {};
   } catch {
     return {};
   }
 }
 
 /** Persist the given config object to the global config file. */
-export function saveConfig(config: ActlyConfig): void {
+export function saveConfig(config: GhactConfig): void {
   const configDir = getConfigDir();
   if (!fs.existsSync(configDir)) {
     fs.mkdirSync(configDir, { recursive: true });
@@ -68,7 +83,7 @@ export function saveConfig(config: ActlyConfig): void {
 
 /** Resolve the effective value for `container-runtime`: config, else built-in default. */
 export function getDefaultContainerRuntime(
-  config: ActlyConfig = loadConfig()
+  config: GhactConfig = loadConfig()
 ): ContainerRuntimePreference {
   return config['container-runtime'] ?? DEFAULT_CONFIG['container-runtime'];
 }
@@ -94,7 +109,7 @@ export function isValidConfigKey(key: string): key is ConfigKey {
 export function parseConfigValue(
   key: ConfigKey,
   rawValue: string
-): ActlyConfig[ConfigKey] {
+): GhactConfig[ConfigKey] {
   switch (key) {
     case 'container-runtime':
       if (

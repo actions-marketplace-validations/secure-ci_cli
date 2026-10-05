@@ -1,10 +1,10 @@
-# Architecture Guide for actly
+# Architecture Guide for ghact
 
-This document provides a comprehensive overview of actly's architecture for AI agents and developers.
+This document provides a comprehensive overview of ghact's architecture for AI agents and developers.
 
 ## System Overview
 
-actly is a CLI tool that enables local testing of GitHub Actions and workflows. It parses YAML workflow/action definitions, validates them, and can execute them locally with support for inputs, secrets, and remote actions.
+ghact is a CLI tool that enables local testing of GitHub Actions and workflows. It parses YAML workflow/action definitions, validates them, and can execute them locally with support for inputs, secrets, and remote actions.
 
 ## High-Level Architecture
 
@@ -45,7 +45,7 @@ graph TB
 ## Directory Structure
 
 ```
-actly/
+ghact/
 ├── src/                          # Source code
 │   ├── cli.ts                    # CLI entry point - Commander.js configuration
 │   ├── index.ts                  # Main module exports
@@ -134,7 +134,7 @@ import { validateWorkflow } from './parser/validator';
 const program = new Command();
 
 program
-  .name('actly')
+  .name('ghact')
   .description('Test GitHub Actions locally')
   .argument('<workflow>', 'Path to workflow file')
   .option('--dry-run', 'Dry run mode')
@@ -289,7 +289,7 @@ function resolveContainerRuntime(
 
 - Parse action references (e.g., `actions/checkout@v3`)
 - Download actions from GitHub
-- Cache actions locally in `~/.actly/actions-cache`
+- Cache actions locally in `~/.ghact/actions-cache`
 - Support composite, JavaScript, and Docker actions
 - Handle versioning (tags, branches, commit SHAs)
 
@@ -584,7 +584,7 @@ async function fetchAction(ref: string): Promise<Action> {
 
 ### Caching Strategy
 
-- **Action Cache**: `~/.actly/actions-cache/owner/repo@ref`
+- **Action Cache**: `~/.ghact/actions-cache/owner/repo@ref`
 - Cache hit: Instant load
 - Cache miss: Download from GitHub (one-time cost)
 

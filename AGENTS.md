@@ -1,6 +1,6 @@
-# AI Agent Guidance for actly
+# AI Agent Guidance for ghact
 
-**actly** is a CLI tool to locally test GitHub Actions and workflows without pushing to remote.
+**ghact** is a CLI tool to locally test GitHub Actions and workflows without pushing to remote.
 
 ## Quick Start
 
