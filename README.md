@@ -164,9 +164,19 @@ jobs:
 
 Steps can write to `$GITHUB_OUTPUT` to expose values to later steps via `${{ steps.<id>.outputs.<name> }}`.
 
+### File Commands and Workflow Commands
+
+Every step (`run:`, JavaScript and Docker actions) gets its own `$GITHUB_OUTPUT`, `$GITHUB_ENV`, `$GITHUB_PATH`, `$GITHUB_STATE` and `$GITHUB_STEP_SUMMARY` files. Values written to `$GITHUB_ENV` and directories written to `$GITHUB_PATH` are available to all later steps in the job (`$GITHUB_ENV` values also appear in `${{ env.* }}`).
+
+Workflow commands printed to stdout are interpreted: `::add-mask::`, `::set-output`, `::save-state`, `::warning::`, `::error::`, `::notice::`, `::debug::` and `::group::`/`::endgroup::`.
+
+### Default Environment Variables
+
+Steps receive the runner's default variables, derived from the local `github` context: `CI`, `GITHUB_ACTIONS`, `GITHUB_WORKFLOW`, `GITHUB_JOB`, `GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_EVENT_NAME`, `GITHUB_ACTOR`, `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_OWNER`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKSPACE`, `GITHUB_EVENT_PATH` (an empty `{}` payload for now), `RUNNER_OS`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` (`~/.ghact/toolcache`).
+
 ### Secret Masking
 
-Any value passed via `--secret` is automatically masked (`***`) wherever it appears in log output.
+Any value passed via `--secret`, or registered by a step via `::add-mask::`, is automatically masked (`***`) wherever it appears in log output.
 
 ## Development
 
@@ -221,7 +231,7 @@ src/
 ghact now supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps
-- **JavaScript Actions** (node12, node16, node20, node22+): Executes JavaScript-based actions with Node.js
+- **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with ghact's own Node.js binary, in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` runs right before `main` (GitHub runs it at job start); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.
 - **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it directly. Note: this is distinct from `--container-runtime`, which isolates `run:` steps in a container regardless of action type.
 - **Action Caching**: Downloaded actions are cached in `~/.ghact/actions-cache` for faster subsequent runs
 

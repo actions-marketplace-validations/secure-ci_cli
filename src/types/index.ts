@@ -82,7 +82,9 @@ export interface ActionRuns {
   steps?: Step[];
   main?: string;
   pre?: string;
+  'pre-if'?: string;
   post?: string;
+  'post-if'?: string;
   image?: string;
   entrypoint?: string;
   args?: string[];

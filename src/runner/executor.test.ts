@@ -1238,4 +1238,282 @@ jobs:
       expect(result.jobs[0].steps[0].output).toContain('hi/world');
     });
   });
+
+  describe('runner environment (file commands, workflow commands, JS actions)', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-runner-'));
+    });
+
+    function writeWorkflow(content: string): string {
+      const file = path.join(tempDir, 'workflow.yml');
+      fs.writeFileSync(file, content);
+      return file;
+    }
+
+    function writeAction(dir: string, files: Record<string, string>): string {
+      const actionDir = path.join(tempDir, dir);
+      fs.mkdirSync(actionDir, { recursive: true });
+      for (const [name, content] of Object.entries(files)) {
+        fs.writeFileSync(path.join(actionDir, name), content);
+      }
+      return path.join(actionDir, 'action.yml');
+    }
+
+    it('propagates $GITHUB_ENV and $GITHUB_PATH to later run: steps', async () => {
+      const binDir = path.join(tempDir, 'bin');
+      fs.mkdirSync(binDir);
+      fs.writeFileSync(
+        path.join(binDir, 'ghact-hello'),
+        '#!/bin/sh\necho hi-from-path\n',
+        {
+          mode: 0o755
+        }
+      );
+
+      const workflowPath = writeWorkflow(`
+name: File Commands
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "FOO=bar" >> $GITHUB_ENV
+          echo "${binDir}" >> $GITHUB_PATH
+      - run: echo "foo=$FOO expr=\${{ env.FOO }} $(ghact-hello)"
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[1].output).toContain(
+        'foo=bar expr=bar hi-from-path'
+      );
+    });
+
+    it('exports default GITHUB_* variables to run: steps', async () => {
+      const workflowPath = writeWorkflow(`
+name: Runner Vars
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "job=$GITHUB_JOB wf=$GITHUB_WORKFLOW ws=$GITHUB_WORKSPACE ci=$CI event=$(cat "$GITHUB_EVENT_PATH")"
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.jobs[0].steps[0].output).toContain(
+        `job=build wf=Runner Vars ws=${process.cwd()} ci=true event={}`
+      );
+    });
+
+    it('masks values registered via ::add-mask:: in later log output', async () => {
+      const workflowPath = writeWorkflow(`
+name: Add Mask
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "::add-mask::dynamic-secret-987"
+      - run: echo "value is dynamic-secret-987"
+`);
+
+      const logSpy = vi
+        .spyOn(console, 'log')
+        .mockImplementation(() => undefined);
+      try {
+        const result = await executeWorkflow(workflowPath);
+        expect(result.success).toBe(true);
+        const logged = logSpy.mock.calls
+          .flat()
+          .filter((v): v is string => typeof v === 'string');
+        expect(logged.some((l) => l.includes('dynamic-secret-987'))).toBe(
+          false
+        );
+        expect(logged.some((l) => l.includes('value is ***'))).toBe(true);
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    it('runs JavaScript actions in the workspace with file commands wired up', async () => {
+      const actionPath = writeAction('js-env', {
+        'action.yml': `
+name: JS Env
+description: Inspect the runner env
+runs:
+  using: node20
+  main: index.js
+`,
+        'index.js': `
+const fs = require('fs');
+console.log('cwd=' + process.cwd());
+console.log('actionPath=' + process.env.GITHUB_ACTION_PATH);
+console.log('job=' + process.env.GITHUB_JOB + ' caller=' + process.env.CALLER);
+fs.appendFileSync(process.env.GITHUB_OUTPUT, 'result=ok\\n');
+fs.appendFileSync(process.env.GITHUB_ENV, 'FROM_JS=yes\\n');
+console.log('::set-output name=legacy::old-style');
+`
+      });
+      fetchActionMock.mockResolvedValueOnce(actionPath);
+
+      const workflowPath = writeWorkflow(`
+name: JS Runner Env
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CALLER: from-job
+    steps:
+      - id: js
+        uses: local/js-env@v1
+      - run: echo "out=\${{ steps.js.outputs.result }} legacy=\${{ steps.js.outputs.legacy }} env=$FROM_JS"
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(true);
+      const jsOutput = result.jobs[0].steps[0].output;
+      expect(jsOutput).toContain(`cwd=${process.cwd()}`);
+      expect(jsOutput).toContain(`actionPath=${path.dirname(actionPath)}`);
+      expect(jsOutput).toContain('job=build caller=from-job');
+      expect(result.jobs[0].steps[0].outputs).toEqual({
+        result: 'ok',
+        legacy: 'old-style'
+      });
+      expect(result.jobs[0].steps[1].output).toContain(
+        'out=ok legacy=old-style env=yes'
+      );
+    });
+
+    it('names INPUT_* variables the way @actions/core reads them (hyphens kept)', async () => {
+      const actionPath = writeAction('js-hyphen', {
+        'action.yml': `
+name: JS Hyphen
+description: hyphenated input
+inputs:
+  who-to-greet:
+    description: who
+runs:
+  using: node20
+  main: index.js
+`,
+        'index.js': 'console.log("who=" + process.env["INPUT_WHO-TO-GREET"]);'
+      });
+      fetchActionMock.mockResolvedValueOnce(actionPath);
+
+      const workflowPath = writeWorkflow(`
+name: Hyphen
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: local/js-hyphen@v1
+        with:
+          who-to-greet: ghact
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.jobs[0].steps[0].output).toContain('who=ghact');
+    });
+
+    it('runs pre before main and post at job end, passing state via $GITHUB_STATE', async () => {
+      const actionPath = writeAction('js-lifecycle', {
+        'action.yml': `
+name: JS Lifecycle
+description: pre/main/post
+runs:
+  using: node20
+  pre: pre.js
+  main: main.js
+  post: post.js
+`,
+        'pre.js': 'console.log("phase=pre");',
+        'main.js': `
+require('fs').appendFileSync(process.env.GITHUB_STATE, 'token=from-main\\n');
+console.log('phase=main');
+`,
+        'post.js': 'console.log("phase=post state=" + process.env.STATE_token);'
+      });
+      fetchActionMock.mockResolvedValueOnce(actionPath);
+
+      const workflowPath = writeWorkflow(`
+name: Lifecycle
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: local/js-lifecycle@v1
+      - run: echo "phase=later-step"
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(true);
+      const outputs = result.jobs[0].steps.map((s) => s.output || '');
+      expect(outputs[0]).toMatch(/phase=pre[\s\S]*phase=main/);
+      expect(outputs[1]).toContain('phase=later-step');
+      expect(outputs[2]).toContain('phase=post state=from-main');
+      expect(result.jobs[0].steps).toHaveLength(3);
+    });
+
+    it('runs post steps after a failure by default, and honours post-if', async () => {
+      const actionPath = writeAction('js-post-if', {
+        'action.yml': `
+name: JS Post If
+description: post-if
+runs:
+  using: node20
+  main: main.js
+  post: post.js
+  post-if: success()
+`,
+        'main.js': 'console.log("main");',
+        'post.js': 'console.log("conditional-post");'
+      });
+      const alwaysPath = writeAction('js-post-always', {
+        'action.yml': `
+name: JS Post Always
+description: post always
+runs:
+  using: node20
+  main: main.js
+  post: post.js
+`,
+        'main.js': 'console.log("main");',
+        'post.js': 'console.log("always-post");'
+      });
+      fetchActionMock
+        .mockResolvedValueOnce(actionPath)
+        .mockResolvedValueOnce(alwaysPath);
+
+      const workflowPath = writeWorkflow(`
+name: Post If
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: local/js-post-if@v1
+      - uses: local/js-post-always@v1
+      - run: exit 1
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(false);
+      const outputs = result.jobs[0].steps.map((s) => s.output || '');
+      expect(outputs.some((o) => o.includes('always-post'))).toBe(true);
+      expect(outputs.some((o) => o.includes('conditional-post'))).toBe(false);
+    });
+  });
 });

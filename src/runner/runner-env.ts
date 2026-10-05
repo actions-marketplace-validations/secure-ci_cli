@@ -1,0 +1,273 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import type { GithubContext } from './expression';
+
+/**
+ * Parse a runner "file command" file (`$GITHUB_OUTPUT`, `$GITHUB_ENV`,
+ * `$GITHUB_STATE`), supporting both the simple `name=value` form and the
+ * multiline heredoc form: `name<<DELIMITER` ... `DELIMITER`.
+ */
+export function parseKeyValueFile(filePath: string): Record<string, string> {
+  const values: Record<string, string> = {};
+
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return values;
+  }
+
+  const lines = content.split(/\r?\n/);
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line) {
+      i++;
+      continue;
+    }
+
+    const heredocMatch = line.match(/^([^=<]+)<<(.+)$/);
+    if (heredocMatch) {
+      const [, name, delimiter] = heredocMatch;
+      const valueLines: string[] = [];
+      i++;
+      while (i < lines.length && lines[i] !== delimiter) {
+        valueLines.push(lines[i]);
+        i++;
+      }
+      values[name.trim()] = valueLines.join('\n');
+      i++; // Skip the closing delimiter line
+      continue;
+    }
+
+    const eqIndex = line.indexOf('=');
+    if (eqIndex > -1) {
+      values[line.slice(0, eqIndex).trim()] = line.slice(eqIndex + 1);
+    }
+    i++;
+  }
+
+  return values;
+}
+
+/** Per-step file commands, as exposed to the step via `GITHUB_*` env vars. */
+export interface StepFiles {
+  dir: string;
+  output: string;
+  env: string;
+  path: string;
+  state: string;
+  summary: string;
+}
+
+export interface StepFileResults {
+  outputs: Record<string, string>;
+  env: Record<string, string>;
+  path: string[];
+  state: Record<string, string>;
+}
+
+/**
+ * Create empty `GITHUB_OUTPUT` / `GITHUB_ENV` / `GITHUB_PATH` /
+ * `GITHUB_STATE` / `GITHUB_STEP_SUMMARY` files for one step, in `dir` (e.g.
+ * a container exchange dir) or a fresh temp directory.
+ */
+export function createStepFiles(dir?: string): StepFiles {
+  const baseDir = dir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-step-'));
+  const files: StepFiles = {
+    dir: baseDir,
+    output: path.join(baseDir, 'output'),
+    env: path.join(baseDir, 'env'),
+    path: path.join(baseDir, 'path'),
+    state: path.join(baseDir, 'state'),
+    summary: path.join(baseDir, 'summary')
+  };
+  for (const file of [
+    files.output,
+    files.env,
+    files.path,
+    files.state,
+    files.summary
+  ]) {
+    fs.writeFileSync(file, '');
+  }
+  return files;
+}
+
+export function readStepFiles(files: StepFiles): StepFileResults {
+  let pathLines: string[] = [];
+  try {
+    pathLines = fs
+      .readFileSync(files.path, 'utf-8')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    // Missing file: no PATH additions
+  }
+
+  return {
+    outputs: parseKeyValueFile(files.output),
+    env: parseKeyValueFile(files.env),
+    path: pathLines,
+    state: parseKeyValueFile(files.state)
+  };
+}
+
+export function cleanupStepFiles(files: StepFiles): void {
+  fs.rmSync(files.dir, { recursive: true, force: true });
+}
+
+export interface WorkflowCommandAnnotation {
+  level: 'warning' | 'error' | 'notice' | 'debug' | 'group';
+  message: string;
+}
+
+export interface WorkflowCommandResult {
+  /** The output with workflow-command lines removed. */
+  text: string;
+  masks: string[];
+  outputs: Record<string, string>;
+  state: Record<string, string>;
+  annotations: WorkflowCommandAnnotation[];
+}
+
+function unescapeData(value: string): string {
+  return value
+    .replace(/%0D/gi, '\r')
+    .replace(/%0A/gi, '\n')
+    .replace(/%25/g, '%');
+}
+
+function unescapeProperty(value: string): string {
+  return unescapeData(value).replace(/%3A/gi, ':').replace(/%2C/gi, ',');
+}
+
+function parseProperties(raw: string | undefined): Record<string, string> {
+  const props: Record<string, string> = {};
+  for (const pair of (raw || '').split(',')) {
+    const eq = pair.indexOf('=');
+    if (eq > 0) {
+      props[pair.slice(0, eq).trim()] = unescapeProperty(pair.slice(eq + 1));
+    }
+  }
+  return props;
+}
+
+/**
+ * Interpret GitHub Actions workflow commands (`::add-mask::`,
+ * `::set-output`, `::save-state`, `::warning::`, `::group::`, ...) written
+ * to a step's stdout. Unknown `::x::` commands are left in the text.
+ * https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions
+ */
+export function processWorkflowCommands(stdout: string): WorkflowCommandResult {
+  const result: WorkflowCommandResult = {
+    text: '',
+    masks: [],
+    outputs: {},
+    state: {},
+    annotations: []
+  };
+  const kept: string[] = [];
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = line.match(/^::([a-zA-Z-]+)(?:\s+([^:]*))?::(.*)$/);
+    if (!match) {
+      kept.push(line);
+      continue;
+    }
+
+    const [, command, rawProps, rawData] = match;
+    const data = unescapeData(rawData);
+    const props = parseProperties(rawProps);
+
+    switch (command) {
+      case 'add-mask':
+        if (data) result.masks.push(data);
+        break;
+      case 'set-output':
+        if (props.name) result.outputs[props.name] = data;
+        break;
+      case 'save-state':
+        if (props.name) result.state[props.name] = data;
+        break;
+      case 'warning':
+      case 'error':
+      case 'notice':
+      case 'debug':
+      case 'group':
+        result.annotations.push({ level: command, message: data });
+        break;
+      case 'endgroup':
+        break;
+      default:
+        kept.push(line);
+    }
+  }
+
+  result.text = kept.join('\n');
+  return result;
+}
+
+export interface RunnerEnvOptions {
+  workspace: string;
+  eventPath: string;
+  tempDir: string;
+  toolCache: string;
+}
+
+function runnerOs(): string {
+  switch (process.platform) {
+    case 'darwin':
+      return 'macOS';
+    case 'win32':
+      return 'Windows';
+    default:
+      return 'Linux';
+  }
+}
+
+/**
+ * The default environment variables GitHub's runner exports to every step,
+ * derived from the (local, best-effort) `github` context.
+ * https://docs.github.com/en/actions/learn-github-actions/variables#default-environment-variables
+ */
+export function buildRunnerEnv(
+  github: GithubContext,
+  options: RunnerEnvOptions
+): Record<string, string> {
+  const env: Record<string, string> = {
+    CI: 'true',
+    GITHUB_ACTIONS: 'true',
+    GITHUB_WORKFLOW: github.workflow ?? '',
+    GITHUB_JOB: github.job ?? '',
+    GITHUB_SHA: github.sha ?? '',
+    GITHUB_REF: github.ref ?? '',
+    GITHUB_REF_NAME: github.ref_name ?? '',
+    GITHUB_EVENT_NAME: github.event_name ?? '',
+    GITHUB_ACTOR: github.actor ?? '',
+    GITHUB_REPOSITORY: github.repository ?? '',
+    GITHUB_REPOSITORY_OWNER: github.repository_owner ?? '',
+    GITHUB_RUN_ID: github.run_id ?? '',
+    GITHUB_RUN_NUMBER: github.run_number ?? '',
+    GITHUB_RUN_ATTEMPT: github.run_attempt ?? '',
+    GITHUB_SERVER_URL: github.server_url ?? '',
+    GITHUB_API_URL: github.api_url ?? '',
+    GITHUB_WORKSPACE: options.workspace,
+    GITHUB_EVENT_PATH: options.eventPath,
+    RUNNER_OS: runnerOs(),
+    RUNNER_TEMP: options.tempDir,
+    RUNNER_TOOL_CACHE: options.toolCache
+  };
+  return env;
+}
+
+/** Prepend `$GITHUB_PATH` additions (most recent first) to a PATH value. */
+export function prependPath(
+  additions: string[],
+  basePath: string | undefined
+): string {
+  return [...additions, ...(basePath ? [basePath] : [])].join(path.delimiter);
+}

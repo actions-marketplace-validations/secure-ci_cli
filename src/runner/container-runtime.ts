@@ -79,7 +79,7 @@ export interface ContainerRuntime {
   ): Promise<ContainerBuildResult>;
 }
 
-const CONTAINER_WORKDIR = '/ghact-workspace';
+export const CONTAINER_WORKDIR = '/ghact-workspace';
 export const CONTAINER_EXCHANGE_DIR = '/ghact-exchange';
 
 /** Probe timeout for `<bin> version` availability checks. */
