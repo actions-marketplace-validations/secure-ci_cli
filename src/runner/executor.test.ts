@@ -71,6 +71,42 @@ describe('Executor', () => {
       expect(result.jobs[0].success).toBe(true);
     });
 
+    it('should expose workflow-level and job-level env vars to run commands', async () => {
+      const tempDir = tempTestDir;
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+      const workflowPath = path.join(tempDir, 'env-propagation-workflow.yml');
+      fs.writeFileSync(
+        workflowPath,
+        `
+name: Env Propagation Workflow
+on: push
+
+env:
+  WORKFLOW_VAR: from-workflow
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      JOB_VAR: from-job
+    steps:
+      - name: Print env vars
+        run: echo "wf=$WORKFLOW_VAR job=$JOB_VAR"
+`
+      );
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain(
+        'wf=from-workflow job=from-job'
+      );
+
+      fs.unlinkSync(workflowPath);
+    });
+
     it('should handle workflow execution with secrets', async () => {
       const workflowPath = path.join(fixturesDir, 'echo-workflow.yml');
 

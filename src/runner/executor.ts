@@ -587,6 +587,12 @@ async function executeStep(
 
       logger.debug(`Executing: ${command}`);
 
+      // Merge workflow-level, job-level, and step-level `env:` (ctx.env
+      // already combines all three - see jobCtx/stepCtx construction in
+      // executeWorkflow). Fall back to step.env alone when no context is
+      // available (e.g. composite action steps run outside a job).
+      const mergedEnv = ctx ? ctx.env : step.env;
+
       const containerPreference = options.containerRuntime ?? 'none';
       if (containerPreference !== 'none') {
         const runtime = await resolveContainerRuntime(containerPreference);
@@ -596,7 +602,8 @@ async function executeStep(
             step,
             options,
             command,
-            startTime
+            startTime,
+            mergedEnv
           );
         }
         logger.warn(
@@ -616,7 +623,7 @@ async function executeStep(
           shell: step.shell || 'bash',
           env: {
             ...process.env,
-            ...step.env,
+            ...mergedEnv,
             GITHUB_OUTPUT: outputFilePath
           }
         });
@@ -701,7 +708,8 @@ async function executeInContainer(
   step: Step,
   options: RunOptions,
   command: string,
-  startTime: number
+  startTime: number,
+  mergedEnv?: Record<string, string>
 ): Promise<StepResult> {
   const exchangeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'actly-exchange-'));
   const containerOutputPath = `${CONTAINER_EXCHANGE_DIR}/output`;
@@ -717,7 +725,7 @@ async function executeInContainer(
       workingDir: process.cwd(),
       exchangeDir,
       env: {
-        ...step.env,
+        ...(mergedEnv ?? step.env),
         GITHUB_OUTPUT: containerOutputPath
       },
       timeoutMs: options.containerTimeoutMs,
