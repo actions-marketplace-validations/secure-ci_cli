@@ -108,10 +108,26 @@ forbidden:
 actly --contract contracts/platform-standard.yml .github/workflows/deploy.yml
 ```
 
+If the caller's workflow calls `org/deploy` before `org/security-scan` (or uses `org/legacy-deploy`, or omits a required action, or pins `org/security-scan` below `v1.2.0`), the command exits non-zero with a message like:
+
+```
+[INFO] Validating workflow...
+[INFO] Validating against pipeline contract: contracts/platform-standard.yml
+[ERROR] Validation failed:
+[ERROR]   [ERROR] required[1]: Required action "org/deploy" must run after "org/security-scan", but it does not
+```
+
 - Only `uses:` steps declared directly in the given workflow file are considered — in whole-workflow order, resolving job order via `needs:` and then step order within each job. Steps inside a called reusable workflow or composite action are **not** resolved/recursed into.
 - `ordering: relative` (default): required actions must appear in that relative order, with any other steps allowed in between. `ordering: strict`: required actions must run back-to-back, with no other step in between.
 - A missing required action, a required action below `min-version`, an ordering violation, or any forbidden-action match is an **error** (validation fails). A required action whose version can't be compared (e.g. pinned to a branch or SHA) is a **warning**.
-- `--contract` implies `--validate` and currently applies to workflow files only (not standalone actions, since the contract is about a job/step sequence).
+- `--contract` implies `--validate` and currently applies to workflow files only (not standalone actions, since the contract is about a job/step sequence). Passing `--contract` against an action file fails with a clear error.
+
+**Known limitations (v1 scope):**
+
+- **Jobs with no `needs:` relationship between them** (i.e. jobs GitHub Actions would run in parallel) are ordered by their declaration order in the YAML, since there's no real concurrency model here — this is an approximation for a static order check, not a simulation of actual parallel execution. If your contract's ordering spans two jobs that don't have a `needs:` edge between them, reordering those jobs in the YAML can change the validation result even though nothing semantically changed.
+- **`strategy.matrix` jobs** are checked once against the job's `steps:` as authored, not once per expanded matrix combination — the contract is about pipeline _structure_, not the runtime values substituted into it.
+- **Action references** are matched as exact strings against `uses:` (minus any `@version` suffix) — this covers the common `owner/repo` or `owner/repo/path` marketplace-action form, as well as local paths (`./.github/actions/foo`, matched with no version). `docker://image` references are matched as-is (the whole string, including `docker://`) and have no version-pin concept.
+- Action references are matched **case-sensitively** and are not normalized (e.g. `Org/Action` won't match a contract entry for `org/action`).
 
 ## Workflow Features
 
