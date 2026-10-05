@@ -20,6 +20,7 @@ import {
   evaluateCondition,
   resolveExpressionValue,
   substituteExpressions,
+  substituteRecord,
   ExpressionContext,
   GithubContext
 } from './expression';
@@ -384,8 +385,24 @@ export async function executeWorkflow(
               : '';
           const jobLabel = `${jobId}${matrixSuffix}`;
 
+          // Workflow-level env can't reference `env` itself; job-level env
+          // sees the workflow env plus matrix (matching GitHub's contexts).
+          const workflowEnv = substituteRecord(
+            parsed.file.env,
+            createContext({}, options.inputs, options.secrets, github)
+          );
+          const jobEnv = substituteRecord(
+            job.env,
+            createContext(
+              workflowEnv,
+              options.inputs,
+              options.secrets,
+              github,
+              matrixValues
+            )
+          );
           const jobCtx = createContext(
-            { ...(parsed.file.env || {}), ...(job.env || {}) },
+            { ...workflowEnv, ...jobEnv },
             options.inputs,
             options.secrets,
             github,
@@ -405,7 +422,7 @@ export async function executeWorkflow(
           for (const step of job.steps || []) {
             const stepCtx: ExpressionContext = {
               ...jobCtx,
-              env: { ...jobCtx.env, ...(step.env || {}) }
+              env: { ...jobCtx.env, ...substituteRecord(step.env, jobCtx) }
             };
 
             if (!evaluateCondition(step.if, stepCtx)) {
@@ -552,7 +569,7 @@ async function executeStep(
 
     // Handle 'uses' actions - fetch and execute remote actions
     if (step.uses) {
-      return await executeAction(step, options, startTime);
+      return await executeAction(step, options, startTime, ctx);
     }
 
     // Handle 'run' commands
@@ -796,6 +813,7 @@ async function executeDockerAction(
   action: ActionFile,
   actionPath: string,
   step: Step,
+  withInputs: Record<string, string>,
   options: RunOptions,
   startTime: number
 ): Promise<StepResult> {
@@ -861,11 +879,9 @@ async function executeDockerAction(
   // convention (same one ghact already uses for JS actions).
   const mergedInputs: Record<string, string> = {};
   const env: Record<string, string> = {};
-  if (step.with) {
-    for (const [key, value] of Object.entries(step.with)) {
-      mergedInputs[key] = String(value);
-      env[`INPUT_${key.toUpperCase().replace(/-/g, '_')}`] = String(value);
-    }
+  for (const [key, value] of Object.entries(withInputs)) {
+    mergedInputs[key] = value;
+    env[`INPUT_${key.toUpperCase().replace(/-/g, '_')}`] = value;
   }
 
   // `runs.args` may reference ${{ inputs.* }} / ${{ secrets.* }}.
@@ -949,7 +965,8 @@ async function executeDockerAction(
 async function executeAction(
   step: Step,
   options: RunOptions,
-  startTime: number
+  startTime: number,
+  ctx?: ExpressionContext
 ): Promise<StepResult> {
   if (!step.uses) {
     return {
@@ -989,6 +1006,12 @@ async function executeAction(
 
     const action = parsed.file;
 
+    // Resolve `with:` values against the calling step's context before they
+    // become the action's inputs (INPUT_* env vars / `inputs.*`).
+    const withInputs = ctx
+      ? substituteRecord(step.with, ctx)
+      : substituteRecord(step.with, createContext());
+
     // Handle different action types
     if (action.runs.using === 'composite') {
       // Execute composite action steps
@@ -1011,16 +1034,18 @@ async function executeAction(
           Object.assign(mergedInputs, options.inputs);
         }
 
-        if (step.with) {
-          for (const [key, value] of Object.entries(step.with)) {
-            mergedInputs[key] = String(value);
-          }
-        }
+        Object.assign(mergedInputs, withInputs);
 
-        const stepCtx: ExpressionContext = {
+        const inputsCtx: ExpressionContext = {
           ...actionCtx,
-          inputs: mergedInputs,
-          env: { ...actionCtx.env, ...(compositeStep.env || {}) }
+          inputs: mergedInputs
+        };
+        const stepCtx: ExpressionContext = {
+          ...inputsCtx,
+          env: {
+            ...actionCtx.env,
+            ...substituteRecord(compositeStep.env, inputsCtx)
+          }
         };
 
         if (!evaluateCondition(compositeStep.if, stepCtx)) {
@@ -1107,10 +1132,8 @@ async function executeAction(
       // Prepare environment variables for inputs
       const env = { ...process.env };
 
-      if (step.with) {
-        for (const [key, value] of Object.entries(step.with)) {
-          env[`INPUT_${key.toUpperCase().replace(/-/g, '_')}`] = String(value);
-        }
+      for (const [key, value] of Object.entries(withInputs)) {
+        env[`INPUT_${key.toUpperCase().replace(/-/g, '_')}`] = value;
       }
 
       // Execute the script
@@ -1154,6 +1177,7 @@ async function executeAction(
         action,
         actionPath,
         step,
+        withInputs,
         options,
         startTime
       );

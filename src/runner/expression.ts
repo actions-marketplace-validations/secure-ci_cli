@@ -387,6 +387,22 @@ export function substituteExpressions(
 }
 
 /**
+ * Resolve every value of an `env:` / `with:` map against the given context,
+ * stringifying non-string YAML scalars (e.g. `PORT: 3000`) the way the
+ * runner does before exporting them.
+ */
+export function substituteRecord(
+  record: Record<string, unknown> | undefined,
+  ctx: ExpressionContext
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(record || {})) {
+    result[key] = substituteExpressions(String(value ?? ''), ctx);
+  }
+  return result;
+}
+
+/**
  * Evaluate an `if:` condition string against the given context.
  * Returns true when the condition is undefined/empty, or when it fails to
  * parse (fails open, with a warning, to avoid unexpectedly skipping steps).

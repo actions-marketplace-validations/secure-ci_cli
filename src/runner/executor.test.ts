@@ -981,4 +981,176 @@ jobs:
       fs.unlinkSync(workflowPath);
     });
   });
+
+  describe('expression substitution in env: and with:', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-subst-'));
+    });
+
+    function writeWorkflow(content: string): string {
+      const file = path.join(tempDir, 'workflow.yml');
+      fs.writeFileSync(file, content);
+      return file;
+    }
+
+    function writeAction(dir: string, files: Record<string, string>): string {
+      const actionDir = path.join(tempDir, dir);
+      fs.mkdirSync(actionDir, { recursive: true });
+      for (const [name, content] of Object.entries(files)) {
+        fs.writeFileSync(path.join(actionDir, name), content);
+      }
+      return path.join(actionDir, 'action.yml');
+    }
+
+    it('substitutes expressions in workflow, job and step env', async () => {
+      const workflowPath = writeWorkflow(`
+name: Env Subst
+on: push
+env:
+  W: wf-\${{ inputs.q }}
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    env:
+      J: job-\${{ env.W }}-\${{ matrix.n }}
+    strategy:
+      matrix:
+        n: [1]
+    steps:
+      - id: first
+        run: echo "val=out" >> $GITHUB_OUTPUT
+      - run: echo "W=$W J=$J S=$S"
+        env:
+          S: step-\${{ env.J }}-\${{ steps.first.outputs.val }}
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        inputs: { q: 'hello' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[1].output).toContain(
+        'W=wf-hello J=job-wf-hello-1 S=step-job-wf-hello-1-out'
+      );
+    });
+
+    it('passes secrets referenced from step env to the step', async () => {
+      const workflowPath = writeWorkflow(`
+name: Secret Env
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: printf '%s' "$TOKEN" | wc -c
+        env:
+          TOKEN: \${{ secrets.TOKEN }}
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        secrets: { TOKEN: 'abc==' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output?.trim()).toBe('5');
+    });
+
+    it('stringifies non-string env values', async () => {
+      const workflowPath = writeWorkflow(`
+name: Number Env
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    env:
+      PORT: 3000
+      DEBUG: true
+    steps:
+      - run: echo "port=$PORT debug=$DEBUG"
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.jobs[0].steps[0].output).toContain('port=3000 debug=true');
+    });
+
+    it('substitutes with: values for JavaScript actions', async () => {
+      const actionPath = writeAction('js-action', {
+        'action.yml': `
+name: JS Echo
+description: Echo an input
+inputs:
+  greeting:
+    description: greeting
+runs:
+  using: node20
+  main: index.js
+`,
+        'index.js': 'console.log("greeting=" + process.env.INPUT_GREETING);'
+      });
+      fetchActionMock.mockResolvedValueOnce(actionPath);
+
+      const workflowPath = writeWorkflow(`
+name: JS With
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: local/js-action@v1
+        with:
+          greeting: hi-\${{ inputs.who }}
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        inputs: { who: 'there' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain('greeting=hi-there');
+    });
+
+    it('substitutes with: values for composite actions', async () => {
+      const actionPath = writeAction('composite-action', {
+        'action.yml': `
+name: Composite Echo
+description: Echo an input
+inputs:
+  greeting:
+    description: greeting
+outputs:
+  said:
+    value: \${{ steps.say.outputs.said }}
+runs:
+  using: composite
+  steps:
+    - id: say
+      shell: bash
+      run: echo "said=\${{ inputs.greeting }}" >> $GITHUB_OUTPUT
+`
+      });
+      fetchActionMock.mockResolvedValueOnce(actionPath);
+
+      const workflowPath = writeWorkflow(`
+name: Composite With
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: local/composite-action@v1
+        with:
+          greeting: hi-\${{ inputs.who }}
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        inputs: { who: 'there' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].outputs).toEqual({ said: 'hi-there' });
+    });
+  });
 });
