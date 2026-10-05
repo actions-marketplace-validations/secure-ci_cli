@@ -6,7 +6,8 @@ import {
   JobResult,
   StepResult,
   Step,
-  ActionFile
+  ActionFile,
+  Job
 } from '../types';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
@@ -380,63 +381,80 @@ export async function executeWorkflow(
           const stepResults: StepResult[] = [];
           const runtime = createJobRuntime(github, runDir);
 
-          // Execute each step
-          for (const step of job.steps || []) {
-            // `$GITHUB_ENV` additions from earlier steps sit between the
-            // job env and this step's own `env:`.
-            const envCtx: ExpressionContext = {
-              ...jobCtx,
-              env: { ...jobCtx.env, ...runtime.env }
-            };
-            const stepCtx: ExpressionContext = {
-              ...envCtx,
-              env: { ...envCtx.env, ...substituteRecord(step.env, envCtx) }
-            };
-
-            if (!evaluateCondition(step.if, stepCtx)) {
-              logger.info(
-                `Skipping step: ${step.name || step.id || 'unnamed'} (condition not met)`
-              );
-              const skippedResult: StepResult = {
-                step,
-                success: true,
-                outcome: 'skipped',
-                output: 'Skipped: condition not met',
-                duration: 0
-              };
-              stepResults.push(skippedResult);
-              if (step.id) {
-                jobCtx.steps[step.id] = { outcome: 'skipped', outputs: {} };
-              }
-              continue;
-            }
-
-            const stepResult = await executeStep(
-              step,
-              options,
-              runtime,
-              stepCtx
-            );
-            stepResults.push(stepResult);
-
-            if (step.id) {
-              jobCtx.steps[step.id] = {
-                outcome: stepResult.success ? 'success' : 'failure',
-                outputs: stepResult.outputs || {}
-              };
-            }
-
-            if (!stepResult.success) {
-              jobCtx.jobFailed = true;
-            }
-
-            if (!stepResult.success && !step['continue-on-error']) {
-              logger.error(`Step failed: ${step.name || 'unnamed'}`);
-              break;
-            }
+          if (
+            !(await startJobContainer(job, jobCtx, options, runtime, runDir))
+          ) {
+            jobs.push({
+              job: jobLabel,
+              success: false,
+              steps: [],
+              duration: Date.now() - jobStartTime
+            });
+            matrixFailed = true;
+            continue;
           }
 
-          await runPostSteps(runtime, jobCtx, stepResults);
+          try {
+            // Execute each step
+            for (const step of job.steps || []) {
+              // `$GITHUB_ENV` additions from earlier steps sit between the
+              // job env and this step's own `env:`.
+              const envCtx: ExpressionContext = {
+                ...jobCtx,
+                env: { ...jobCtx.env, ...runtime.env }
+              };
+              const stepCtx: ExpressionContext = {
+                ...envCtx,
+                env: { ...envCtx.env, ...substituteRecord(step.env, envCtx) }
+              };
+
+              if (!evaluateCondition(step.if, stepCtx)) {
+                logger.info(
+                  `Skipping step: ${step.name || step.id || 'unnamed'} (condition not met)`
+                );
+                const skippedResult: StepResult = {
+                  step,
+                  success: true,
+                  outcome: 'skipped',
+                  output: 'Skipped: condition not met',
+                  duration: 0
+                };
+                stepResults.push(skippedResult);
+                if (step.id) {
+                  jobCtx.steps[step.id] = { outcome: 'skipped', outputs: {} };
+                }
+                continue;
+              }
+
+              const stepResult = await executeStep(
+                step,
+                options,
+                runtime,
+                stepCtx
+              );
+              stepResults.push(stepResult);
+
+              if (step.id) {
+                jobCtx.steps[step.id] = {
+                  outcome: stepResult.success ? 'success' : 'failure',
+                  outputs: stepResult.outputs || {}
+                };
+              }
+
+              if (!stepResult.success) {
+                jobCtx.jobFailed = true;
+              }
+
+              if (!stepResult.success && !step['continue-on-error']) {
+                logger.error(`Step failed: ${step.name || 'unnamed'}`);
+                break;
+              }
+            }
+
+            await runPostSteps(runtime, jobCtx, stepResults);
+          } finally {
+            await stopJobContainer(runtime);
+          }
 
           const jobSuccess = stepResults.every(
             (s) => s.success || s.step['continue-on-error']
@@ -473,43 +491,66 @@ export async function executeWorkflow(
 
       if (parsed.file.runs.using === 'composite' && parsed.file.runs.steps) {
         const stepResults: StepResult[] = [];
-        const runtime = createJobRuntime(
-          buildGithubContext(parsed.file.name, 'action', process.cwd()),
-          runDir
+        const github = buildGithubContext(
+          parsed.file.name,
+          'action',
+          process.cwd()
         );
-
-        for (const step of parsed.file.runs.steps) {
-          const stepResult = await executeStep(step, options, runtime);
-          stepResults.push(stepResult);
-
-          if (!stepResult.success) {
-            return {
-              success: false,
-              jobs: [
-                {
-                  job: 'action',
-                  success: false,
-                  steps: stepResults,
-                  duration: Date.now() - startTime
-                }
-              ],
-              duration: Date.now() - startTime
-            };
-          }
+        const runtime = createJobRuntime(github, runDir);
+        const actionCtx = createContext(
+          {},
+          options.inputs,
+          options.secrets,
+          github
+        );
+        if (
+          !(await startJobContainer(
+            undefined,
+            actionCtx,
+            options,
+            runtime,
+            runDir
+          ))
+        ) {
+          return { success: false, jobs: [], duration: Date.now() - startTime };
         }
 
-        return {
-          success: true,
-          jobs: [
-            {
-              job: 'action',
-              success: true,
-              steps: stepResults,
-              duration: Date.now() - startTime
+        try {
+          for (const step of parsed.file.runs.steps) {
+            const stepResult = await executeStep(step, options, runtime);
+            stepResults.push(stepResult);
+
+            if (!stepResult.success) {
+              return {
+                success: false,
+                jobs: [
+                  {
+                    job: 'action',
+                    success: false,
+                    steps: stepResults,
+                    duration: Date.now() - startTime
+                  }
+                ],
+                duration: Date.now() - startTime
+              };
             }
-          ],
-          duration: Date.now() - startTime
-        };
+          }
+
+          return {
+            success: true,
+            jobs: [
+              {
+                job: 'action',
+                success: true,
+                steps: stepResults,
+                duration: Date.now() - startTime
+              }
+            ],
+            duration: Date.now() - startTime
+          };
+        } finally {
+          await stopJobContainer(runtime);
+        }
       } else {
         logger.warn(`Action type ${parsed.file.runs.using} not yet supported`);
         return {
@@ -552,6 +593,177 @@ interface JobRuntime {
   /** `$GITHUB_PATH` additions, most recent first. */
   path: string[];
   postSteps: PostStep[];
+  /** Set when the job's steps run in a container (see startJobContainer). */
+  container?: JobContainerHandle;
+}
+
+/** A per-job container that `run:` steps and JS actions are exec'd into. */
+interface JobContainerHandle {
+  runtime: ContainerRuntime;
+  id: string;
+  image: string;
+  /** Host directory mounted at CONTAINER_EXCHANGE_DIR. */
+  exchangeDir: string;
+  /** The image's `node` and base PATH, probed once; null if no node. */
+  node?: { path: string; basePath: string } | null;
+  /** Host action directory -> its copy's path inside the container. */
+  actionDirs: Map<string, string>;
+}
+
+const activeContainers = new Set<JobContainerHandle>();
+let containerCleanupInstalled = false;
+
+/**
+ * Make sure job containers are removed if ghact exits early (Ctrl-C,
+ * SIGTERM, or an exit that skips the normal per-job cleanup).
+ */
+function installContainerCleanup(): void {
+  if (containerCleanupInstalled) return;
+  containerCleanupInstalled = true;
+
+  const cleanup = (): void => {
+    for (const container of activeContainers) {
+      container.runtime.stopSync(container.id);
+    }
+    activeContainers.clear();
+  };
+
+  process.once('exit', cleanup);
+  for (const [signal, code] of [
+    ['SIGINT', 130],
+    ['SIGTERM', 143]
+  ] as const) {
+    process.once(signal, () => {
+      cleanup();
+      process.exit(code);
+    });
+  }
+}
+
+/**
+ * Start the job's container when container isolation is on, using
+ * `jobs.<id>.container` if set, else `--container-image`. Returns false
+ * only when a runtime is available but the container can't be started (the
+ * job then fails); with no runtime available, steps run on the host.
+ */
+async function startJobContainer(
+  job: Job | undefined,
+  ctx: ExpressionContext,
+  options: RunOptions,
+  runtime: JobRuntime,
+  runDir: string
+): Promise<boolean> {
+  const preference = options.containerRuntime ?? 'none';
+  const spec =
+    typeof job?.container === 'string'
+      ? { image: job.container }
+      : job?.container;
+
+  if (preference === 'none') {
+    if (spec) {
+      logger.warn(
+        `Ignoring jobs.<id>.container (${spec.image}): container runtime is "none", running on the host.`
+      );
+    }
+    return true;
+  }
+
+  const containerRuntime = await resolveContainerRuntime(preference);
+  if (!containerRuntime) {
+    logger.warn(
+      `No "${preference}" container runtime available; falling back to host execution.`
+    );
+    return true;
+  }
+
+  if (
+    spec &&
+    'image' in spec &&
+    (('options' in spec && spec.options) ||
+      ('volumes' in spec && spec.volumes) ||
+      ('ports' in spec && spec.ports) ||
+      ('credentials' in spec && spec.credentials))
+  ) {
+    logger.warn(
+      'jobs.<id>.container: only image and env are supported; ignoring options/volumes/ports/credentials.'
+    );
+  }
+
+  const image = spec?.image
+    ? substituteExpressions(spec.image, ctx)
+    : options.containerImage || DEFAULT_CONTAINER_IMAGE;
+  const containerEnv = substituteRecord(
+    spec && 'env' in spec ? spec.env : undefined,
+    ctx
+  );
+
+  const exchangeDir = fs.mkdtempSync(path.join(runDir, 'container-'));
+  fs.chmodSync(exchangeDir, 0o777);
+  fs.copyFileSync(runtime.eventPath, path.join(exchangeDir, 'event.json'));
+
+  logger.info(`Starting job container: ${image} (${containerRuntime.name})`);
+  const started = await containerRuntime.start({
+    image,
+    workingDir: process.cwd(),
+    exchangeDir,
+    env: containerEnv,
+    memoryLimit: options.containerMemoryLimit,
+    networkDisabled: options.networkDisabled === true
+  });
+
+  if (!started.success || !started.id) {
+    logger.error(`Failed to start job container (${image}): ${started.error}`);
+    return false;
+  }
+
+  runtime.container = {
+    runtime: containerRuntime,
+    id: started.id,
+    image,
+    exchangeDir,
+    actionDirs: new Map()
+  };
+  installContainerCleanup();
+  activeContainers.add(runtime.container);
+  return true;
+}
+
+async function stopJobContainer(runtime: JobRuntime): Promise<void> {
+  const container = runtime.container;
+  if (!container) return;
+  activeContainers.delete(container);
+  runtime.container = undefined;
+  await container.runtime.stop(container.id);
+}
+
+/** Step files inside the job container's exchange dir, writable from it. */
+function createContainerStepFiles(container: JobContainerHandle): {
+  files: StepFiles;
+  containerDir: string;
+} {
+  const dir = fs.mkdtempSync(path.join(container.exchangeDir, 'step-'));
+  const files = createStepFiles(dir);
+  fs.chmodSync(dir, 0o777);
+  for (const file of [
+    files.output,
+    files.env,
+    files.path,
+    files.state,
+    files.summary
+  ]) {
+    fs.chmodSync(file, 0o666);
+  }
+  return {
+    files,
+    containerDir: `${CONTAINER_EXCHANGE_DIR}/${path.basename(dir)}`
+  };
+}
+
+/** `export PATH=...` prefix applying `$GITHUB_PATH` additions in a shell. */
+function containerPathPrefix(runtime: JobRuntime): string {
+  return runtime.path.length
+    ? `export PATH="${runtime.path.join(':')}:$PATH"\n`
+    : '';
 }
 
 /**
@@ -624,13 +836,10 @@ function fileCommandEnv(
 
 /**
  * The runner env as seen from inside a container: workspace and event
- * payload at their mounted paths.
+ * payload at their mounted paths (the event payload is copied into the
+ * exchange dir's root).
  */
-function containerRunnerEnv(
-  runtime: JobRuntime,
-  exchangeDir: string
-): Record<string, string> {
-  fs.copyFileSync(runtime.eventPath, path.join(exchangeDir, 'event.json'));
+function containerRunnerEnv(runtime: JobRuntime): Record<string, string> {
   return {
     ...runtime.runnerEnv,
     GITHUB_WORKSPACE: CONTAINER_WORKDIR,
@@ -740,23 +949,15 @@ async function executeStep(
         ? ctx.env
         : { ...runtime.env, ...substituteRecord(step.env, createContext()) };
 
-      const containerPreference = options.containerRuntime ?? 'none';
-      if (containerPreference !== 'none') {
-        const containerRuntime =
-          await resolveContainerRuntime(containerPreference);
-        if (containerRuntime) {
-          return await executeInContainer(
-            containerRuntime,
-            runtime,
-            step,
-            options,
-            command,
-            startTime,
-            mergedEnv
-          );
-        }
-        logger.warn(
-          `No "${containerPreference}" container runtime available; falling back to host execution.`
+      if (runtime.container) {
+        return await executeInJobContainer(
+          runtime.container,
+          runtime,
+          step,
+          options,
+          command,
+          startTime,
+          mergedEnv
         );
       }
 
@@ -833,13 +1034,12 @@ async function executeStep(
 }
 
 /**
- * Execute a `run:` step's command inside a container via the given runtime,
- * for process/filesystem isolation from the host. Mounts the host's current
- * working directory and a scratch "exchange" directory (carrying the step's
- * file commands and event payload in and out of the container) as volumes.
+ * Execute a `run:` step's command inside the job's container, so files and
+ * tools from earlier steps in the job are still there. File commands are
+ * exchanged through a per-step directory in the mounted exchange dir.
  */
-async function executeInContainer(
-  containerRuntime: ContainerRuntime,
+async function executeInJobContainer(
+  container: JobContainerHandle,
   runtime: JobRuntime,
   step: Step,
   options: RunOptions,
@@ -847,30 +1047,22 @@ async function executeInContainer(
   startTime: number,
   mergedEnv: Record<string, string>
 ): Promise<StepResult> {
-  const exchangeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-exchange-'));
-  const files = createStepFiles(exchangeDir);
+  const { files, containerDir } = createContainerStepFiles(container);
 
   try {
-    const pathPrefix = runtime.path.length
-      ? `export PATH="${runtime.path.join(':')}:$PATH"\n`
-      : '';
     const workingDir = step['working-directory']
-      ? `cd '${step['working-directory'].replace(/'/g, "'\\''")}' && ${command}`
-      : command;
+      ? path.posix.resolve(CONTAINER_WORKDIR, step['working-directory'])
+      : CONTAINER_WORKDIR;
 
-    const result = await containerRuntime.execute({
-      image: options.containerImage || DEFAULT_CONTAINER_IMAGE,
-      command: pathPrefix + workingDir,
-      workingDir: process.cwd(),
-      exchangeDir,
+    const result = await container.runtime.exec(container.id, {
+      command: containerPathPrefix(runtime) + command,
+      workingDir,
       env: {
-        ...containerRunnerEnv(runtime, exchangeDir),
+        ...containerRunnerEnv(runtime),
         ...mergedEnv,
-        ...fileCommandEnv(files, CONTAINER_EXCHANGE_DIR)
+        ...fileCommandEnv(files, containerDir)
       },
-      timeoutMs: options.containerTimeoutMs,
-      memoryLimit: options.containerMemoryLimit,
-      networkDisabled: options.networkDisabled !== false
+      timeoutMs: options.containerTimeoutMs
     });
 
     const { outputs } = finishStepOutput(result.stdout, files, runtime);
@@ -880,7 +1072,7 @@ async function executeInContainer(
 
     if (result.timedOut) {
       logger.error(
-        `Step timed out after ${options.containerTimeoutMs}ms (container: ${containerRuntime.name})`
+        `Step timed out after ${options.containerTimeoutMs}ms (container: ${container.runtime.name})`
       );
       return {
         step,
@@ -894,7 +1086,7 @@ async function executeInContainer(
 
     if (!result.success) {
       logger.error(
-        `Step failed (container: ${containerRuntime.name}, exit code: ${result.exitCode})`
+        `Step failed (container: ${container.runtime.name}, exit code: ${result.exitCode})`
       );
       return {
         step,
@@ -907,7 +1099,7 @@ async function executeInContainer(
     }
 
     logger.success(
-      `Step completed: ${step.name || 'unnamed'} (container: ${containerRuntime.name})`
+      `Step completed: ${step.name || 'unnamed'} (container: ${container.runtime.name})`
     );
 
     return {
@@ -918,7 +1110,7 @@ async function executeInContainer(
       duration: Date.now() - startTime
     };
   } finally {
-    fs.rmSync(exchangeDir, { recursive: true, force: true });
+    cleanupStepFiles(files);
   }
 }
 
@@ -1017,6 +1209,7 @@ async function executeDockerAction(
 
   const exchangeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-exchange-'));
   const files = createStepFiles(exchangeDir);
+  fs.copyFileSync(runtime.eventPath, path.join(exchangeDir, 'event.json'));
 
   try {
     const result = await containerRuntime.execute({
@@ -1026,14 +1219,14 @@ async function executeDockerAction(
       workingDir: process.cwd(),
       exchangeDir,
       env: {
-        ...containerRunnerEnv(runtime, exchangeDir),
+        ...containerRunnerEnv(runtime),
         ...callerEnv,
         ...inputEnv,
         ...fileCommandEnv(files, CONTAINER_EXCHANGE_DIR)
       },
       timeoutMs: options.containerTimeoutMs,
       memoryLimit: options.containerMemoryLimit,
-      networkDisabled: options.networkDisabled !== false
+      networkDisabled: options.networkDisabled === true
     });
 
     const { outputs } = finishStepOutput(result.stdout, files, runtime);
@@ -1097,6 +1290,7 @@ async function executeNodeAction(
   step: Step,
   actionInputs: Record<string, string>,
   callerCtx: ExpressionContext,
+  options: RunOptions,
   runtime: JobRuntime,
   startTime: number
 ): Promise<StepResult> {
@@ -1120,20 +1314,86 @@ async function executeNodeAction(
     inputEnv[inputEnvName(key)] = value;
   }
 
+  // In a job container, run the action there with the image's own `node`,
+  // from a copy of the action in the mounted exchange dir.
+  const container = runtime.container;
+  let containerActionDir: string | undefined;
+  if (container) {
+    if (container.node === undefined) {
+      const probe = await container.runtime.exec(container.id, {
+        command: `command -v node && printf '%s\\n' "$PATH"`
+      });
+      const [nodePath, basePath] = probe.stdout.trim().split('\n');
+      container.node =
+        probe.success && nodePath
+          ? { path: nodePath.trim(), basePath: (basePath || '').trim() }
+          : null;
+    }
+    if (!container.node) {
+      const error = `JavaScript action "${step.uses}" needs \`node\` in the job container image (${container.image}). Use an image that includes Node.js (e.g. --container-image node:20, or catthehacker/ubuntu:act-22.04), or run on the host with --container-runtime none.`;
+      logger.error(error);
+      return { step, success: false, error, duration: Date.now() - startTime };
+    }
+
+    containerActionDir = container.actionDirs.get(actionDir);
+    if (!containerActionDir) {
+      const hash = crypto
+        .createHash('sha1')
+        .update(actionDir)
+        .digest('hex')
+        .slice(0, 12);
+      fs.cpSync(actionDir, path.join(container.exchangeDir, 'actions', hash), {
+        recursive: true
+      });
+      containerActionDir = `${CONTAINER_EXCHANGE_DIR}/actions/${hash}`;
+      container.actionDirs.set(actionDir, containerActionDir);
+    }
+  }
+
   let state: Record<string, string> = {};
   let output = '';
 
-  const runScript = async (
-    script: string
+  /** Run one script (pre/main/post) on the host or in the job container. */
+  const invokeScript = async (
+    script: string,
+    files: StepFiles,
+    containerDir: string | undefined,
+    stateEnv: Record<string, string>
   ): Promise<{
     success: boolean;
-    outputs: Record<string, string>;
+    stdout: string;
+    stderr: string;
     error?: string;
   }> => {
-    const files = createStepFiles();
-    const stateEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(state)) {
-      stateEnv[`STATE_${key}`] = value;
+    if (container?.node && containerActionDir && containerDir) {
+      // Exec node directly (no shell), so hyphenated INPUT_* names survive.
+      const scriptPath = path.posix.join(containerActionDir, script);
+      const result = await container.runtime.exec(container.id, {
+        args: [container.node.path, scriptPath],
+        workingDir: CONTAINER_WORKDIR,
+        env: {
+          ...containerRunnerEnv(runtime),
+          ...callerCtx.env,
+          ...inputEnv,
+          ...stateEnv,
+          GITHUB_ACTION_PATH: containerActionDir,
+          PATH: [...runtime.path, container.node.basePath]
+            .filter(Boolean)
+            .join(':'),
+          ...fileCommandEnv(files, containerDir)
+        },
+        timeoutMs: options.containerTimeoutMs
+      });
+      return {
+        success: result.success,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: result.success
+          ? undefined
+          : result.timedOut
+            ? `Timed out after ${options.containerTimeoutMs}ms`
+            : `node exited with code ${result.exitCode}`
+      };
     }
 
     try {
@@ -1158,27 +1418,59 @@ async function executeNodeAction(
           }
         }
       );
-      output += stdout;
-      const result = finishStepOutput(stdout, files, runtime);
-      state = { ...state, ...result.state };
-      if (stderr) {
-        logger.warn(stderr.trim());
-      }
-      return { success: true, outputs: result.outputs };
+      return { success: true, stdout, stderr };
     } catch (execError: unknown) {
       const error = execError as {
         message: string;
         stdout?: string;
         stderr?: string;
       };
-      output += error.stdout || '';
-      const result = finishStepOutput(error.stdout, files, runtime);
-      state = { ...state, ...result.state };
-      logger.error(`JavaScript action failed: ${error.message}`);
-      if (error.stderr) {
-        logger.error(error.stderr.trim());
+      return {
+        success: false,
+        stdout: error.stdout || '',
+        stderr: error.stderr || '',
+        error: error.message
+      };
+    }
+  };
+
+  const runScript = async (
+    script: string
+  ): Promise<{
+    success: boolean;
+    outputs: Record<string, string>;
+    error?: string;
+  }> => {
+    const { files, containerDir } = container
+      ? createContainerStepFiles(container)
+      : { files: createStepFiles(), containerDir: undefined };
+    const stateEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(state)) {
+      stateEnv[`STATE_${key}`] = value;
+    }
+
+    try {
+      const result = await invokeScript(script, files, containerDir, stateEnv);
+      output += result.stdout;
+      const { outputs, state: savedState } = finishStepOutput(
+        result.stdout,
+        files,
+        runtime
+      );
+      state = { ...state, ...savedState };
+
+      if (result.success) {
+        if (result.stderr) {
+          logger.warn(result.stderr.trim());
+        }
+        return { success: true, outputs };
       }
-      return { success: false, outputs: result.outputs, error: error.message };
+
+      logger.error(`JavaScript action failed: ${result.error}`);
+      if (result.stderr) {
+        logger.error(result.stderr.trim());
+      }
+      return { success: false, outputs, error: result.error };
     } finally {
       cleanupStepFiles(files);
     }
@@ -1414,6 +1706,7 @@ async function executeAction(
         step,
         actionInputs,
         callerCtx,
+        options,
         runtime,
         startTime
       );

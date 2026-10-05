@@ -28,6 +28,39 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 
+type ExecCall = {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+};
+
+/** A fake ContainerRuntime whose job-container `exec` echoes the command. */
+function fakeJobContainerRuntime(
+  execImpl?: (
+    id: string,
+    opts: ExecCall
+  ) => Partial<{ success: boolean; stdout: string; exitCode: number }>
+) {
+  return {
+    name: 'docker' as const,
+    isAvailable: vi.fn().mockResolvedValue(true),
+    execute: vi.fn(),
+    build: vi.fn(),
+    start: vi.fn().mockResolvedValue({ success: true, id: 'ctr-1' }),
+    exec: vi.fn().mockImplementation(async (id: string, opts: ExecCall) => ({
+      success: true,
+      stdout: `ran: ${opts.command ?? opts.args?.join(' ')}\n`,
+      stderr: '',
+      exitCode: 0,
+      timedOut: false,
+      durationMs: 1,
+      ...(execImpl ? execImpl(id, opts) : {})
+    })),
+    stop: vi.fn().mockResolvedValue(undefined),
+    stopSync: vi.fn()
+  };
+}
+
 describe('Executor', () => {
   const fixturesDir = path.join(__dirname, '../../test/fixtures');
   const tempTestDir = path.join(os.tmpdir(), 'ghact-test');
@@ -184,19 +217,8 @@ jobs:
 `
       );
 
-      const fakeExecute = vi.fn().mockResolvedValue({
-        success: true,
-        stdout: 'hi\n',
-        stderr: '',
-        exitCode: 0,
-        timedOut: false,
-        durationMs: 5
-      });
-      resolveContainerRuntimeMock.mockResolvedValue({
-        name: 'docker',
-        isAvailable: vi.fn().mockResolvedValue(true),
-        execute: fakeExecute
-      });
+      const fake = fakeJobContainerRuntime();
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
 
       const result = await executeWorkflow(containerWorkflowPath, {
         containerRuntime: 'docker',
@@ -205,13 +227,26 @@ jobs:
 
       expect(result.success).toBe(true);
       expect(resolveContainerRuntimeMock).toHaveBeenCalledWith('docker');
-      expect(fakeExecute).toHaveBeenCalledWith(
+      expect(fake.start).toHaveBeenCalledTimes(1);
+      expect(fake.start).toHaveBeenCalledWith(
         expect.objectContaining({
           image: 'node:20',
-          command: 'echo "hi"',
-          networkDisabled: true
+          workingDir: process.cwd(),
+          networkDisabled: false
         })
       );
+      expect(fake.exec).toHaveBeenCalledWith(
+        'ctr-1',
+        expect.objectContaining({
+          command: 'echo "hi"',
+          workingDir: '/ghact-workspace',
+          env: expect.objectContaining({
+            GITHUB_WORKSPACE: '/ghact-workspace',
+            GITHUB_OUTPUT: expect.stringMatching(/^\/ghact-exchange\//)
+          })
+        })
+      );
+      expect(fake.stop).toHaveBeenCalledWith('ctr-1');
 
       fs.unlinkSync(containerWorkflowPath);
     });
@@ -891,8 +926,7 @@ jobs:
         durationMs: 10
       });
       resolveContainerRuntimeMock.mockResolvedValue({
-        name: 'docker',
-        isAvailable: vi.fn().mockResolvedValue(true),
+        ...fakeJobContainerRuntime(),
         build: buildMock,
         execute: executeMock
       });
@@ -1515,5 +1549,367 @@ jobs:
       expect(outputs.some((o) => o.includes('always-post'))).toBe(true);
       expect(outputs.some((o) => o.includes('conditional-post'))).toBe(false);
     });
+  });
+
+  describe('job containers', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-jobctr-'));
+    });
+
+    function writeWorkflow(content: string): string {
+      const file = path.join(tempDir, 'workflow.yml');
+      fs.writeFileSync(file, content);
+      return file;
+    }
+
+    it('starts one container per job, execs every step into it and removes it', async () => {
+      const fake = fakeJobContainerRuntime();
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const workflowPath = writeWorkflow(`
+name: One Container
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo one
+      - run: echo two
+        working-directory: sub
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo three
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker'
+      });
+
+      expect(result.success).toBe(true);
+      expect(fake.start).toHaveBeenCalledTimes(2);
+      expect(fake.exec).toHaveBeenCalledTimes(3);
+      expect(fake.exec.mock.calls[1][1]).toMatchObject({
+        command: 'echo two',
+        workingDir: '/ghact-workspace/sub'
+      });
+      expect(fake.start.mock.calls[0][0]).toMatchObject({
+        image: 'ubuntu:22.04'
+      });
+      expect(fake.stop).toHaveBeenCalledTimes(2);
+    });
+
+    it('honours jobs.<id>.container (string and object form)', async () => {
+      const fake = fakeJobContainerRuntime();
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const workflowPath = writeWorkflow(`
+name: Job Container
+on: push
+jobs:
+  short:
+    runs-on: ubuntu-latest
+    container: node:20
+    steps:
+      - run: echo a
+  long:
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.12
+      env:
+        FROM_CONTAINER: \${{ inputs.flavour }}
+    steps:
+      - run: echo b
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker',
+        containerImage: 'ignored:latest',
+        inputs: { flavour: 'spicy' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(fake.start.mock.calls[0][0]).toMatchObject({ image: 'node:20' });
+      expect(fake.start.mock.calls[1][0]).toMatchObject({
+        image: 'python:3.12',
+        env: { FROM_CONTAINER: 'spicy' }
+      });
+    });
+
+    it('passes networkDisabled through when networking is turned off', async () => {
+      const fake = fakeJobContainerRuntime();
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const workflowPath = writeWorkflow(`
+name: No Network
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo a
+`);
+
+      await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker',
+        networkDisabled: true
+      });
+
+      expect(fake.start.mock.calls[0][0]).toMatchObject({
+        networkDisabled: true
+      });
+    });
+
+    it('removes the container even when a step fails', async () => {
+      const fake = fakeJobContainerRuntime(() => ({
+        success: false,
+        exitCode: 2
+      }));
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const workflowPath = writeWorkflow(`
+name: Failing
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 2
+      - run: echo never
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker'
+      });
+
+      expect(result.success).toBe(false);
+      expect(fake.exec).toHaveBeenCalledTimes(1);
+      expect(fake.stop).toHaveBeenCalledWith('ctr-1');
+    });
+
+    it('fails the job when its container cannot be started', async () => {
+      const fake = fakeJobContainerRuntime();
+      fake.start.mockResolvedValue({ success: false, error: 'no such image' });
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const workflowPath = writeWorkflow(`
+name: Bad Image
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container: does-not-exist:latest
+    steps:
+      - run: echo a
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker'
+      });
+
+      expect(result.success).toBe(false);
+      expect(fake.exec).not.toHaveBeenCalled();
+      expect(fake.stop).not.toHaveBeenCalled();
+    });
+
+    it('runs JavaScript actions inside the job container', async () => {
+      const actionDir = path.join(tempDir, 'js-action');
+      fs.mkdirSync(actionDir);
+      fs.writeFileSync(
+        path.join(actionDir, 'action.yml'),
+        `
+name: JS In Container
+description: test
+inputs:
+  who-to-greet:
+    description: who
+runs:
+  using: node20
+  main: dist/index.js
+`
+      );
+      fs.mkdirSync(path.join(actionDir, 'dist'));
+      fs.writeFileSync(path.join(actionDir, 'dist', 'index.js'), '');
+      fetchActionMock.mockResolvedValueOnce(path.join(actionDir, 'action.yml'));
+
+      const fake = fakeJobContainerRuntime((_id, opts) =>
+        opts.command?.includes('command -v node')
+          ? { stdout: '/usr/local/bin/node\n/usr/local/bin:/usr/bin:/bin\n' }
+          : {}
+      );
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const workflowPath = writeWorkflow(`
+name: JS Container
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: local/js-action@v1
+        with:
+          who-to-greet: ghact
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker'
+      });
+
+      expect(result.success).toBe(true);
+      const calls = fake.exec.mock.calls.map((c) => c[1] as ExecCall);
+      const nodeCall = calls.find((c) => c.args);
+      expect(nodeCall?.args?.[0]).toBe('/usr/local/bin/node');
+      expect(nodeCall?.args?.[1]).toMatch(
+        /^\/ghact-exchange\/actions\/[0-9a-f]+\/dist\/index\.js$/
+      );
+      expect(nodeCall?.env).toMatchObject({
+        'INPUT_WHO-TO-GREET': 'ghact',
+        PATH: '/usr/local/bin:/usr/bin:/bin',
+        GITHUB_ACTION_PATH: expect.stringMatching(
+          /^\/ghact-exchange\/actions\//
+        )
+      });
+    });
+
+    it('fails a JavaScript action clearly when the image has no node', async () => {
+      const actionDir = path.join(tempDir, 'js-action');
+      fs.mkdirSync(actionDir);
+      fs.writeFileSync(
+        path.join(actionDir, 'action.yml'),
+        `
+name: JS No Node
+description: test
+runs:
+  using: node20
+  main: index.js
+`
+      );
+      fs.writeFileSync(path.join(actionDir, 'index.js'), '');
+      fetchActionMock.mockResolvedValueOnce(path.join(actionDir, 'action.yml'));
+
+      const fake = fakeJobContainerRuntime((_id, opts) =>
+        opts.command?.includes('command -v node')
+          ? { success: false, exitCode: 1 }
+          : {}
+      );
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const workflowPath = writeWorkflow(`
+name: JS No Node
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: local/js-action@v1
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker'
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.jobs[0].steps[0].error).toMatch(
+        /needs `node` in the job container image \(ubuntu:22\.04\)/
+      );
+    });
+
+    it('warns and runs on the host when jobs.<id>.container is set but runtime is none', async () => {
+      const workflowPath = writeWorkflow(`
+name: Host
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container: node:20
+    steps:
+      - run: echo on-host
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        containerRuntime: 'none'
+      });
+
+      expect(result.success).toBe(true);
+      expect(resolveContainerRuntimeMock).not.toHaveBeenCalled();
+      expect(result.jobs[0].steps[0].output).toContain('on-host');
+    });
+
+    // Real-engine check: opt in with RUN_DOCKER_TESTS=1 (needs a running
+    // docker daemon and network access to pull images).
+    it.skipIf(!process.env.RUN_DOCKER_TESTS)(
+      'keeps state between steps and runs JS actions in a real container',
+      async () => {
+        const actual = await vi.importActual<
+          typeof import('./container-runtime')
+        >('./container-runtime');
+        resolveContainerRuntimeMock.mockImplementation(
+          actual.resolveContainerRuntime
+        );
+
+        const actionDir = path.join(tempDir, 'js-action');
+        fs.mkdirSync(actionDir);
+        fs.writeFileSync(
+          path.join(actionDir, 'action.yml'),
+          `
+name: JS Real
+description: test
+inputs:
+  who-to-greet:
+    description: who
+runs:
+  using: node20
+  main: index.js
+`
+        );
+        fs.writeFileSync(
+          path.join(actionDir, 'index.js'),
+          `
+const fs = require('fs');
+console.log('hello ' + process.env['INPUT_WHO-TO-GREET'] + ' from ' + process.version);
+fs.appendFileSync(process.env.GITHUB_OUTPUT, 'marker=' + fs.readFileSync('/root/marker', 'utf8').trim() + '\\n');
+fs.appendFileSync(process.env.GITHUB_PATH, '/opt/ghact-bin\\n');
+`
+        );
+        fetchActionMock.mockResolvedValueOnce(
+          path.join(actionDir, 'action.yml')
+        );
+
+        const workflowPath = writeWorkflow(`
+name: Real Container
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo persisted > /root/marker
+          mkdir -p /opt/ghact-bin
+          printf '#!/bin/sh\\necho from-path\\n' > /opt/ghact-bin/ghact-hi
+          chmod +x /opt/ghact-bin/ghact-hi
+      - id: js
+        uses: local/js-action@v1
+        with:
+          who-to-greet: container
+      - run: echo "marker=\${{ steps.js.outputs.marker }} $(ghact-hi) $(cat /root/marker)"
+`);
+
+        const result = await executeWorkflow(workflowPath, {
+          containerRuntime: 'docker',
+          containerImage: 'node:20-bookworm-slim'
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.jobs[0].steps[1].output).toContain(
+          'hello container from v20'
+        );
+        expect(result.jobs[0].steps[2].output).toContain(
+          'marker=persisted from-path persisted'
+        );
+      },
+      180000
+    );
   });
 });

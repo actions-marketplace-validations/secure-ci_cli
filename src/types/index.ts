@@ -36,6 +36,17 @@ export interface Job {
   steps?: Step[];
   outputs?: Record<string, string>;
   strategy?: JobStrategy;
+  container?: string | JobContainer;
+}
+
+/** `jobs.<id>.container`: the image (and env) the job's steps run in. */
+export interface JobContainer {
+  image: string;
+  env?: Record<string, string>;
+  options?: string;
+  volumes?: string[];
+  ports?: Array<string | number>;
+  credentials?: Record<string, string>;
 }
 
 export interface JobStrategy {
@@ -156,7 +167,7 @@ export interface RunOptions {
   containerTimeoutMs?: number;
   /** Memory limit (e.g. '512m') applied to the container, if supported. */
   containerMemoryLimit?: string;
-  /** Disable container networking. Default: true. */
+  /** Disable container networking. Default: false (network on). */
   networkDisabled?: boolean;
 }
 

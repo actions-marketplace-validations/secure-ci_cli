@@ -1,4 +1,4 @@
-import { exec, spawn } from 'child_process';
+import { exec, execFileSync, spawn } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
@@ -67,10 +67,57 @@ export interface ContainerExecResult {
   durationMs: number;
 }
 
+/** Options for starting a long-lived per-job container. */
+export interface ContainerStartOptions {
+  image: string;
+  /** Host directory mounted as the container's working directory. */
+  workingDir: string;
+  /** Host directory mounted read-write for exchanging file commands etc. */
+  exchangeDir: string;
+  env?: Record<string, string>;
+  memoryLimit?: string;
+  /** Disable container networking. Default: false (network on). */
+  networkDisabled?: boolean;
+}
+
+export interface ContainerStartResult {
+  success: boolean;
+  id?: string;
+  error?: string;
+}
+
+/** Options for running a command inside an already-started container. */
+export interface ContainerExecInOptions {
+  /** Shell command string, run via `sh -c "<command>"`. */
+  command?: string;
+  /**
+   * Discrete argv to exec directly, without a shell. Takes precedence over
+   * `command`; needed when env names aren't valid shell identifiers (e.g.
+   * `INPUT_WHO-TO-GREET`), which `sh` drops before exec'ing its child.
+   */
+  args?: string[];
+  env?: Record<string, string>;
+  /** Path inside the container. Default: the mounted workspace. */
+  workingDir?: string;
+  timeoutMs?: number;
+}
+
 export interface ContainerRuntime {
   readonly name: ContainerRuntimeName;
   isAvailable(): Promise<boolean>;
+  /** One-shot `run --rm`, used for Docker-type actions. */
   execute(options: ContainerExecOptions): Promise<ContainerExecResult>;
+  /** Start a detached container that idles until stopped (one per job). */
+  start(options: ContainerStartOptions): Promise<ContainerStartResult>;
+  /** Run a shell command in a container started via `start`. */
+  exec(
+    id: string,
+    options: ContainerExecInOptions
+  ): Promise<ContainerExecResult>;
+  /** Force-remove a container started via `start`. */
+  stop(id: string): Promise<void>;
+  /** Synchronous `stop`, for signal/exit handlers. */
+  stopSync(id: string): void;
   /** Build an image from a Dockerfile directory, for Docker-type actions. */
   build(
     contextDir: string,
@@ -112,7 +159,6 @@ class CliContainerRuntime implements ContainerRuntime {
   }
 
   execute(options: ContainerExecOptions): Promise<ContainerExecResult> {
-    const startTime = Date.now();
     const args = [
       'run',
       '--rm',
@@ -124,7 +170,7 @@ class CliContainerRuntime implements ContainerRuntime {
       `${options.exchangeDir}:${CONTAINER_EXCHANGE_DIR}`
     ];
 
-    if (options.networkDisabled !== false) {
+    if (options.networkDisabled === true) {
       args.push('--network', 'none');
     }
 
@@ -147,17 +193,87 @@ class CliContainerRuntime implements ContainerRuntime {
       args.push('sh', '-c', options.command || '');
     }
 
+    return this.runCli(args, options.timeoutMs);
+  }
+
+  start(options: ContainerStartOptions): Promise<ContainerStartResult> {
+    const args = [
+      'run',
+      '-d',
+      '-w',
+      CONTAINER_WORKDIR,
+      '-v',
+      `${options.workingDir}:${CONTAINER_WORKDIR}`,
+      '-v',
+      `${options.exchangeDir}:${CONTAINER_EXCHANGE_DIR}`
+    ];
+    if (options.networkDisabled === true) {
+      args.push('--network', 'none');
+    }
+    if (options.memoryLimit) {
+      args.push('--memory', options.memoryLimit);
+    }
+    for (const [key, value] of Object.entries(options.env || {})) {
+      args.push('-e', `${key}=${value}`);
+    }
+    // Idle forever; steps are run in it via `exec` and it's removed at job
+    // end. `tail` exists in practically every image (busybox included).
+    args.push('--entrypoint', 'tail', options.image, '-f', '/dev/null');
+
+    return this.runCli(args).then((result) =>
+      result.success
+        ? { success: true, id: result.stdout.trim() }
+        : {
+            success: false,
+            error: result.stderr.trim() || `exit code ${result.exitCode}`
+          }
+    );
+  }
+
+  exec(
+    id: string,
+    options: ContainerExecInOptions
+  ): Promise<ContainerExecResult> {
+    const args = ['exec', '-w', options.workingDir || CONTAINER_WORKDIR];
+    for (const [key, value] of Object.entries(options.env || {})) {
+      args.push('-e', `${key}=${value}`);
+    }
+    if (options.args) {
+      args.push(id, ...options.args);
+    } else {
+      args.push(id, 'sh', '-c', options.command || '');
+    }
+    return this.runCli(args, options.timeoutMs);
+  }
+
+  async stop(id: string): Promise<void> {
+    await this.runCli(['rm', '-f', id]);
+  }
+
+  stopSync(id: string): void {
+    try {
+      execFileSync(this.binary, ['rm', '-f', id], { stdio: 'ignore' });
+    } catch {
+      // Best effort: the container may already be gone
+    }
+  }
+
+  private runCli(
+    args: string[],
+    timeoutMs?: number
+  ): Promise<ContainerExecResult> {
+    const startTime = Date.now();
     return new Promise<ContainerExecResult>((resolve) => {
       const child = spawn(this.binary, args);
       let stdout = '';
       let stderr = '';
       let timedOut = false;
 
-      const timeout = options.timeoutMs
+      const timeout = timeoutMs
         ? setTimeout(() => {
             timedOut = true;
             child.kill('SIGKILL');
-          }, options.timeoutMs)
+          }, timeoutMs)
         : undefined;
 
       child.stdout.on('data', (chunk) => (stdout += chunk.toString()));

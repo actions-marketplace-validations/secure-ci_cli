@@ -143,3 +143,18 @@ export function parseConfigValue(
       return rawValue;
   }
 }
+
+/**
+ * Whether container networking should be disabled. Networking is on by
+ * default (matching GitHub-hosted runners); `--no-network` turns it off and
+ * wins over everything, then `--allow-network`, then `allow-network` in the
+ * config file.
+ */
+export function resolveNetworkDisabled(
+  flags: { network?: boolean; allowNetwork?: boolean },
+  config: GhactConfig = loadConfig()
+): boolean {
+  if (flags.network === false) return true;
+  if (flags.allowNetwork === true) return false;
+  return config['allow-network'] === false;
+}

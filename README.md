@@ -13,7 +13,7 @@ A CLI tool to locally test GitHub Actions and workflows without pushing to remot
 - 🔗 `needs:` job dependency ordering (topological sort)
 - 📤 Step outputs via `$GITHUB_OUTPUT`, consumable by later steps/jobs
 - 🔒 Automatic secret masking in all log output
-- 📦 Optional container isolation for `run:` steps (Docker or Podman)
+- 📦 Container isolation: one container per job for `run:` steps and JavaScript actions (Docker, Podman or containerd)
 - 🚀 Fetch and run remote GitHub Actions (composite and JavaScript actions)
 - 💾 Action caching for faster execution
 - 🎯 Minimal dependencies, focused on MVP
@@ -58,7 +58,7 @@ ghact --list
 # Run with container isolation (Docker or Podman)
 ghact .github/workflows/ci.yml --container-runtime=auto
 ghact .github/workflows/ci.yml --container-runtime=docker --container-image=node:20-alpine
-ghact .github/workflows/ci.yml --container-runtime=podman --container-memory=512m --allow-network
+ghact .github/workflows/ci.yml --container-runtime=podman --container-memory=512m --no-network
 ```
 
 ### Container Isolation Flags
@@ -69,9 +69,18 @@ ghact .github/workflows/ci.yml --container-runtime=podman --container-memory=512
 | `--container-image <image>`  | Image to run steps in (default: `ubuntu:22.04`)                                                                                                            |
 | `--container-timeout <ms>`   | Per-step timeout in milliseconds                                                                                                                           |
 | `--container-memory <limit>` | Memory limit, e.g. `512m`                                                                                                                                  |
-| `--allow-network`            | Allow container network access (disabled by default)                                                                                                       |
+| `--no-network`               | Disable container network access (networking is on by default, like GitHub-hosted runners)                                                                 |
+| `--allow-network`            | Allow container network access; only needed to override `allow-network: false` in the config file                                                          |
 
 `containerd` is driven via its Docker-CLI-compatible front-end, [`nerdctl`](https://github.com/containerd/nerdctl).
+
+#### How container mode works
+
+- Each job (and each matrix combination) gets **one container**, started when the job begins and removed when it ends, including when a step fails or you press Ctrl-C. Every `run:` step and JavaScript action in the job runs in it via `exec`, so files, installed packages and tools from earlier steps are still there. The current directory is mounted at `/ghact-workspace`.
+- The image is `jobs.<id>.container` when set (string or `{ image, env }` form; `options`, `volumes`, `ports` and `credentials` are ignored with a warning), else `--container-image`. With `--container-runtime none`, `jobs.<id>.container` is ignored and the job runs on the host.
+- JavaScript actions run with the image's own `node`. If the image has no Node.js (the default `ubuntu:22.04` doesn't), they fail with a clear error. Use an image that includes it, e.g. `--container-image node:20` or a runner-like image such as `catthehacker/ubuntu:act-22.04`.
+- `services:` containers are not supported yet.
+- `--container-timeout` stops waiting for a step after the given time and fails it. The command itself keeps running inside the container until the job's container is removed.
 
 ### Global Configuration
 
@@ -232,7 +241,7 @@ ghact now supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps
 - **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with ghact's own Node.js binary, in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` runs right before `main` (GitHub runs it at job start); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.
-- **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it directly. Note: this is distinct from `--container-runtime`, which isolates `run:` steps in a container regardless of action type.
+- **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it in its own container. Note: this is distinct from the job container that `--container-runtime` starts for `run:` steps and JavaScript actions.
 - **Action Caching**: Downloaded actions are cached in `~/.ghact/actions-cache` for faster subsequent runs
 
 ### Example with Remote Actions

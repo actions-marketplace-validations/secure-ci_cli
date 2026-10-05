@@ -16,6 +16,7 @@ import {
   getDefaultContainerRuntime,
   isValidConfigKey,
   parseConfigValue,
+  resolveNetworkDisabled,
   CONFIG_KEYS
 } from './config';
 import * as fs from 'fs';
@@ -73,10 +74,10 @@ program
     'Memory limit for the container, e.g. 512m',
     globalConfig['container-memory']
   )
+  .option('--no-network', 'Disable container network access (on by default)')
   .option(
     '--allow-network',
-    'Allow container network access (disabled by default)',
-    globalConfig['allow-network'] ?? false
+    'Allow container network access (the default; overrides allow-network: false in config)'
   )
   .action(async (file, options) => {
     // Set log level
@@ -137,7 +138,10 @@ program
           ? Number(options.containerTimeout)
           : undefined,
         containerMemoryLimit: options.containerMemory,
-        networkDisabled: !options.allowNetwork
+        networkDisabled: resolveNetworkDisabled(
+          { network: options.network, allowNetwork: options.allowNetwork },
+          globalConfig
+        )
       });
 
       if (!result.success) {

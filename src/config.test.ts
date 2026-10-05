@@ -152,4 +152,35 @@ describe('config', () => {
       expect(parseConfigValue('container-memory', '512m')).toBe('512m');
     });
   });
+
+  describe('resolveNetworkDisabled', () => {
+    it('leaves networking on by default', async () => {
+      const { resolveNetworkDisabled } = await import('./config');
+      expect(resolveNetworkDisabled({}, {})).toBe(false);
+    });
+
+    it('turns networking off with --no-network, even over --allow-network', async () => {
+      const { resolveNetworkDisabled } = await import('./config');
+      expect(resolveNetworkDisabled({ network: false }, {})).toBe(true);
+      expect(
+        resolveNetworkDisabled({ network: false, allowNetwork: true }, {})
+      ).toBe(true);
+    });
+
+    it('honours allow-network: false from the config file', async () => {
+      const { resolveNetworkDisabled } = await import('./config');
+      expect(resolveNetworkDisabled({}, { 'allow-network': false })).toBe(true);
+      expect(resolveNetworkDisabled({}, { 'allow-network': true })).toBe(false);
+    });
+
+    it('lets --allow-network override allow-network: false in config', async () => {
+      const { resolveNetworkDisabled } = await import('./config');
+      expect(
+        resolveNetworkDisabled(
+          { allowNetwork: true },
+          { 'allow-network': false }
+        )
+      ).toBe(false);
+    });
+  });
 });
