@@ -75,7 +75,8 @@ export interface StepFileResults {
  * a container exchange dir) or a fresh temp directory.
  */
 export function createStepFiles(dir?: string): StepFiles {
-  const baseDir = dir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-step-'));
+  const baseDir =
+    dir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-step-'));
   const files: StepFiles = {
     dir: baseDir,
     output: path.join(baseDir, 'output'),

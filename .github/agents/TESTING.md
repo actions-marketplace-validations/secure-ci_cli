@@ -1,10 +1,10 @@
-# Testing Guidelines for ghact
+# Testing Guidelines for the SecureCI CLI
 
-This document provides comprehensive testing guidelines for AI agents and developers working on ghact.
+This document provides comprehensive testing guidelines for AI agents and developers working on the SecureCI CLI.
 
 ## Testing Philosophy
 
-ghact follows **Test-Driven Development (TDD)**:
+The SecureCI CLI follows **Test-Driven Development (TDD)**:
 
 1. Write tests first (Red)
 2. Implement features to pass tests (Green)
@@ -72,7 +72,7 @@ describe('ModuleName', () => {
 });
 ```
 
-### Example from ghact
+### Example from the SecureCI CLI
 
 ```typescript
 import { validateWorkflow } from './validator';
@@ -454,7 +454,7 @@ it('should parse YAML content', () => {
 
 ```typescript
 it('should parse CLI arguments', () => {
-  const args = ['--dry-run', 'workflow.yml', '--input', 'key=value'];
+  const args = ['run', 'workflow.yml', '--dry-run', '--input', 'key=value'];
   const parsed = parseArguments(args);
 
   expect(parsed.dryRun).toBe(true);

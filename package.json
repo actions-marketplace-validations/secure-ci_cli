@@ -1,11 +1,17 @@
 {
-  "name": "ghact",
+  "name": "@secureci/cli",
   "version": "0.1.3",
-  "description": "Validate and test GitHub actions and workflows locally",
+  "description": "SecureCI CLI: validate, check against pipeline standards, and run GitHub Actions workflows locally",
   "main": "dist/index.js",
   "bin": {
-    "ghact": "./dist/cli.js"
+    "secureci": "./dist/cli.js"
   },
+  "files": [
+    "dist/**/*.js",
+    "!dist/**/*.test.js",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -19,15 +25,24 @@
   "keywords": [
     "github-actions",
     "workflow",
-    "test",
+    "ci",
     "cli",
-    "ghact"
+    "security",
+    "policy-as-code",
+    "secureci"
   ],
   "author": {
     "name": "Jabran Rafique",
     "email": "hello@jabran.me"
   },
   "license": "MIT",
+  "homepage": "https://www.secure-ci.dev",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "prettier": "@jabraf/prettier",
   "dependencies": {
     "chalk": "^4.1.2",

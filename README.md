@@ -1,6 +1,8 @@
-# ghact
+# SecureCI CLI
 
-[![ghact CI/CD](https://github.com/jabranr/actly/actions/workflows/ghact-ci.yaml/badge.svg)](https://github.com/jabranr/actly/actions/workflows/ghact-ci.yaml)
+[![CI](https://github.com/jabranr/actly/actions/workflows/ci.yaml/badge.svg)](https://github.com/jabranr/actly/actions/workflows/ci.yaml)
+
+`@secureci/cli` provides the `secureci` command: validate GitHub Actions workflows, check them against pipeline standards, and run them locally. It is the free, open-source part of [SecureCI](https://www.secure-ci.dev).
 
 A CLI tool to locally test GitHub Actions and workflows without pushing to remote.
 
@@ -8,7 +10,7 @@ A CLI tool to locally test GitHub Actions and workflows without pushing to remot
 
 - 🔍 Dry run mode for sanity checks
 - 📝 Pass inputs and secrets via CLI
-- 📐 Validate a caller workflow against a central pipeline contract (`--contract`)
+- 📐 Validate a caller workflow against a central pipeline contract (`secureci validate --contract`)
 - 🔄 Support for reusable workflows and actions
 - ⛓️ Execute chained workflows and actions
 - 🚦 GitHub expressions in `${{ }}` and `if:`: all common contexts (`github`, `env`, `inputs`, `secrets`, `steps`, `needs`, `matrix`, `job`, `runner`, `vars`, `strategy`), operators and functions (`contains`, `startsWith`, `format`, `fromJSON`, `hashFiles`, `always()`, `failure()`, ...)
@@ -23,7 +25,9 @@ A CLI tool to locally test GitHub Actions and workflows without pushing to remot
 ## Installation
 
 ```bash
-npm install -g ghact
+npm install -g @secureci/cli
+# or, without installing:
+npx @secureci/cli --help
 ```
 
 Or run locally:
@@ -37,48 +41,48 @@ npm run build
 
 ```bash
 # Dry run a workflow
-ghact --dry-run .github/workflows/ci.yml
+secureci run .github/workflows/ci.yml --dry-run
 
 # Execute a workflow
-ghact .github/workflows/build.yml --input key=value
+secureci run .github/workflows/build.yml --input key=value
 
 # Run with secrets
-ghact .github/workflows/deploy.yml --secret TOKEN=xxx
+secureci run .github/workflows/deploy.yml --secret TOKEN=xxx
 
 # Validate workflow syntax
-ghact --validate .github/workflows/ci.yml
+secureci validate .github/workflows/ci.yml
 
 # Validate a caller workflow against a central pipeline contract
-ghact --contract contracts/platform-standard.yml .github/workflows/deploy.yml
+secureci validate .github/workflows/deploy.yml --contract contracts/platform-standard.yml
 
 # Run a specific job
-ghact .github/workflows/ci.yml --job build
+secureci run .github/workflows/ci.yml --job build
 
 # List workflows in .github/workflows/
-ghact --list
+secureci list
 
 # Run with container isolation (Docker or Podman)
-ghact .github/workflows/ci.yml --container-runtime=auto
-ghact .github/workflows/ci.yml --container-runtime=docker --container-image=node:20-alpine
-ghact .github/workflows/ci.yml --container-runtime=podman --container-memory=512m --no-network
+secureci run .github/workflows/ci.yml --container-runtime=auto
+secureci run .github/workflows/ci.yml --container-runtime=docker --container-image=node:20-alpine
+secureci run .github/workflows/ci.yml --container-runtime=podman --container-memory=512m --no-network
 ```
 
 ### Container Isolation Flags
 
-| Flag                         | Description                                                                                                                                                |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--container-runtime <name>` | `auto`\|`docker`\|`podman`\|`containerd`\|`none` (default: `docker`, overridable via `~/.ghact/config.yml`; use `none` for the old host-execution default) |
-| `--container-image <image>`  | Image to run steps in (default: `ubuntu:22.04`)                                                                                                            |
-| `--container-timeout <ms>`   | Per-step timeout in milliseconds                                                                                                                           |
-| `--container-memory <limit>` | Memory limit, e.g. `512m`                                                                                                                                  |
-| `--no-network`               | Disable container network access (networking is on by default, like GitHub-hosted runners)                                                                 |
-| `--allow-network`            | Allow container network access; only needed to override `allow-network: false` in the config file                                                          |
+| Flag                         | Description                                                                                                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--container-runtime <name>` | `auto`\|`docker`\|`podman`\|`containerd`\|`none` (default: `docker`, overridable via `~/.secureci/config.yml`; use `none` for the old host-execution default) |
+| `--container-image <image>`  | Image to run steps in (default: `ubuntu:22.04`)                                                                                                               |
+| `--container-timeout <ms>`   | Per-step timeout in milliseconds                                                                                                                              |
+| `--container-memory <limit>` | Memory limit, e.g. `512m`                                                                                                                                     |
+| `--no-network`               | Disable container network access (networking is on by default, like GitHub-hosted runners)                                                                    |
+| `--allow-network`            | Allow container network access; only needed to override `allow-network: false` in the config file                                                             |
 
 `containerd` is driven via its Docker-CLI-compatible front-end, [`nerdctl`](https://github.com/containerd/nerdctl).
 
 #### How container mode works
 
-- Each job (and each matrix combination) gets **one container**, started when the job begins and removed when it ends, including when a step fails or you press Ctrl-C. Every `run:` step and JavaScript action in the job runs in it via `exec`, so files, installed packages and tools from earlier steps are still there. The current directory is mounted at `/ghact-workspace`.
+- Each job (and each matrix combination) gets **one container**, started when the job begins and removed when it ends, including when a step fails or you press Ctrl-C. Every `run:` step and JavaScript action in the job runs in it via `exec`, so files, installed packages and tools from earlier steps are still there. The current directory is mounted at `/secureci-workspace`.
 - The image is `jobs.<id>.container` when set (string or `{ image, env }` form; `options`, `volumes`, `ports` and `credentials` are ignored with a warning), else `--container-image`. With `--container-runtime none`, `jobs.<id>.container` is ignored and the job runs on the host.
 - JavaScript actions run with the image's own `node`. If the image has no Node.js (the default `ubuntu:22.04` doesn't), they fail with a clear error. Use an image that includes it, e.g. `--container-image node:20` or a runner-like image such as `catthehacker/ubuntu:act-22.04`.
 - `services:` containers are not supported yet.
@@ -86,23 +90,21 @@ ghact .github/workflows/ci.yml --container-runtime=podman --container-memory=512
 
 ### Global Configuration
 
-ghact reads defaults from `~/.ghact/config.yml` (created on first `ghact config set`, or editable by hand). Config keys match the CLI flag names (kebab-case, minus the leading `--`). CLI flags always take precedence over the config file.
-
-> **Renamed from `actly`:** if `~/.ghact/config.yml` doesn't exist, ghact reads the legacy `~/.actly/config.yml` instead. The next `ghact config set`/`unset` writes to `~/.ghact/config.yml`. Downloaded actions are cached in the new `~/.ghact/actions-cache`, so the old `~/.actly` directory can be deleted once your config has moved.
+The SecureCI CLI reads defaults from `~/.secureci/config.yml` (created on first `secureci config set`, or editable by hand). Config keys match the CLI flag names (kebab-case, minus the leading `--`). CLI flags always take precedence over the config file.
 
 ```bash
-ghact config set container-runtime podman   # persist a default
-ghact config get container-runtime
-ghact config list
-ghact config unset container-runtime        # revert to the built-in default (docker)
-ghact config path                           # print the config file location
+secureci config set container-runtime podman   # persist a default
+secureci config get container-runtime
+secureci config list
+secureci config unset container-runtime        # revert to the built-in default (docker)
+secureci config path                           # print the config file location
 ```
 
 Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`.
 
-### Pipeline Contracts (`--contract`)
+### Pipeline Contracts (`secureci validate --contract`)
 
-In organizations with a central repo of reusable workflows/actions, a platform team can define a minimum pipeline standard — required actions, forbidden actions, and (optionally) the order required actions must run in — and have ghact check a caller's workflow against it.
+In organizations with a central repo of reusable workflows/actions, a platform team can define a minimum pipeline standard — required actions, forbidden actions, and (optionally) the order required actions must run in — and have the SecureCI CLI check a caller's workflow against it.
 
 ```yaml
 # contracts/platform-standard.yml
@@ -118,7 +120,7 @@ forbidden:
 ```
 
 ```bash
-ghact --contract contracts/platform-standard.yml .github/workflows/deploy.yml
+secureci validate .github/workflows/deploy.yml --contract contracts/platform-standard.yml
 ```
 
 If the caller's workflow calls `org/deploy` before `org/security-scan` (or uses `org/legacy-deploy`, or omits a required action, or pins `org/security-scan` below `v1.2.0`), the command exits non-zero with a message like:
@@ -133,7 +135,7 @@ If the caller's workflow calls `org/deploy` before `org/security-scan` (or uses 
 - Only `uses:` steps declared directly in the given workflow file are considered — in whole-workflow order, resolving job order via `needs:` and then step order within each job. Steps inside a called reusable workflow or composite action are **not** resolved/recursed into.
 - `ordering: relative` (default): required actions must appear in that relative order, with any other steps allowed in between. `ordering: strict`: required actions must run back-to-back, with no other step in between.
 - A missing required action, a required action below `min-version`, an ordering violation, or any forbidden-action match is an **error** (validation fails). A required action whose version can't be compared (e.g. pinned to a branch or SHA) is a **warning**.
-- `--contract` implies `--validate` and currently applies to workflow files only (not standalone actions, since the contract is about a job/step sequence). Passing `--contract` against an action file fails with a clear error.
+- `--contract` runs the normal syntax validation too, and currently applies to workflow files only (not standalone actions, since the contract is about a job/step sequence). Passing `--contract` against an action file fails with a clear error.
 
 **Known limitations (v1 scope):**
 
@@ -210,7 +212,7 @@ Workflow commands printed to stdout are interpreted: `::add-mask::`, `::set-outp
 ### Events and the `github` Context
 
 ```bash
-ghact .github/workflows/ci.yml --event-name pull_request --event-path event.json
+secureci run .github/workflows/ci.yml --event-name pull_request --event-path event.json
 ```
 
 - `github.event_name`: `--event-name`, else `$GITHUB_EVENT_NAME`, else `workflow_dispatch` if the workflow declares it, else the workflow's first trigger.
@@ -220,7 +222,7 @@ ghact .github/workflows/ci.yml --event-name pull_request --event-path event.json
 
 ### Default Environment Variables
 
-Steps receive the runner's default variables, derived from the local `github` context: `CI`, `GITHUB_ACTIONS`, `GITHUB_WORKFLOW`, `GITHUB_JOB`, `GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_EVENT_NAME`, `GITHUB_ACTOR`, `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_OWNER`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKSPACE`, `GITHUB_EVENT_PATH` (see above), `RUNNER_OS`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` (`~/.ghact/toolcache`).
+Steps receive the runner's default variables, derived from the local `github` context: `CI`, `GITHUB_ACTIONS`, `GITHUB_WORKFLOW`, `GITHUB_JOB`, `GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_EVENT_NAME`, `GITHUB_ACTOR`, `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_OWNER`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKSPACE`, `GITHUB_EVENT_PATH` (see above), `RUNNER_OS`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` (`~/.secureci/toolcache`).
 
 ### Secret Masking
 
@@ -245,7 +247,7 @@ npm run build
 npm run lint
 ```
 
-Every pull request and push to `main` runs [`ghact-ci.yaml`](.github/workflows/ghact-ci.yaml): lint, `prettier --check`, tests with the coverage thresholds from `vitest.config.mts`, build, and ghact validating its own workflow. It uses the Node version from `volta.node` in `package.json`.
+Every pull request and push to `main` runs [`ci.yaml`](.github/workflows/ci.yaml): lint, `prettier --check`, tests with the coverage thresholds from `vitest.config.mts`, build, and the SecureCI CLI validating its own workflow. It uses the Node version from `volta.node` in `package.json`.
 
 Opt-in test suites:
 
@@ -283,21 +285,21 @@ src/
 
 ## Remote Action Support
 
-ghact now supports fetching and executing remote GitHub Actions:
+The SecureCI CLI supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps
-- **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with ghact's own Node.js binary, in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` runs right before `main` (GitHub runs it at job start); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.
+- **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with the CLI's own Node.js binary, in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` runs right before `main` (GitHub runs it at job start); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.
 - **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it in its own container. Note: this is distinct from the job container that `--container-runtime` starts for `run:` steps and JavaScript actions.
 - **Local Actions** (`uses: ./path/to/action`): Resolved relative to the workspace (the current directory), using `action.yml` or `action.yaml`.
 - **`docker://` steps** (`uses: docker://alpine:3.20`): Run the image directly, with `with.args` as its arguments and `with.entrypoint` as its entrypoint.
 - **Unresolvable actions fail the step**: A remote action that can't be fetched, a missing local action, or an unsupported `runs.using` fails the step (as on GitHub) instead of being skipped.
-- **Action Caching**: Downloaded actions are cached in `~/.ghact/actions-cache` for faster subsequent runs
+- **Action Caching**: Downloaded actions are cached in `~/.secureci/actions-cache` for faster subsequent runs
 
 ### Example with Remote Actions
 
 ```bash
 # Execute a workflow that uses remote actions
-ghact .github/workflows/ci.yml
+secureci run .github/workflows/ci.yml
 
 # The workflow can include:
 # - uses: actions/checkout@v3

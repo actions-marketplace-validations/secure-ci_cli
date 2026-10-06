@@ -191,7 +191,7 @@ describe('expression functions', () => {
   });
 
   it('hashFiles() hashes matching files in the workspace, sorted', () => {
-    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-hash-'));
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-hash-'));
     fs.mkdirSync(path.join(workspace, 'a', 'b'), { recursive: true });
     fs.writeFileSync(path.join(workspace, 'package-lock.json'), 'root');
     fs.writeFileSync(

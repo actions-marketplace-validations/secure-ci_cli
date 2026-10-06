@@ -22,22 +22,46 @@ import {
 import * as fs from 'fs';
 import * as path from 'path';
 
+function readVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')
+    );
+    return String(pkg.version);
+  } catch {
+    return '0.0.0';
+  }
+}
+
 const program = new Command();
 const globalConfig = loadConfig();
 
 program
-  .name('ghact')
-  .description('CLI tool to locally test GitHub Actions and workflows')
-  .version('0.1.0');
+  .name('secureci')
+  .description(
+    'SecureCI CLI: validate, check and run GitHub Actions workflows locally'
+  )
+  .version(readVersion(), '-V, --version')
+  .option('--verbose', 'Enable verbose logging')
+  .showHelpAfterError()
+  .hook('preAction', (thisCommand) => {
+    if (thisCommand.opts().verbose) {
+      logger.setLevel(LogLevel.DEBUG);
+    }
+  });
+
+function requireFile(file: string): void {
+  if (!fs.existsSync(file)) {
+    logger.error(`File not found: ${file}`);
+    process.exit(1);
+  }
+}
 
 program
-  .argument('[file]', 'Path to workflow or action YAML file')
-  .option('-d, --dry-run', 'Perform a dry run without executing')
-  .option('-v, --validate', 'Validate the YAML file syntax')
-  .option(
-    '--contract <file>',
-    'Validate the workflow against a central pipeline contract (required/forbidden actions, ordering)'
-  )
+  .command('run')
+  .description('Run a workflow (or composite action) locally')
+  .argument('<file>', 'Path to a workflow or action YAML file')
+  .option('-d, --dry-run', 'Show what would run, without executing anything')
   .option(
     '-i, --input <key=value...>',
     'Pass input values (can be used multiple times)'
@@ -56,22 +80,20 @@ program
   )
   .option(
     '--event-name <name>',
-    'github.event_name (default: $GITHUB_EVENT_NAME or workflow_dispatch)'
+    'github.event_name (default: $GITHUB_EVENT_NAME, else workflow_dispatch if declared, else the first trigger)'
   )
   .option('-j, --job <name>', 'Run a specific job')
-  .option('--verbose', 'Enable verbose logging')
-  .option('-l, --list', 'List available workflows in .github/workflows/')
   .addOption(
     new Option(
       '--container-runtime <name>',
-      `Isolate run: steps in a container (default: "${getDefaultContainerRuntime(globalConfig)}", from ~/.ghact/config.yml or built-in default; use "none" for the old host-execution default)`
+      `Run each job in a container (default: "${getDefaultContainerRuntime(globalConfig)}", from ~/.secureci/config.yml or built-in default; "none" runs on the host)`
     )
       .choices(['auto', 'docker', 'podman', 'containerd', 'none'])
       .default(getDefaultContainerRuntime(globalConfig))
   )
   .option(
     '--container-image <image>',
-    'Container image to run steps in (default: ubuntu:22.04)',
+    'Container image for jobs without jobs.<id>.container (default: ubuntu:22.04)',
     globalConfig['container-image']
   )
   .option(
@@ -91,54 +113,24 @@ program
     '--allow-network',
     'Allow container network access (the default; overrides allow-network: false in config)'
   )
-  .action(async (file, options) => {
-    // Set log level
-    if (options.verbose) {
-      logger.setLevel(LogLevel.DEBUG);
-    }
+  .action(async (file: string, options) => {
+    requireFile(file);
 
-    // List workflows
-    if (options.list) {
-      listWorkflows();
+    if (options.dryRun) {
+      const result = dryRun(file);
+      if (!result.success) {
+        process.exit(1);
+      }
       return;
     }
 
-    // Require file argument if not listing
-    if (!file) {
-      logger.error('Please provide a workflow or action file path');
-      program.help();
-      process.exit(1);
-    }
-
-    // Check if file exists
-    if (!fs.existsSync(file)) {
-      logger.error(`File not found: ${file}`);
-      process.exit(1);
-    }
-
     try {
-      // Validate mode (also triggered by --contract on its own)
-      if (options.validate || options.contract) {
-        validateFile(file, options.contract);
-        return;
-      }
-
-      // Dry run mode
-      if (options.dryRun) {
-        const result = dryRun(file);
-        if (!result.success) {
-          process.exit(1);
-        }
-        return;
-      }
-
       const inputs = parseKeyValuePairs(options.input, '--input');
       const secrets = parseKeyValuePairs(options.secret, '--secret', {
         redact: true
       });
       const vars = parseKeyValuePairs(options.var, '--var');
 
-      // Execute the workflow/action
       const result = await executeWorkflow(file, {
         dryRun: false,
         inputs,
@@ -147,7 +139,7 @@ program
         eventPath: options.eventPath,
         eventName: options.eventName,
         job: options.job,
-        verbose: options.verbose,
+        verbose: program.opts().verbose,
         containerRuntime: options.containerRuntime,
         containerImage: options.containerImage,
         containerTimeoutMs: options.containerTimeout
@@ -169,6 +161,28 @@ program
       );
       process.exit(1);
     }
+  });
+
+program
+  .command('validate')
+  .description(
+    'Validate a workflow or action file, optionally against a pipeline contract'
+  )
+  .argument('<file>', 'Path to a workflow or action YAML file')
+  .option(
+    '-c, --contract <file>',
+    'Also check the workflow against a pipeline contract (required/forbidden actions, minimum versions, ordering)'
+  )
+  .action((file: string, options: { contract?: string }) => {
+    requireFile(file);
+    validateFile(file, options.contract);
+  });
+
+program
+  .command('list')
+  .description('List workflows in .github/workflows/')
+  .action(() => {
+    listWorkflows();
   });
 
 function validateFile(filePath: string, contractFile?: string): void {
@@ -266,7 +280,7 @@ function listWorkflows(): void {
 
 const configCmd = program
   .command('config')
-  .description('Manage ghact global configuration (~/.ghact/config.yml)');
+  .description('Manage global configuration (~/.secureci/config.yml)');
 
 configCmd
   .command('path')
@@ -337,5 +351,11 @@ configCmd
     saveConfig(config);
     logger.success(`Unset ${key} in ${getConfigFilePath()}`);
   });
+
+// With no command, show help and fail, like other vendor CLIs.
+if (process.argv.length <= 2) {
+  program.outputHelp({ error: true });
+  process.exit(1);
+}
 
 program.parse();

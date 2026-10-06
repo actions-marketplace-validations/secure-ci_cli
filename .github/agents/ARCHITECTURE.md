@@ -1,10 +1,10 @@
-# Architecture Guide for ghact
+# Architecture Guide for the SecureCI CLI
 
-This document provides a comprehensive overview of ghact's architecture for AI agents and developers.
+This document provides a comprehensive overview of the CLI's architecture for AI agents and developers.
 
 ## System Overview
 
-ghact is a CLI tool that enables local testing of GitHub Actions and workflows. It parses YAML workflow/action definitions, validates them, and can execute them locally with support for inputs, secrets, and remote actions.
+The SecureCI CLI is a CLI tool that enables local testing of GitHub Actions and workflows. It parses YAML workflow/action definitions, validates them, and can execute them locally with support for inputs, secrets, and remote actions.
 
 ## High-Level Architecture
 
@@ -45,7 +45,7 @@ graph TB
 ## Directory Structure
 
 ```
-ghact/
+secureci-cli/
 ├── src/                          # Source code
 │   ├── cli.ts                    # CLI entry point - Commander.js configuration
 │   ├── index.ts                  # Main module exports
@@ -134,11 +134,12 @@ import { validateWorkflow } from './parser/validator';
 const program = new Command();
 
 program
-  .name('ghact')
+  .name('secureci')
   .description('Test GitHub Actions locally')
   .argument('<workflow>', 'Path to workflow file')
+  .command('run <file>')
   .option('--dry-run', 'Dry run mode')
-  .option('--validate', 'Validate only')
+  // plus: validate <file> [--contract], list, config ...
   .action((workflow, options) => {
     // Route to appropriate handler
   });
@@ -292,7 +293,7 @@ function resolveContainerRuntime(
 
 - Parse action references (e.g., `actions/checkout@v3`)
 - Download actions from GitHub
-- Cache actions locally in `~/.ghact/actions-cache`
+- Cache actions locally in `~/.secureci/actions-cache`
 - Support composite, JavaScript, and Docker actions
 - Handle versioning (tags, branches, commit SHAs)
 
@@ -587,7 +588,7 @@ async function fetchAction(ref: string): Promise<Action> {
 
 ### Caching Strategy
 
-- **Action Cache**: `~/.ghact/actions-cache/owner/repo@ref`
+- **Action Cache**: `~/.secureci/actions-cache/owner/repo@ref`
 - Cache hit: Instant load
 - Cache miss: Download from GitHub (one-time cost)
 

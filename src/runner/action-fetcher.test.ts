@@ -11,12 +11,12 @@ import { execFileSync } from 'child_process';
 import type { AddressInfo } from 'net';
 
 describe('Action Fetcher', () => {
-  // Never touch the developer's real ~/.ghact cache.
+  // Never touch the developer's real ~/.secureci cache.
   let tempHome: string;
   let originalHome: string | undefined;
 
   beforeEach(() => {
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-fetcher-home-'));
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-fetcher-home-'));
     originalHome = process.env.HOME;
     process.env.HOME = tempHome;
   });
@@ -108,7 +108,7 @@ describe('Action Fetcher', () => {
     it('should clear the action cache', () => {
       // Create a test cache directory
       const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
-      const cacheDir = path.join(homeDir, '.ghact', 'actions-cache');
+      const cacheDir = path.join(homeDir, '.secureci', 'actions-cache');
 
       if (!fs.existsSync(cacheDir)) {
         fs.mkdirSync(cacheDir, { recursive: true });
@@ -133,7 +133,7 @@ describe('Action Fetcher', () => {
     let originalServerUrl: string | undefined;
 
     function tarball(): Buffer {
-      const src = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-tarball-'));
+      const src = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-tarball-'));
       const repoDir = path.join(src, 'repo-v1');
       fs.mkdirSync(repoDir);
       fs.writeFileSync(
@@ -165,7 +165,7 @@ describe('Action Fetcher', () => {
     });
 
     const cacheDirFor = () =>
-      path.join(tempHome, '.ghact', 'actions-cache', 'org', 'act', 'v1');
+      path.join(tempHome, '.secureci', 'actions-cache', 'org', 'act', 'v1');
 
     it('downloads, extracts and caches an action', async () => {
       const data = tarball();
@@ -205,7 +205,7 @@ describe('Action Fetcher', () => {
       expect(await fetchAction('org/act@v1')).toBeNull();
       expect(fs.existsSync(cacheDirFor())).toBe(false);
       expect(
-        fs.existsSync(path.join(tempHome, '.ghact', 'actions-cache', 'org'))
+        fs.existsSync(path.join(tempHome, '.secureci', 'actions-cache', 'org'))
       ).toBe(false);
     });
 

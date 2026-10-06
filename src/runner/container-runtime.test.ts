@@ -142,9 +142,9 @@ describe('container-runtime', () => {
           'run',
           '--rm',
           '-v',
-          '/host/work:/ghact-workspace',
+          '/host/work:/secureci-workspace',
           '-v',
-          '/host/exchange:/ghact-exchange',
+          '/host/exchange:/secureci-exchange',
           '--network',
           'none',
           '-e',
@@ -251,7 +251,7 @@ describe('container-runtime', () => {
       const runtime = await resolveContainerRuntime('docker');
       const result = await runtime?.build(
         '/host/action-dir',
-        'ghact-action-abc123'
+        'secureci-action-abc123'
       );
 
       expect(execMock).toHaveBeenCalledWith(
@@ -280,7 +280,7 @@ describe('container-runtime', () => {
       const runtime = await resolveContainerRuntime('docker');
       const result = await runtime?.build(
         '/host/action-dir',
-        'ghact-action-abc123'
+        'secureci-action-abc123'
       );
 
       expect(result?.success).toBe(false);
@@ -337,9 +337,9 @@ describe('container-runtime', () => {
       expect(args).toEqual(
         expect.arrayContaining([
           '-v',
-          '/host/work:/ghact-workspace',
+          '/host/work:/secureci-workspace',
           '-v',
-          '/host/exchange:/ghact-exchange',
+          '/host/exchange:/secureci-exchange',
           '--memory',
           '512m',
           '-e',
@@ -398,7 +398,7 @@ describe('container-runtime', () => {
       const resultPromise = runtime.exec('abc123', {
         command: 'echo hi',
         env: { A: '1' },
-        workingDir: '/ghact-workspace/sub'
+        workingDir: '/secureci-workspace/sub'
       });
       child.stdout.emit('data', Buffer.from('hi\n'));
       child.emit('close', 0);
@@ -411,7 +411,7 @@ describe('container-runtime', () => {
       expect(spawnMock).toHaveBeenCalledWith('docker', [
         'exec',
         '-w',
-        '/ghact-workspace/sub',
+        '/secureci-workspace/sub',
         '-e',
         'A=1',
         'abc123',
@@ -436,7 +436,7 @@ describe('container-runtime', () => {
       expect(spawnMock).toHaveBeenCalledWith('docker', [
         'exec',
         '-w',
-        '/ghact-workspace',
+        '/secureci-workspace',
         '-e',
         'INPUT_WHO-TO-GREET=me',
         'abc123',

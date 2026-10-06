@@ -16,7 +16,7 @@ describe('runner-env', () => {
   const tempDirs: string[] = [];
 
   function tempFile(content: string): string {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-runner-env-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-runner-env-'));
     tempDirs.push(dir);
     const file = path.join(dir, 'file');
     fs.writeFileSync(file, content);
@@ -42,7 +42,7 @@ describe('runner-env', () => {
     });
 
     it('returns {} for a missing file', () => {
-      expect(parseKeyValueFile('/nonexistent/ghact/file')).toEqual({});
+      expect(parseKeyValueFile('/nonexistent/secureci/file')).toEqual({});
     });
   });
 
@@ -78,7 +78,7 @@ describe('runner-env', () => {
     });
 
     it('can create files inside a given directory', () => {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-exchange-'));
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-exchange-'));
       tempDirs.push(dir);
       const files = createStepFiles(dir);
       expect(path.dirname(files.output)).toBe(dir);

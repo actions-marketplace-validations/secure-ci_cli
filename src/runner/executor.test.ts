@@ -70,10 +70,10 @@ function stepExecCalls(fake: ReturnType<typeof fakeJobContainerRuntime>) {
 
 describe('Executor', () => {
   const fixturesDir = path.join(__dirname, '../../test/fixtures');
-  const tempTestDir = path.join(os.tmpdir(), 'ghact-test');
+  const tempTestDir = path.join(os.tmpdir(), 'secureci-test');
 
   // Keep tests hermetic when the suite itself runs in GitHub Actions (or in
-  // ghact): the github context prefers $GITHUB_* / $RUNNER_* from the host.
+  // the SecureCI CLI): the github context prefers $GITHUB_* / $RUNNER_* from the host.
   let savedRunnerEnv: Record<string, string | undefined> = {};
   beforeEach(() => {
     savedRunnerEnv = {};
@@ -262,12 +262,12 @@ jobs:
         'ctr-1',
         expect.objectContaining({
           command: expect.stringMatching(
-            /-eo pipefail '\/ghact-exchange\/step-[^/]+\/script\.sh'$/
+            /-eo pipefail '\/secureci-exchange\/step-[^/]+\/script\.sh'$/
           ),
-          workingDir: '/ghact-workspace',
+          workingDir: '/secureci-workspace',
           env: expect.objectContaining({
-            GITHUB_WORKSPACE: '/ghact-workspace',
-            GITHUB_OUTPUT: expect.stringMatching(/^\/ghact-exchange\//)
+            GITHUB_WORKSPACE: '/secureci-workspace',
+            GITHUB_OUTPUT: expect.stringMatching(/^\/secureci-exchange\//)
           })
         })
       );
@@ -987,7 +987,7 @@ jobs:
       expect(buildMock).toHaveBeenCalledTimes(1);
       expect(buildMock).toHaveBeenCalledWith(
         path.dirname(dockerActionPath),
-        expect.stringMatching(/^ghact-action-/),
+        expect.stringMatching(/^secureci-action-/),
         'Dockerfile'
       );
 
@@ -1048,7 +1048,7 @@ jobs:
     let tempDir: string;
 
     beforeEach(() => {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-subst-'));
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-subst-'));
     });
 
     function writeWorkflow(content: string): string {
@@ -1305,7 +1305,7 @@ jobs:
     let tempDir: string;
 
     beforeEach(() => {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-runner-'));
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-runner-'));
     });
 
     function writeWorkflow(content: string): string {
@@ -1327,7 +1327,7 @@ jobs:
       const binDir = path.join(tempDir, 'bin');
       fs.mkdirSync(binDir);
       fs.writeFileSync(
-        path.join(binDir, 'ghact-hello'),
+        path.join(binDir, 'secureci-hello'),
         '#!/bin/sh\necho hi-from-path\n',
         {
           mode: 0o755
@@ -1344,7 +1344,7 @@ jobs:
       - run: |
           echo "FOO=bar" >> $GITHUB_ENV
           echo "${binDir}" >> $GITHUB_PATH
-      - run: echo "foo=$FOO expr=\${{ env.FOO }} $(ghact-hello)"
+      - run: echo "foo=$FOO expr=\${{ env.FOO }} $(secureci-hello)"
 `);
 
       const result = await executeWorkflow(workflowPath);
@@ -1479,12 +1479,12 @@ jobs:
     steps:
       - uses: local/js-hyphen@v1
         with:
-          who-to-greet: ghact
+          who-to-greet: secureci
 `);
 
       const result = await executeWorkflow(workflowPath);
 
-      expect(result.jobs[0].steps[0].output).toContain('who=ghact');
+      expect(result.jobs[0].steps[0].output).toContain('who=secureci');
     });
 
     it('runs pre before main and post at job end, passing state via $GITHUB_STATE', async () => {
@@ -1583,7 +1583,7 @@ jobs:
     let tempDir: string;
 
     beforeEach(() => {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-jobctr-'));
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-jobctr-'));
     });
 
     function writeWorkflow(content: string): string {
@@ -1621,7 +1621,7 @@ jobs:
       const stepCalls = stepExecCalls(fake);
       expect(stepCalls).toHaveLength(3);
       expect(stepCalls[1]).toMatchObject({
-        workingDir: '/ghact-workspace/sub'
+        workingDir: '/secureci-workspace/sub'
       });
       expect(fake.start.mock.calls[0][0]).toMatchObject({
         image: 'ubuntu:22.04'
@@ -1778,7 +1778,7 @@ jobs:
     steps:
       - uses: local/js-action@v1
         with:
-          who-to-greet: ghact
+          who-to-greet: secureci
 `);
 
       const result = await executeWorkflow(workflowPath, {
@@ -1790,13 +1790,13 @@ jobs:
       const nodeCall = calls.find((c) => c.args);
       expect(nodeCall?.args?.[0]).toBe('/usr/local/bin/node');
       expect(nodeCall?.args?.[1]).toMatch(
-        /^\/ghact-exchange\/actions\/[0-9a-f]+\/dist\/index\.js$/
+        /^\/secureci-exchange\/actions\/[0-9a-f]+\/dist\/index\.js$/
       );
       expect(nodeCall?.env).toMatchObject({
-        'INPUT_WHO-TO-GREET': 'ghact',
+        'INPUT_WHO-TO-GREET': 'secureci',
         PATH: '/usr/local/bin:/usr/bin:/bin',
         GITHUB_ACTION_PATH: expect.stringMatching(
-          /^\/ghact-exchange\/actions\//
+          /^\/secureci-exchange\/actions\//
         )
       });
     });
@@ -1898,7 +1898,7 @@ runs:
 const fs = require('fs');
 console.log('hello ' + process.env['INPUT_WHO-TO-GREET'] + ' from ' + process.version);
 fs.appendFileSync(process.env.GITHUB_OUTPUT, 'marker=' + fs.readFileSync('/root/marker', 'utf8').trim() + '\\n');
-fs.appendFileSync(process.env.GITHUB_PATH, '/opt/ghact-bin\\n');
+fs.appendFileSync(process.env.GITHUB_PATH, '/opt/secureci-bin\\n');
 `
         );
         fetchActionMock.mockResolvedValueOnce(
@@ -1914,14 +1914,14 @@ jobs:
     steps:
       - run: |
           echo persisted > /root/marker
-          mkdir -p /opt/ghact-bin
-          printf '#!/bin/sh\\necho from-path\\n' > /opt/ghact-bin/ghact-hi
-          chmod +x /opt/ghact-bin/ghact-hi
+          mkdir -p /opt/secureci-bin
+          printf '#!/bin/sh\\necho from-path\\n' > /opt/secureci-bin/secureci-hi
+          chmod +x /opt/secureci-bin/secureci-hi
       - id: js
         uses: local/js-action@v1
         with:
           who-to-greet: container
-      - run: echo "marker=\${{ steps.js.outputs.marker }} $(ghact-hi) $(cat /root/marker)"
+      - run: echo "marker=\${{ steps.js.outputs.marker }} $(secureci-hi) $(cat /root/marker)"
 `);
 
         const result = await executeWorkflow(workflowPath, {
@@ -1945,7 +1945,7 @@ jobs:
     let tempDir: string;
 
     beforeEach(() => {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-shell-'));
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-shell-'));
     });
 
     function writeWorkflow(content: string): string {
@@ -1992,10 +1992,10 @@ jobs:
     });
 
     it('honours defaults.run.working-directory and shell at workflow and job level', async () => {
-      fs.mkdirSync(path.join(process.cwd(), '.ghact-test-wd', 'wf'), {
+      fs.mkdirSync(path.join(process.cwd(), '.secureci-test-wd', 'wf'), {
         recursive: true
       });
-      fs.mkdirSync(path.join(process.cwd(), '.ghact-test-wd', 'job'), {
+      fs.mkdirSync(path.join(process.cwd(), '.secureci-test-wd', 'job'), {
         recursive: true
       });
       const workflowPath = writeWorkflow(`
@@ -2003,7 +2003,7 @@ name: Defaults
 on: push
 defaults:
   run:
-    working-directory: .ghact-test-wd/wf
+    working-directory: .secureci-test-wd/wf
 jobs:
   wf:
     runs-on: ubuntu-latest
@@ -2013,12 +2013,12 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: .ghact-test-wd/job
+        working-directory: .secureci-test-wd/job
         shell: sh
     steps:
       - run: echo "dir=$(basename "$PWD") bash=\${BASH_VERSION:+yes}"
       - run: echo "dir=$(basename "$PWD")"
-        working-directory: .ghact-test-wd
+        working-directory: .secureci-test-wd
 `);
 
       try {
@@ -2027,9 +2027,11 @@ jobs:
         expect(result.success).toBe(true);
         expect(result.jobs[0].steps[0].output).toContain('dir=wf bash=yes');
         expect(result.jobs[1].steps[0].output).toContain('dir=job bash=\n');
-        expect(result.jobs[1].steps[1].output).toContain('dir=.ghact-test-wd');
+        expect(result.jobs[1].steps[1].output).toContain(
+          'dir=.secureci-test-wd'
+        );
       } finally {
-        fs.rmSync(path.join(process.cwd(), '.ghact-test-wd'), {
+        fs.rmSync(path.join(process.cwd(), '.secureci-test-wd'), {
           recursive: true,
           force: true
         });
@@ -2057,7 +2059,7 @@ jobs:
     it('runs container steps through the shell template with a script file', async () => {
       let script = '';
       const fake = fakeJobContainerRuntime((_id, opts) => {
-        const match = opts.command?.match(/'\/ghact-exchange\/([^']+)'/);
+        const match = opts.command?.match(/'\/secureci-exchange\/([^']+)'/);
         if (match) {
           // The script lives in the exchange dir mounted from the host.
           const hostExchange = fake.start.mock.calls[0][0].exchangeDir;
@@ -2087,7 +2089,7 @@ jobs:
       );
       expect(commands).toContainEqual(
         expect.stringMatching(
-          /^bash --noprofile --norc -eo pipefail '\/ghact-exchange\/step-[^/]+\/script\.sh'$/
+          /^bash --noprofile --norc -eo pipefail '\/secureci-exchange\/step-[^/]+\/script\.sh'$/
         )
       );
       expect(script).toBe('echo in-container');
@@ -2096,10 +2098,10 @@ jobs:
 
   describe('action resolution', () => {
     let tempDir: string;
-    const localDir = path.join(process.cwd(), '.ghact-test-actions');
+    const localDir = path.join(process.cwd(), '.secureci-test-actions');
 
     beforeEach(() => {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-resolve-'));
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-resolve-'));
     });
 
     afterEach(() => {
@@ -2183,8 +2185,8 @@ jobs:
   a:
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.ghact-test-actions/one
-      - uses: ./.ghact-test-actions/two
+      - uses: ./.secureci-test-actions/one
+      - uses: ./.secureci-test-actions/two
 `);
 
       const result = await executeWorkflow(workflowPath);
@@ -2203,14 +2205,14 @@ jobs:
   a:
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.ghact-test-actions/nope
+      - uses: ./.secureci-test-actions/nope
 `);
 
       const result = await executeWorkflow(workflowPath);
 
       expect(result.success).toBe(false);
       expect(result.jobs[0].steps[0].error).toMatch(
-        /Could not resolve action "\.\/\.ghact-test-actions\/nope"/
+        /Could not resolve action "\.\/\.secureci-test-actions\/nope"/
       );
     });
 
@@ -2262,7 +2264,7 @@ jobs:
     let tempDir: string;
 
     beforeEach(() => {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-needs-'));
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-needs-'));
     });
 
     function writeWorkflow(content: string): string {
@@ -2427,7 +2429,7 @@ jobs:
     let tempDir: string;
 
     beforeEach(() => {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-event-'));
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-event-'));
     });
 
     function writeWorkflow(content: string): string {

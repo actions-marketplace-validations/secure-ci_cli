@@ -1,4 +1,4 @@
-name: ghact CI/CD
+name: CI
 
 on:
   workflow_dispatch:
@@ -44,15 +44,15 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Validate this repo's workflows with ghact (dogfooding)
+      - name: Validate this repo's workflows with the SecureCI CLI (dogfooding)
         run: |
-          node dist/cli.js --validate .github/workflows/ghact-ci.yaml
-          node dist/cli.js --dry-run .github/workflows/ghact-ci.yaml
+          node dist/cli.js validate .github/workflows/ci.yaml
+          node dist/cli.js run .github/workflows/ci.yaml --dry-run
 
   publish-prerelease:
     name: Publish Pre-release
     needs: test
-    # Disabled until the first ghact release is published (see #18, #19).
+    # Disabled until the first @secureci/cli release is published (see #37).
     if: false
     permissions:
       contents: write
@@ -96,7 +96,7 @@ jobs:
   publish-release:
     name: Publish Release
     needs: test
-    # Disabled until the first ghact release is published (see #18, #19).
+    # Disabled until the first @secureci/cli release is published (see #37).
     if: false
     permissions:
       contents: write
@@ -156,7 +156,7 @@ jobs:
           tag_name: v${{ steps.package-version.outputs.version }}
           release_name: Release v${{ steps.package-version.outputs.version }}
           body: |
-            Release of ghact v${{ steps.package-version.outputs.version }}
+            Release of @secureci/cli v${{ steps.package-version.outputs.version }}
 
             See [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
           draft: false

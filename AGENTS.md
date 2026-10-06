@@ -1,6 +1,6 @@
-# AI Agent Guidance for ghact
+# AI Agent Guidance for the SecureCI CLI
 
-**ghact** is a CLI tool to locally test GitHub Actions and workflows without pushing to remote.
+**The SecureCI CLI** (`@secureci/cli`, command `secureci`) validates GitHub Actions workflows, checks them against pipeline standards, and runs them locally without pushing to remote.
 
 ## Quick Start
 

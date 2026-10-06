@@ -126,8 +126,8 @@ export interface ContainerRuntime {
   ): Promise<ContainerBuildResult>;
 }
 
-export const CONTAINER_WORKDIR = '/ghact-workspace';
-export const CONTAINER_EXCHANGE_DIR = '/ghact-exchange';
+export const CONTAINER_WORKDIR = '/secureci-workspace';
+export const CONTAINER_EXCHANGE_DIR = '/secureci-exchange';
 
 /** Probe timeout for `<bin> version` availability checks. */
 const PROBE_TIMEOUT_MS = 3000;

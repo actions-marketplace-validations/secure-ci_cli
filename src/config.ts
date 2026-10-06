@@ -4,15 +4,15 @@ import * as YAML from 'yaml';
 import type { ContainerRuntimePreference } from './runner/container-runtime';
 
 /**
- * Global ghact configuration, stored as YAML at `~/.ghact/config.yml`.
- * Can be edited by hand or managed via `ghact config get|set|unset|list`.
+ * Global SecureCI CLI configuration, stored as YAML at `~/.secureci/config.yml`.
+ * Can be edited by hand or managed via `secureci config get|set|unset|list`.
  * Values here are used as defaults, overridden by explicit CLI flags.
  *
  * Keys match the CLI flag names (kebab-case, minus the leading `--`) so
- * `ghact config set container-runtime podman` mirrors `ghact
+ * `secureci config set container-runtime podman` mirrors `secureci
  * --container-runtime podman` directly.
  */
-export interface GhactConfig {
+export interface CliConfig {
   'container-runtime'?: ContainerRuntimePreference;
   'container-image'?: string;
   'container-timeout'?: number;
@@ -21,8 +21,8 @@ export interface GhactConfig {
 }
 
 /** Built-in defaults, used when a key is absent from the config file. */
-export const DEFAULT_CONFIG: Required<Pick<GhactConfig, 'container-runtime'>> &
-  GhactConfig = {
+export const DEFAULT_CONFIG: Required<Pick<CliConfig, 'container-runtime'>> &
+  CliConfig = {
   'container-runtime': 'docker'
 };
 
@@ -39,41 +39,29 @@ function getHomeDir(): string {
 }
 
 function getConfigDir(): string {
-  return path.join(getHomeDir(), '.ghact');
+  return path.join(getHomeDir(), '.secureci');
 }
 
 export function getConfigFilePath(): string {
   return path.join(getConfigDir(), 'config.yml');
 }
 
-/** Config location used before the project was renamed from actly. */
-function getLegacyConfigFilePath(): string {
-  return path.join(getHomeDir(), '.actly', 'config.yml');
-}
-
-/**
- * Load the global config file, returning `{}` if absent or unreadable.
- * Falls back to the legacy `~/.actly/config.yml` when `~/.ghact/config.yml`
- * doesn't exist; the next `saveConfig` then writes to the new location.
- */
-export function loadConfig(): GhactConfig {
-  let configFile = getConfigFilePath();
-  if (!fs.existsSync(configFile)) {
-    configFile = getLegacyConfigFilePath();
-    if (!fs.existsSync(configFile)) return {};
-  }
+/** Load the global config file, returning `{}` if absent or unreadable. */
+export function loadConfig(): CliConfig {
+  const configFile = getConfigFilePath();
+  if (!fs.existsSync(configFile)) return {};
 
   try {
     const raw = fs.readFileSync(configFile, 'utf-8');
     const parsed: unknown = YAML.parse(raw);
-    return parsed && typeof parsed === 'object' ? (parsed as GhactConfig) : {};
+    return parsed && typeof parsed === 'object' ? (parsed as CliConfig) : {};
   } catch {
     return {};
   }
 }
 
 /** Persist the given config object to the global config file. */
-export function saveConfig(config: GhactConfig): void {
+export function saveConfig(config: CliConfig): void {
   const configDir = getConfigDir();
   if (!fs.existsSync(configDir)) {
     fs.mkdirSync(configDir, { recursive: true });
@@ -83,7 +71,7 @@ export function saveConfig(config: GhactConfig): void {
 
 /** Resolve the effective value for `container-runtime`: config, else built-in default. */
 export function getDefaultContainerRuntime(
-  config: GhactConfig = loadConfig()
+  config: CliConfig = loadConfig()
 ): ContainerRuntimePreference {
   return config['container-runtime'] ?? DEFAULT_CONFIG['container-runtime'];
 }
@@ -109,7 +97,7 @@ export function isValidConfigKey(key: string): key is ConfigKey {
 export function parseConfigValue(
   key: ConfigKey,
   rawValue: string
-): GhactConfig[ConfigKey] {
+): CliConfig[ConfigKey] {
   switch (key) {
     case 'container-runtime':
       if (
@@ -152,7 +140,7 @@ export function parseConfigValue(
  */
 export function resolveNetworkDisabled(
   flags: { network?: boolean; allowNetwork?: boolean },
-  config: GhactConfig = loadConfig()
+  config: CliConfig = loadConfig()
 ): boolean {
   if (flags.network === false) return true;
   if (flags.allowNetwork === true) return false;

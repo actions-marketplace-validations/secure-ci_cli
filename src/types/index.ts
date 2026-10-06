@@ -4,7 +4,7 @@
 // https://json.schemastore.org/github-action.json
 //
 // Note: These types focus on the subset of features needed for local execution.
-// Full schema compliance would include additional properties not relevant for ghact's use case.
+// Full schema compliance would include additional properties not relevant for the SecureCI CLI's use case.
 
 export interface WorkflowFile {
   name: string;
@@ -109,7 +109,7 @@ export interface ValidationResult {
 /**
  * A central/platform-team-authored contract describing the minimum set of
  * actions a calling workflow must (or must not) use, and optionally the
- * order they must run in. Used by `ghact --contract <file>` to enforce
+ * order they must run in. Used by `secureci validate --contract <file>` to enforce
  * organization-wide pipeline standards on top of a reusable workflow/action.
  */
 export interface PipelineContractSpec {

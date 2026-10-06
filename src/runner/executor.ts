@@ -812,7 +812,7 @@ const activeContainers = new Set<JobContainerHandle>();
 let containerCleanupInstalled = false;
 
 /**
- * Make sure job containers are removed if ghact exits early (Ctrl-C,
+ * Make sure job containers are removed if the CLI exits early (Ctrl-C,
  * SIGTERM, or an exit that skips the normal per-job cleanup).
  */
 function installContainerCleanup(): void {
@@ -974,7 +974,7 @@ function containerPathPrefix(runtime: JobRuntime): string {
  * (`$GITHUB_EVENT_PATH`) and `$RUNNER_TEMP`.
  */
 function createRunDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-run-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-run-'));
   fs.writeFileSync(path.join(dir, 'event.json'), '{}');
   fs.mkdirSync(path.join(dir, 'tmp'));
   return dir;
@@ -983,7 +983,7 @@ function createRunDir(): string {
 /** The `runner` context, derived from the runner env. */
 function runnerContext(runtime: JobRuntime): Record<string, unknown> {
   return {
-    name: 'ghact',
+    name: 'secureci',
     os: runtime.runnerEnv.RUNNER_OS,
     arch: process.arch === 'arm64' ? 'ARM64' : 'X64',
     temp: runtime.runnerEnv.RUNNER_TEMP,
@@ -1018,7 +1018,7 @@ function createJobRuntime(
       workspace: process.cwd(),
       eventPath,
       tempDir: path.join(runDir, 'tmp'),
-      toolCache: path.join(homeDir, '.ghact', 'toolcache')
+      toolCache: path.join(homeDir, '.secureci', 'toolcache')
     }),
     eventPath,
     env: {},
@@ -1432,7 +1432,7 @@ async function executeDockerAction(
       };
     }
 
-    const tag = `ghact-action-${crypto.createHash('sha1').update(actionDir).digest('hex').slice(0, 12)}`;
+    const tag = `secureci-action-${crypto.createHash('sha1').update(actionDir).digest('hex').slice(0, 12)}`;
     logger.info(`Building Docker action image: ${action.name} (${tag})`);
     const buildResult = await containerRuntime.build(
       actionDir,
@@ -1453,7 +1453,7 @@ async function executeDockerAction(
   }
 
   // Inputs are passed as INPUT_<NAME> env vars, matching GitHub's own
-  // convention (same one ghact already uses for JS actions).
+  // convention (the same one used for JS actions).
   const inputEnv: Record<string, string> = {};
   for (const [key, value] of Object.entries(actionInputs)) {
     inputEnv[inputEnvName(key)] = value;
@@ -1467,7 +1467,9 @@ async function executeDockerAction(
 
   logger.info(`Executing Docker action: ${action.name}`);
 
-  const exchangeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-exchange-'));
+  const exchangeDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'secureci-exchange-')
+  );
   const files = createStepFiles(exchangeDir);
   fs.copyFileSync(runtime.eventPath, path.join(exchangeDir, 'event.json'));
 
@@ -1539,7 +1541,7 @@ async function executeDockerAction(
 /**
  * Execute a JavaScript action (`runs.using: node*`): `pre` (if any) and
  * `main` now, with `post` queued on the job runtime to run at job end.
- * Scripts run with ghact's own Node binary, in the workspace, with the
+ * Scripts run with the CLI's own Node binary, in the workspace, with the
  * runner's default env, the caller's env, `INPUT_*`, `STATE_*` and the
  * file-command variables. Note: GitHub runs every `pre` at job start;
  * here it runs immediately before its own `main`.

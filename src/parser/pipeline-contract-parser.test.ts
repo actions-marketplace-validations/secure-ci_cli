@@ -16,7 +16,7 @@ describe('parsePipelineContract', () => {
   function writeTemp(content: string): string {
     const file = path.join(
       os.tmpdir(),
-      `ghact-contract-test-${Date.now()}-${Math.random()}.yml`
+      `secureci-contract-test-${Date.now()}-${Math.random()}.yml`
     );
     fs.writeFileSync(file, content);
     tempFiles.push(file);

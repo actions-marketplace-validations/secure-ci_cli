@@ -1,6 +1,6 @@
-# Development Workflow for ghact
+# Development Workflow for the SecureCI CLI
 
-This document covers the development workflow and common tasks for working on ghact.
+This document covers the development workflow and common tasks for working on the SecureCI CLI.
 
 ## Before You Start
 
@@ -53,7 +53,7 @@ All checks must pass before committing.
 5. **Test manually** (if applicable)
    ```bash
    npm run build
-   ./dist/cli.js --dry-run test/fixtures/your-workflow.yml
+   ./dist/cli.js run test/fixtures/your-workflow.yml --dry-run
    ```
 
 ### Fixing a Bug
@@ -162,10 +162,10 @@ npm run format            # Prettier format
 ./dist/cli.js --help
 
 # Dry run
-./dist/cli.js --dry-run .github/workflows/ci.yml
+./dist/cli.js run .github/workflows/ci.yml --dry-run
 
 # Validate
-./dist/cli.js --validate .github/workflows/ci.yml
+./dist/cli.js validate .github/workflows/ci.yml
 
 # Execute with inputs
 ./dist/cli.js workflow.yml --input key=value
@@ -258,12 +258,12 @@ it.only('should test this', () => { ... });
 Add console.log or use Node.js debugger:
 
 ```bash
-node --inspect-brk dist/cli.js --dry-run workflow.yml
+node --inspect-brk dist/cli.js run workflow.yml --dry-run
 ```
 
 ## Contributing Philosophy
 
-When working on ghact, keep these principles in mind:
+When working on the SecureCI CLI, keep these principles in mind:
 
 ### Minimal Dependencies
 

@@ -8,7 +8,7 @@ import * as path from 'path';
 // since cli.ts calls `program.parse()`/`process.exit()` at module scope and
 // isn't structured for in-process unit testing (see vitest.config.mts, which
 // deliberately excludes src/cli.ts from coverage for the same reason).
-describe('cli --contract', () => {
+describe('secureci validate --contract', () => {
   const cliPath = path.join(__dirname, '..', 'dist', 'cli.js');
   let tempDir: string;
   let workflow: string;
@@ -38,7 +38,7 @@ describe('cli --contract', () => {
 
   beforeAll(() => {
     execFileSync('npx', ['tsc'], { cwd: path.join(__dirname, '..') });
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-cli-contract-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cli-contract-'));
 
     workflow = write(
       'caller.yml',
@@ -85,7 +85,7 @@ describe('cli --contract', () => {
       ].join('\n')
     );
 
-    const result = run(['--contract', contract, workflow]);
+    const result = run(['validate', workflow, '--contract', contract]);
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Validation passed!');
@@ -97,7 +97,7 @@ describe('cli --contract', () => {
       'required:\n  - uses: org/never-used\n'
     );
 
-    const result = run(['--contract', contract, workflow]);
+    const result = run(['validate', workflow, '--contract', contract]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
@@ -111,7 +111,7 @@ describe('cli --contract', () => {
       'ordering: strict\nrequired:\n  - uses: org/deploy\n  - uses: org/security-scan\n'
     );
 
-    const result = run(['--contract', contract, workflow]);
+    const result = run(['validate', workflow, '--contract', contract]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('ordering: strict');
@@ -123,7 +123,7 @@ describe('cli --contract', () => {
       'forbidden:\n  - uses: org/security-scan\n'
     );
 
-    const result = run(['--contract', contract, workflow]);
+    const result = run(['validate', workflow, '--contract', contract]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('Forbidden action "org/security-scan"');
@@ -135,7 +135,7 @@ describe('cli --contract', () => {
       'required:\n  - uses: org/x\n'
     );
 
-    const result = run(['--contract', contract, action]);
+    const result = run(['validate', action, '--contract', contract]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('only apply to workflow files');
@@ -143,16 +143,17 @@ describe('cli --contract', () => {
 
   it('fails with a clear error when the contract file does not exist', () => {
     const result = run([
+      'validate',
+      workflow,
       '--contract',
-      path.join(tempDir, 'nonexistent.yml'),
-      workflow
+      path.join(tempDir, 'nonexistent.yml')
     ]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('Contract file not found');
   });
 
-  it('implies --validate: passing --contract alone still runs syntax validation', () => {
+  it('still runs syntax validation alongside the contract', () => {
     // Valid enough to parse (has name + jobs), but missing the required
     // "on" trigger, so the pre-existing syntax validator should still fail
     // it even though the (empty) contract itself is satisfied.
@@ -169,10 +170,112 @@ describe('cli --contract', () => {
     );
     const contract = write('noop-contract.yml', '{}\n');
 
-    const result = run(['--contract', contract, missingTrigger]);
+    const result = run(['validate', missingTrigger, '--contract', contract]);
 
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('Validating workflow');
     expect(result.stderr).toContain('Workflow trigger (on) is required');
+  });
+});
+
+describe('secureci commands', () => {
+  const root = path.join(__dirname, '..');
+  const cliPath = path.join(root, 'dist', 'cli.js');
+  let tempDir: string;
+
+  function run(
+    args: string[],
+    cwd = root
+  ): { status: number; stdout: string; stderr: string } {
+    try {
+      const stdout = execFileSync('node', [cliPath, ...args], {
+        encoding: 'utf-8',
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      return { status: 0, stdout, stderr: '' };
+    } catch (error) {
+      const e = error as { status: number; stdout: string; stderr: string };
+      return { status: e.status, stdout: e.stdout, stderr: e.stderr };
+    }
+  }
+
+  beforeAll(() => {
+    execFileSync('npx', ['tsc'], { cwd: root });
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cli-'));
+    fs.mkdirSync(path.join(tempDir, '.github', 'workflows'), {
+      recursive: true
+    });
+    fs.writeFileSync(
+      path.join(tempDir, '.github', 'workflows', 'ci.yml'),
+      [
+        'name: Hello CI',
+        'on: push',
+        'jobs:',
+        '  hello:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: echo "hello ${{ inputs.who }}"'
+      ].join('\n')
+    );
+  }, 60_000);
+
+  afterAll(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('reports the version from package.json', () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(root, 'package.json'), 'utf-8')
+    );
+    const result = run(['--version']);
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(pkg.version);
+  });
+
+  it('names itself secureci and lists its commands in help', () => {
+    const result = run(['--help']);
+    expect(result.stdout).toContain('Usage: secureci');
+    for (const command of ['run', 'validate', 'list', 'config']) {
+      expect(result.stdout).toMatch(new RegExp(`\\n\\s+${command}\\b`));
+    }
+  });
+
+  it('prints help and exits non-zero when no command is given', () => {
+    const result = run([]);
+    expect(result.status).toBe(1);
+    expect(result.stderr + result.stdout).toContain('Usage: secureci');
+  });
+
+  it('runs a workflow with secureci run', () => {
+    const result = run(
+      [
+        'run',
+        '.github/workflows/ci.yml',
+        '--container-runtime',
+        'none',
+        '--input',
+        'who=world'
+      ],
+      tempDir
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('hello world');
+  });
+
+  it('dry-runs a workflow with secureci run --dry-run', () => {
+    const result = run(
+      ['run', '.github/workflows/ci.yml', '--dry-run'],
+      tempDir
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('Dry run completed successfully');
+    expect(result.stdout).not.toContain('hello world');
+  });
+
+  it('lists workflows with secureci list', () => {
+    const result = run(['list'], tempDir);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('ci.yml: Hello CI');
   });
 });
