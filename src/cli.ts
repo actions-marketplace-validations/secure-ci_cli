@@ -46,6 +46,10 @@ program
     '-s, --secret <key=value...>',
     'Pass secret values (can be used multiple times)'
   )
+  .option(
+    '--var <key=value...>',
+    'Set a configuration variable for the vars context (can be used multiple times)'
+  )
   .option('-j, --job <name>', 'Run a specific job')
   .option('--verbose', 'Enable verbose logging')
   .option('-l, --list', 'List available workflows in .github/workflows/')
@@ -124,12 +128,14 @@ program
       const secrets = parseKeyValuePairs(options.secret, '--secret', {
         redact: true
       });
+      const vars = parseKeyValuePairs(options.var, '--var');
 
       // Execute the workflow/action
       const result = await executeWorkflow(file, {
         dryRun: false,
         inputs,
         secrets,
+        vars,
         job: options.job,
         verbose: options.verbose,
         containerRuntime: options.containerRuntime,

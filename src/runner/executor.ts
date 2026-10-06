@@ -23,7 +23,9 @@ import {
   substituteExpressions,
   substituteRecord,
   ExpressionContext,
-  GithubContext
+  GithubContext,
+  NeedsInfo,
+  withImplicitSuccess
 } from './expression';
 import { execSync } from 'child_process';
 import {
@@ -276,7 +278,7 @@ export async function executeWorkflow(
       logger.info(`Executing workflow: ${parsed.file.name}`);
 
       const jobs: JobResult[] = [];
-      const jobSucceeded = new Map<string, boolean>();
+      const jobResults = new Map<string, NeedsInfo>();
       const jobOrder = topologicalJobOrder(parsed.file.jobs);
 
       for (const jobId of jobOrder) {
@@ -287,30 +289,50 @@ export async function executeWorkflow(
           continue;
         }
 
-        // Skip jobs whose dependencies failed (or were themselves skipped)
-        if (!options.job) {
-          const needs = job.needs
-            ? Array.isArray(job.needs)
-              ? job.needs
-              : [job.needs]
-            : [];
-          const unmetDependency = needs.find(
-            (dep) => jobSucceeded.get(dep) === false
-          );
-          if (unmetDependency) {
-            logger.info(
-              `Skipping job: ${jobId} (dependency "${unmetDependency}" did not succeed)`
-            );
-            continue;
-          }
-        }
-
         const workflowDir = path.dirname(filePath);
         const github = buildGithubContext(
           parsed.file.name,
           jobId,
           process.cwd()
         );
+
+        // `needs` results feed the job's `if:` (implicitly `success()`,
+        // which requires every dependency to have succeeded). With --job,
+        // dependencies aren't run and count as successful.
+        const needsIds = job.needs
+          ? Array.isArray(job.needs)
+            ? job.needs
+            : [job.needs]
+          : [];
+        const needs: Record<string, NeedsInfo> = {};
+        for (const dep of needsIds) {
+          needs[dep] = jobResults.get(dep) ?? {
+            result: 'success',
+            outputs: {}
+          };
+        }
+        const vars = options.vars ?? {};
+        const jobIfCtx: ExpressionContext = {
+          ...createContext({}, options.inputs, options.secrets, github),
+          needs,
+          vars,
+          dependencies: {
+            allSucceeded: Object.values(needs).every(
+              (n) => n.result === 'success'
+            ),
+            anyFailed: Object.values(needs).some((n) => n.result === 'failure')
+          }
+        };
+        if (!evaluateCondition(withImplicitSuccess(job.if), jobIfCtx)) {
+          const notOk = needsIds.find((dep) => needs[dep].result !== 'success');
+          logger.info(
+            notOk
+              ? `Skipping job: ${jobId} (dependency "${notOk}" ${needs[notOk].result === 'skipped' ? 'was skipped' : 'did not succeed'})`
+              : `Skipping job: ${jobId} (condition not met)`
+          );
+          jobResults.set(jobId, { result: 'skipped', outputs: {} });
+          continue;
+        }
 
         // Handle reusable workflow calls
         if (job.uses) {
@@ -321,7 +343,10 @@ export async function executeWorkflow(
             options
           );
           jobs.push(reusableResult);
-          jobSucceeded.set(jobId, reusableResult.success);
+          jobResults.set(jobId, {
+            result: reusableResult.success ? 'success' : 'failure',
+            outputs: reusableResult.outputs ?? {}
+          });
           if (reusableResult.success) {
             logger.success(`Job ${jobId} completed successfully`);
           }
@@ -331,8 +356,9 @@ export async function executeWorkflow(
         const matrixCombinations = expandMatrix(job.strategy?.matrix);
         const failFast = job.strategy?.['fail-fast'] !== false;
         let matrixFailed = false;
+        const jobOutputs: Record<string, string> = {};
 
-        for (const matrixValues of matrixCombinations) {
+        for (const [jobIndex, matrixValues] of matrixCombinations.entries()) {
           if (matrixFailed && failFast) {
             logger.info(
               `Skipping remaining matrix jobs for ${jobId} (fail-fast)`
@@ -348,44 +374,54 @@ export async function executeWorkflow(
               : '';
           const jobLabel = `${jobId}${matrixSuffix}`;
 
-          // Workflow-level env can't reference `env` itself; job-level env
-          // sees the workflow env plus matrix (matching GitHub's contexts).
-          const workflowEnv = substituteRecord(
-            parsed.file.env,
-            createContext({}, options.inputs, options.secrets, github)
-          );
-          const jobEnv = substituteRecord(
-            job.env,
-            createContext(
-              workflowEnv,
-              options.inputs,
-              options.secrets,
-              github,
-              matrixValues
-            )
-          );
-          const jobCtx = createContext(
-            { ...workflowEnv, ...jobEnv },
-            options.inputs,
-            options.secrets,
-            github,
-            matrixValues
-          );
-
-          if (!evaluateCondition(job.if, jobCtx)) {
-            logger.info(`Skipping job: ${jobLabel} (condition not met)`);
-            continue;
-          }
-
-          logger.step(`Executing job: ${jobLabel}`);
-          const jobStartTime = Date.now();
-          const stepResults: StepResult[] = [];
           const runtime = createJobRuntime(github, runDir, {
             shell: job.defaults?.run?.shell ?? parsed.file.defaults?.run?.shell,
             workingDirectory:
               job.defaults?.run?.['working-directory'] ??
               parsed.file.defaults?.run?.['working-directory']
           });
+
+          // Workflow-level env can't reference `env` itself; job-level env
+          // sees the workflow env plus matrix (matching GitHub's contexts).
+          const workflowEnv = substituteRecord(parsed.file.env, {
+            ...createContext({}, options.inputs, options.secrets, github),
+            vars
+          });
+          const jobEnv = substituteRecord(job.env, {
+            ...createContext(
+              workflowEnv,
+              options.inputs,
+              options.secrets,
+              github,
+              matrixValues
+            ),
+            needs,
+            vars
+          });
+          const jobCtx: ExpressionContext = {
+            ...createContext(
+              { ...workflowEnv, ...jobEnv },
+              options.inputs,
+              options.secrets,
+              github,
+              matrixValues
+            ),
+            needs,
+            vars,
+            job: { status: 'success' },
+            runner: runnerContext(runtime),
+            strategy: {
+              'fail-fast': failFast,
+              'job-index': jobIndex,
+              'job-total': matrixCombinations.length,
+              'max-parallel':
+                job.strategy?.['max-parallel'] ?? matrixCombinations.length
+            }
+          };
+
+          logger.step(`Executing job: ${jobLabel}`);
+          const jobStartTime = Date.now();
+          const stepResults: StepResult[] = [];
 
           if (
             !(await startJobContainer(job, jobCtx, options, runtime, runDir))
@@ -403,6 +439,10 @@ export async function executeWorkflow(
           try {
             // Execute each step
             for (const step of job.steps || []) {
+              jobCtx.job = {
+                ...jobCtx.job,
+                status: jobCtx.jobFailed ? 'failure' : 'success'
+              };
               // `$GITHUB_ENV` additions from earlier steps sit between the
               // job env and this step's own `env:`.
               const envCtx: ExpressionContext = {
@@ -414,7 +454,9 @@ export async function executeWorkflow(
                 env: { ...envCtx.env, ...substituteRecord(step.env, envCtx) }
               };
 
-              if (!evaluateCondition(step.if, stepCtx)) {
+              // After a failure, only steps whose `if:` uses a status
+              // function (always(), failure(), ...) still run.
+              if (!evaluateCondition(withImplicitSuccess(step.if), stepCtx)) {
                 logger.info(
                   `Skipping step: ${step.name || step.id || 'unnamed'} (condition not met)`
                 );
@@ -427,7 +469,11 @@ export async function executeWorkflow(
                 };
                 stepResults.push(skippedResult);
                 if (step.id) {
-                  jobCtx.steps[step.id] = { outcome: 'skipped', outputs: {} };
+                  jobCtx.steps[step.id] = {
+                    outcome: 'skipped',
+                    conclusion: 'skipped',
+                    outputs: {}
+                  };
                 }
                 continue;
               }
@@ -440,24 +486,36 @@ export async function executeWorkflow(
               );
               stepResults.push(stepResult);
 
+              const outcome = stepResult.success ? 'success' : 'failure';
               if (step.id) {
                 jobCtx.steps[step.id] = {
-                  outcome: stepResult.success ? 'success' : 'failure',
+                  outcome,
+                  // continue-on-error turns a failure into a successful
+                  // conclusion, which is what success()/failure() see.
+                  conclusion: step['continue-on-error'] ? 'success' : outcome,
                   outputs: stepResult.outputs || {}
                 };
               }
 
-              if (!stepResult.success) {
-                jobCtx.jobFailed = true;
-              }
-
               if (!stepResult.success && !step['continue-on-error']) {
+                jobCtx.jobFailed = true;
                 logger.error(`Step failed: ${step.name || 'unnamed'}`);
-                break;
               }
             }
 
             await runPostSteps(runtime, jobCtx, stepResults);
+
+            jobCtx.job = {
+              ...jobCtx.job,
+              status: jobCtx.jobFailed ? 'failure' : 'success'
+            };
+            Object.assign(
+              jobOutputs,
+              substituteRecord(job.outputs, {
+                ...jobCtx,
+                env: { ...jobCtx.env, ...runtime.env }
+              })
+            );
           } finally {
             await stopJobContainer(runtime);
           }
@@ -470,6 +528,7 @@ export async function executeWorkflow(
             job: jobLabel,
             success: jobSuccess,
             steps: stepResults,
+            outputs: { ...jobOutputs },
             duration: Date.now() - jobStartTime
           });
 
@@ -479,7 +538,10 @@ export async function executeWorkflow(
         }
 
         const jobSuccess = !matrixFailed;
-        jobSucceeded.set(jobId, jobSuccess);
+        jobResults.set(jobId, {
+          result: jobSuccess ? 'success' : 'failure',
+          outputs: jobOutputs
+        });
 
         if (jobSuccess) {
           logger.success(`Job ${jobId} completed successfully`);
@@ -790,6 +852,17 @@ function createRunDir(): string {
   fs.writeFileSync(path.join(dir, 'event.json'), '{}');
   fs.mkdirSync(path.join(dir, 'tmp'));
   return dir;
+}
+
+/** The `runner` context, derived from the runner env. */
+function runnerContext(runtime: JobRuntime): Record<string, unknown> {
+  return {
+    name: 'ghact',
+    os: runtime.runnerEnv.RUNNER_OS,
+    arch: process.arch === 'arm64' ? 'ARM64' : 'X64',
+    temp: runtime.runnerEnv.RUNNER_TEMP,
+    tool_cache: runtime.runnerEnv.RUNNER_TOOL_CACHE
+  };
 }
 
 let hostBash: boolean | undefined;
@@ -1736,12 +1809,18 @@ async function executeAction(
       const outputs: Record<string, string> = {};
       // Composite steps see only the action's own inputs, plus the
       // caller's env and github context - never the workflow's inputs.
-      const actionCtx: ExpressionContext = createContext(
-        { ...callerCtx.env },
-        actionInputs,
-        options.secrets,
-        callerCtx.github
-      );
+      const actionCtx: ExpressionContext = {
+        ...createContext(
+          { ...callerCtx.env },
+          actionInputs,
+          options.secrets,
+          callerCtx.github
+        ),
+        vars: callerCtx.vars,
+        job: callerCtx.job,
+        runner: callerCtx.runner,
+        strategy: callerCtx.strategy
+      };
 
       // `defaults.run` doesn't apply inside composite actions.
       const callerDefaults = runtime.defaults;

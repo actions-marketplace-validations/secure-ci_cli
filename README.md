@@ -9,7 +9,7 @@ A CLI tool to locally test GitHub Actions and workflows without pushing to remot
 - 📐 Validate a caller workflow against a central pipeline contract (`--contract`)
 - 🔄 Support for reusable workflows and actions
 - ⛓️ Execute chained workflows and actions
-- 🚦 `if:` conditional execution for jobs and steps (supports `env.*`, `inputs.*`, `secrets.*`, `steps.*.outputs.*`, `success()`, `failure()`, `always()`)
+- 🚦 GitHub expressions in `${{ }}` and `if:`: all common contexts (`github`, `env`, `inputs`, `secrets`, `steps`, `needs`, `matrix`, `job`, `runner`, `vars`, `strategy`), operators and functions (`contains`, `startsWith`, `format`, `fromJSON`, `hashFiles`, `always()`, `failure()`, ...)
 - 🔗 `needs:` job dependency ordering (topological sort)
 - 📤 Step outputs via `$GITHUB_OUTPUT`, consumable by later steps/jobs
 - 🔒 Automatic secret masking in all log output
@@ -144,7 +144,29 @@ If the caller's workflow calls `org/deploy` before `org/security-scan` (or uses 
 
 ### Conditional Execution (`if:`)
 
-Jobs and steps support `if:` expressions referencing `env.*`, `inputs.*`, `secrets.*`, `steps.<id>.outputs.*`, and the functions `success()`, `failure()`, `always()`:
+Jobs and steps support `if:` expressions, and `${{ }}` works anywhere a value is expected (`run:`, `env:`, `with:`, `outputs:`). Supported:
+
+- **Contexts:**
+  - `github` (including `github.event`)
+  - `env`, `inputs`, `secrets`, `matrix`
+  - `steps` (`outputs`, `outcome`, `conclusion`)
+  - `needs` (`outputs`, `result`)
+  - `job.status`
+  - `runner` (`os`, `arch`, `temp`, `tool_cache`)
+  - `vars` (set with `--var KEY=VALUE`)
+  - `strategy` (`job-index`, `job-total`, `fail-fast`, `max-parallel`)
+- **Syntax:**
+  - `.`, `['key']` and `*` access
+  - `'string'` (with `''` escapes), number, `true`/`false`/`null` literals
+  - `! < <= > >= == != && ||`, with GitHub's loose typing. `a || 'default'` returns the value, not a boolean.
+- **Functions:**
+  - `contains`, `startsWith`, `endsWith`
+  - `format`, `join`
+  - `toJSON`, `fromJSON`
+  - `hashFiles` (globs relative to the workspace, `!` excludes)
+  - `success()`, `failure()`, `always()`, `cancelled()`
+
+As on GitHub, an `if:` without a status function means `success() && (...)`. After a step fails, later steps are skipped unless their `if:` uses `always()` or `failure()`. A job whose `needs` didn't all succeed is skipped unless its `if:` uses one of them.
 
 ```yaml
 steps:

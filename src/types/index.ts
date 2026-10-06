@@ -30,7 +30,7 @@ export interface Job {
   with?: Record<string, string | number | boolean>;
   secrets?: Record<string, string> | 'inherit';
   needs?: string | string[];
-  if?: string;
+  if?: string | boolean;
   env?: Record<string, string>;
   defaults?: WorkflowDefaults;
   steps?: Step[];
@@ -169,6 +169,8 @@ export interface RunOptions {
   containerMemoryLimit?: string;
   /** Disable container networking. Default: false (network on). */
   networkDisabled?: boolean;
+  /** The `vars` context (configuration variables), e.g. from --var. */
+  vars?: Record<string, string>;
 }
 
 export interface StepResult {
@@ -185,6 +187,8 @@ export interface JobResult {
   job: string;
   success: boolean;
   steps: StepResult[];
+  /** Evaluated `jobs.<id>.outputs`. */
+  outputs?: Record<string, string>;
   duration: number;
 }
 

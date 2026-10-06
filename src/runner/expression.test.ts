@@ -1,6 +1,11 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import * as crypto from 'crypto';
 import {
   createContext,
   evaluateCondition,
+  resolveExpressionValue,
   substituteExpressions
 } from './expression';
 
@@ -140,5 +145,178 @@ describe('substituteExpressions', () => {
   it('leaves non-expression text untouched', () => {
     const ctx = createContext();
     expect(substituteExpressions('plain text', ctx)).toBe('plain text');
+  });
+});
+
+describe('expression functions', () => {
+  const value = (expr: string, ctx = createContext()) =>
+    resolveExpressionValue(expr, ctx);
+
+  it('contains() searches strings case-insensitively and arrays by element', () => {
+    const ctx = createContext({}, {}, {}, { event_name: 'pull_request' });
+    expect(value("contains('Hello world', 'WORLD')")).toBe(true);
+    expect(value("contains('Hello', 'bye')")).toBe(false);
+    expect(value("contains(github.event_name, 'pull')", ctx)).toBe(true);
+    expect(
+      value(
+        'contains(fromJSON(\'["push", "pull_request"]\'), github.event_name)',
+        ctx
+      )
+    ).toBe(true);
+    expect(value("contains(fromJSON('[1, 2]'), 3)")).toBe(false);
+  });
+
+  it('startsWith() and endsWith() are case-insensitive', () => {
+    expect(value("startsWith('refs/heads/main', 'REFS/heads/')")).toBe(true);
+    expect(value("endsWith('release.tar.gz', '.GZ')")).toBe(true);
+    expect(value("startsWith('abc', 'b')")).toBe(false);
+  });
+
+  it('format() replaces {N} and unescapes {{ }}', () => {
+    expect(value("format('Hello {0} {1} {0}', 'a', 'b')")).toBe('Hello a b a');
+    expect(value("format('{{0}} is {0}', 'x')")).toBe('{0} is x');
+  });
+
+  it('join() joins arrays with an optional separator', () => {
+    expect(value('join(fromJSON(\'["a","b"]\'))')).toBe('a,b');
+    expect(value('join(fromJSON(\'["a","b"]\'), \' | \')')).toBe('a | b');
+    expect(value("join('single', '-')")).toBe('single');
+  });
+
+  it('toJSON() and fromJSON() round-trip values', () => {
+    const ctx = createContext({}, {}, {}, {}, { os: 'linux' });
+    expect(value('toJSON(matrix)', ctx)).toBe('{\n  "os": "linux"\n}');
+    expect(value('fromJSON(\'{"a": {"b": 3}}\').a.b')).toBe(3);
+    expect(value("fromJSON('true')")).toBe(true);
+  });
+
+  it('hashFiles() hashes matching files in the workspace, sorted', () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-hash-'));
+    fs.mkdirSync(path.join(workspace, 'a', 'b'), { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'package-lock.json'), 'root');
+    fs.writeFileSync(
+      path.join(workspace, 'a', 'b', 'package-lock.json'),
+      'nested'
+    );
+    fs.writeFileSync(path.join(workspace, 'a', 'other.txt'), 'x');
+    const ctx = createContext({}, {}, {}, { workspace });
+
+    const sha = (data: string | Buffer) =>
+      crypto.createHash('sha256').update(data).digest();
+    const files = [
+      path.join(workspace, 'a', 'b', 'package-lock.json'),
+      path.join(workspace, 'package-lock.json')
+    ].sort();
+    const expected = crypto
+      .createHash('sha256')
+      .update(Buffer.concat(files.map((f) => sha(fs.readFileSync(f)))))
+      .digest('hex');
+
+    expect(value("hashFiles('**/package-lock.json')", ctx)).toBe(expected);
+    expect(value("hashFiles('**/nothing-matches')", ctx)).toBe('');
+    expect(value("hashFiles('**/*.json', '!a/**')", ctx)).toBe(
+      crypto
+        .createHash('sha256')
+        .update(sha(fs.readFileSync(path.join(workspace, 'package-lock.json'))))
+        .digest('hex')
+    );
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+});
+
+describe('expression operators and contexts', () => {
+  const value = (expr: string, ctx = createContext()) =>
+    resolveExpressionValue(expr, ctx);
+
+  it('|| and && return operand values, not booleans', () => {
+    const ctx = createContext({}, { set: 'yes', empty: '' });
+    expect(value("inputs.empty || 'fallback'", ctx)).toBe('fallback');
+    expect(value("inputs.set || 'fallback'", ctx)).toBe('yes');
+    expect(value("inputs.set && 'both'", ctx)).toBe('both');
+    expect(value("inputs.empty && 'both'", ctx)).toBe('');
+    expect(
+      substituteExpressions("v=${{ inputs.missing || 'default' }}", ctx)
+    ).toBe('v=default');
+  });
+
+  it('supports < <= > >= with GitHub type coercion', () => {
+    expect(value('1 < 2')).toBe(true);
+    expect(value('2 <= 2')).toBe(true);
+    expect(value("'10' > 9")).toBe(true);
+    expect(value("'b' > 'A'")).toBe(true);
+    expect(value('3 >= 4')).toBe(false);
+  });
+
+  it('coerces mixed types to numbers for ==', () => {
+    expect(value("'1' == 1")).toBe(true);
+    expect(value('true == 1')).toBe(true);
+    expect(value('null == 0')).toBe(true);
+    expect(value("'' == 0")).toBe(true);
+  });
+
+  it('supports index access and the * object filter', () => {
+    const ctx = createContext(
+      {},
+      {},
+      {},
+      {
+        event: {
+          pull_request: { labels: [{ name: 'bug' }, { name: 'docs' }] }
+        }
+      }
+    );
+    expect(value("github['event']['pull_request'].labels[1].name", ctx)).toBe(
+      'docs'
+    );
+    expect(
+      value("contains(github.event.pull_request.labels.*.name, 'bug')", ctx)
+    ).toBe(true);
+  });
+
+  it('resolves needs, job, runner, vars and strategy contexts', () => {
+    const ctx = createContext();
+    ctx.needs = {
+      build: { result: 'success', outputs: { version: '1.2.3' } }
+    };
+    ctx.job = { status: 'success' };
+    ctx.runner = { os: 'Linux' };
+    ctx.vars = { REGION: 'eu' };
+    ctx.strategy = { 'job-index': 0, 'job-total': 2 };
+    expect(value('needs.build.outputs.version', ctx)).toBe('1.2.3');
+    expect(value("needs.build.result == 'success'", ctx)).toBe(true);
+    expect(value('job.status', ctx)).toBe('success');
+    expect(value('runner.os', ctx)).toBe('Linux');
+    expect(value('vars.REGION', ctx)).toBe('eu');
+    expect(value('strategy.job-total', ctx)).toBe(2);
+  });
+
+  it('exposes steps.<id>.conclusion', () => {
+    const ctx = createContext();
+    ctx.steps['lint'] = {
+      outcome: 'failure',
+      conclusion: 'success',
+      outputs: {}
+    };
+    expect(value('steps.lint.outcome', ctx)).toBe('failure');
+    expect(value('steps.lint.conclusion', ctx)).toBe('success');
+  });
+
+  it('renders arrays and objects as Array/Object when substituted, like GitHub', () => {
+    const ctx = createContext({}, {}, {}, {}, { list: ['a'] });
+    expect(substituteExpressions('${{ matrix.list }}', ctx)).toBe('Array');
+    expect(substituteExpressions('${{ matrix }}', ctx)).toBe('Object');
+    expect(substituteExpressions('${{ null }}', ctx)).toBe('');
+  });
+
+  it("supports '' escapes inside single-quoted strings", () => {
+    expect(value("'it''s'")).toBe("it's");
+  });
+
+  it('treats 0, empty string, null and false as falsy', () => {
+    const ctx = createContext();
+    expect(evaluateCondition('0', ctx)).toBe(false);
+    expect(evaluateCondition("''", ctx)).toBe(false);
+    expect(evaluateCondition('null', ctx)).toBe(false);
+    expect(evaluateCondition("fromJSON('[]')", ctx)).toBe(true);
   });
 });

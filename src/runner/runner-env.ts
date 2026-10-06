@@ -211,6 +211,11 @@ export function processWorkflowCommands(stdout: string): WorkflowCommandResult {
   return result;
 }
 
+/** A context value as an env var string ('' when unset). */
+function text(value: unknown): string {
+  return value === undefined || value === null ? '' : String(value);
+}
+
 export interface RunnerEnvOptions {
   workspace: string;
   eventPath: string;
@@ -241,20 +246,20 @@ export function buildRunnerEnv(
   const env: Record<string, string> = {
     CI: 'true',
     GITHUB_ACTIONS: 'true',
-    GITHUB_WORKFLOW: github.workflow ?? '',
-    GITHUB_JOB: github.job ?? '',
-    GITHUB_SHA: github.sha ?? '',
-    GITHUB_REF: github.ref ?? '',
-    GITHUB_REF_NAME: github.ref_name ?? '',
-    GITHUB_EVENT_NAME: github.event_name ?? '',
-    GITHUB_ACTOR: github.actor ?? '',
-    GITHUB_REPOSITORY: github.repository ?? '',
-    GITHUB_REPOSITORY_OWNER: github.repository_owner ?? '',
-    GITHUB_RUN_ID: github.run_id ?? '',
-    GITHUB_RUN_NUMBER: github.run_number ?? '',
-    GITHUB_RUN_ATTEMPT: github.run_attempt ?? '',
-    GITHUB_SERVER_URL: github.server_url ?? '',
-    GITHUB_API_URL: github.api_url ?? '',
+    GITHUB_WORKFLOW: text(github.workflow),
+    GITHUB_JOB: text(github.job),
+    GITHUB_SHA: text(github.sha),
+    GITHUB_REF: text(github.ref),
+    GITHUB_REF_NAME: text(github.ref_name),
+    GITHUB_EVENT_NAME: text(github.event_name),
+    GITHUB_ACTOR: text(github.actor),
+    GITHUB_REPOSITORY: text(github.repository),
+    GITHUB_REPOSITORY_OWNER: text(github.repository_owner),
+    GITHUB_RUN_ID: text(github.run_id),
+    GITHUB_RUN_NUMBER: text(github.run_number),
+    GITHUB_RUN_ATTEMPT: text(github.run_attempt),
+    GITHUB_SERVER_URL: text(github.server_url),
+    GITHUB_API_URL: text(github.api_url),
     GITHUB_WORKSPACE: options.workspace,
     GITHUB_EVENT_PATH: options.eventPath,
     RUNNER_OS: runnerOs(),

@@ -335,7 +335,10 @@ jobs:
 
       expect(result.success).toBe(false);
       expect(result.jobs[0].success).toBe(false);
-      expect(result.jobs[0].steps.length).toBe(2);
+      // The step after the failure is recorded as skipped, as on GitHub.
+      expect(result.jobs[0].steps.length).toBe(3);
+      expect(result.jobs[0].steps[2].outcome).toBe('skipped');
+      expect(result.jobs[0].steps[2].output).not.toContain('should not run');
 
       // Cleanup
       fs.unlinkSync(failWorkflowPath);
@@ -2109,7 +2112,8 @@ jobs:
       const result = await executeWorkflow(workflowPath);
 
       expect(result.success).toBe(false);
-      expect(result.jobs[0].steps).toHaveLength(1);
+      expect(result.jobs[0].steps).toHaveLength(2);
+      expect(result.jobs[0].steps[1].outcome).toBe('skipped');
       expect(result.jobs[0].steps[0].error).toMatch(
         /Could not resolve action "does-not-exist\/nope@v1"/
       );
@@ -2235,6 +2239,171 @@ jobs:
           args: ['-c', 'echo docker-step-ran']
         })
       );
+    });
+  });
+
+  describe('needs, job outputs and status functions', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-needs-'));
+    });
+
+    function writeWorkflow(content: string): string {
+      const file = path.join(tempDir, 'workflow.yml');
+      fs.writeFileSync(file, content);
+      return file;
+    }
+
+    it('exposes jobs.<id>.outputs and result to dependents via needs', async () => {
+      const workflowPath = writeWorkflow(`
+name: Needs Outputs
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: \${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: echo "version=1.2.3" >> $GITHUB_OUTPUT
+  deploy:
+    needs: build
+    if: needs.build.outputs.version == '1.2.3'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "deploying \${{ needs.build.outputs.version }} (\${{ needs.build.result }})"
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].outputs).toEqual({ version: '1.2.3' });
+      expect(result.jobs[1].steps[0].output).toContain(
+        'deploying 1.2.3 (success)'
+      );
+    });
+
+    it('runs always()/failure() steps after a failure and skips the rest', async () => {
+      const workflowPath = writeWorkflow(`
+name: Step Status
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1
+      - run: echo plain
+      - if: failure()
+        run: echo "on-failure job.status=\${{ job.status }}"
+      - if: always()
+        run: echo on-always
+      - if: success()
+        run: echo on-success
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(false);
+      const steps = result.jobs[0].steps;
+      expect(
+        steps.map((s) => s.outcome ?? (s.success ? 'success' : 'failure'))
+      ).toEqual(['failure', 'skipped', 'success', 'success', 'skipped']);
+      expect(steps[2].output).toContain('on-failure job.status=failure');
+      expect(steps[3].output).toContain('on-always');
+    });
+
+    it('applies status functions to jobs whose dependencies failed or were skipped', async () => {
+      const workflowPath = writeWorkflow(`
+name: Job Status
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1
+  never:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo never
+  plain:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo plain
+  notify:
+    needs: build
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "build was \${{ needs.build.result }}"
+  cleanup:
+    needs: [build, never]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "never was \${{ needs.never.result }}"
+  after-skipped:
+    needs: never
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo after-skipped
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      const ran = result.jobs.map((j) => j.job);
+      expect(ran).toEqual(['build', 'notify', 'cleanup']);
+      expect(result.jobs[1].steps[0].output).toContain('build was failure');
+      expect(result.jobs[2].steps[0].output).toContain('never was skipped');
+    });
+
+    it('distinguishes steps.<id>.outcome from conclusion under continue-on-error', async () => {
+      const workflowPath = writeWorkflow(`
+name: Conclusion
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - id: lint
+        continue-on-error: true
+        run: exit 1
+      - run: echo "outcome=\${{ steps.lint.outcome }} conclusion=\${{ steps.lint.conclusion }}"
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[1].output).toContain(
+        'outcome=failure conclusion=success'
+      );
+    });
+
+    it('provides vars, runner and strategy contexts', async () => {
+      const workflowPath = writeWorkflow(`
+name: Contexts
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - run: echo "region=\${{ vars.REGION }} os=\${{ runner.os }} idx=\${{ strategy.job-index }}/\${{ strategy.job-total }}"
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        vars: { REGION: 'eu-west-1' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toMatch(
+        /region=eu-west-1 os=(Linux|macOS|Windows) idx=0\/2/
+      );
+      expect(result.jobs[1].steps[0].output).toContain('idx=1/2');
     });
   });
 });
