@@ -1,6 +1,6 @@
 # SecureCI CLI
 
-[![CI](https://github.com/jabranr/actly/actions/workflows/ci.yaml/badge.svg)](https://github.com/jabranr/actly/actions/workflows/ci.yaml)
+[![CI](https://github.com/secure-ci/cli/actions/workflows/ci.yaml/badge.svg)](https://github.com/secure-ci/cli/actions/workflows/ci.yaml)
 
 `@secureci/cli` provides the `secureci` command: validate GitHub Actions workflows, check them against pipeline standards, and run them locally. It is the free, open-source part of [SecureCI](https://www.secure-ci.dev).
 

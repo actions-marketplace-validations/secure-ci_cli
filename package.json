@@ -37,6 +37,13 @@
   },
   "license": "MIT",
   "homepage": "https://www.secure-ci.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/secure-ci/cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/secure-ci/cli/issues"
+  },
   "publishConfig": {
     "access": "public"
   },
