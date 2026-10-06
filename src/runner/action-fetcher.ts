@@ -1,11 +1,21 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as http from 'http';
 import * as https from 'https';
 import { promisify } from 'util';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { logger } from '../utils/logger';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+/** Default connect/idle timeout for action downloads. */
+const DOWNLOAD_TIMEOUT_MS = 30000;
+const MAX_REDIRECTS = 5;
+
+export interface FetchActionOptions {
+  /** Abort a download that makes no progress for this long. */
+  timeoutMs?: number;
+}
 
 export interface ActionReference {
   owner: string;
@@ -63,54 +73,73 @@ function getActionPath(ref: ActionReference): string {
 }
 
 /**
- * Download a file from a URL
+ * Download a URL to a file, following up to MAX_REDIRECTS redirects.
+ * Every response that isn't piped to the file is drained, so the socket is
+ * released (an unconsumed response keeps the process from exiting), and
+ * the request is aborted if it stalls for `timeoutMs`.
  */
-function downloadFile(url: string, dest: string): Promise<void> {
+function downloadFile(
+  url: string,
+  dest: string,
+  timeoutMs: number,
+  redirectsLeft = MAX_REDIRECTS
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
+    const client = url.startsWith('http://') ? http : https;
+    const request = client.get(url, (response) => {
+      const status = response.statusCode ?? 0;
 
-    https
-      .get(url, (response) => {
-        if (response.statusCode === 302 || response.statusCode === 301) {
-          // Handle redirects
-          if (response.headers.location) {
-            file.close();
-            fs.unlinkSync(dest);
-            downloadFile(response.headers.location, dest)
-              .then(resolve)
-              .catch(reject);
-            return;
-          }
+      if ([301, 302, 303, 307, 308].includes(status)) {
+        response.resume();
+        const location = response.headers.location;
+        if (!location) {
+          reject(new Error(`Redirect (${status}) without a Location header`));
+        } else if (redirectsLeft <= 0) {
+          reject(new Error(`Too many redirects downloading ${url}`));
+        } else {
+          downloadFile(
+            new URL(location, url).toString(),
+            dest,
+            timeoutMs,
+            redirectsLeft - 1
+          ).then(resolve, reject);
         }
+        return;
+      }
 
-        if (response.statusCode !== 200) {
-          file.close();
-          fs.unlinkSync(dest);
-          reject(new Error(`Failed to download: ${response.statusCode}`));
-          return;
-        }
+      if (status !== 200) {
+        response.resume();
+        const hint =
+          status === 404
+            ? ' (check the action name and ref; private repositories are not supported yet)'
+            : '';
+        reject(new Error(`Failed to download: ${status}${hint}`));
+        return;
+      }
 
-        response.pipe(file);
+      const file = fs.createWriteStream(dest);
+      response.pipe(file);
+      file.on('finish', () => file.close(() => resolve()));
+      file.on('error', reject);
+      response.on('error', reject);
+    });
 
-        file.on('finish', () => {
-          file.close();
-          resolve();
-        });
-      })
-      .on('error', (err) => {
-        file.close();
-        if (fs.existsSync(dest)) {
-          fs.unlinkSync(dest);
-        }
-        reject(err);
-      });
+    request.setTimeout(timeoutMs, () => {
+      request.destroy(
+        new Error(`Download timed out after ${timeoutMs}ms: ${url}`)
+      );
+    });
+    request.on('error', reject);
   });
 }
 
 /**
  * Fetch an action from GitHub and cache it locally
  */
-export async function fetchAction(uses: string): Promise<string | null> {
+export async function fetchAction(
+  uses: string,
+  options: FetchActionOptions = {}
+): Promise<string | null> {
   const ref = parseActionReference(uses);
 
   if (!ref) {
@@ -135,6 +164,11 @@ export async function fetchAction(uses: string): Promise<string | null> {
 
   logger.info(`Fetching action: ${uses}`);
 
+  // The topmost directory this fetch creates, removed again on failure.
+  let createdRoot: string | undefined;
+  for (let dir = actionDir; !fs.existsSync(dir); dir = path.dirname(dir)) {
+    createdRoot = dir;
+  }
   try {
     // Create action directory
     if (!fs.existsSync(actionDir)) {
@@ -142,11 +176,19 @@ export async function fetchAction(uses: string): Promise<string | null> {
     }
 
     // Try to download using GitHub's tarball API
-    const tarballUrl = `https://github.com/${ref.owner}/${ref.repo}/archive/${ref.ref}.tar.gz`;
+    // GITHUB_SERVER_URL allows GitHub Enterprise Server (and tests).
+    const serverUrl = (
+      process.env.GITHUB_SERVER_URL || 'https://github.com'
+    ).replace(/\/+$/, '');
+    const tarballUrl = `${serverUrl}/${ref.owner}/${ref.repo}/archive/${ref.ref}.tar.gz`;
     const tarballPath = path.join(actionDir, 'source.tar.gz');
 
     logger.debug(`Downloading from: ${tarballUrl}`);
-    await downloadFile(tarballUrl, tarballPath);
+    await downloadFile(
+      tarballUrl,
+      tarballPath,
+      options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS
+    );
 
     // Extract tarball
     const extractDir = path.join(actionDir, 'extracted');
@@ -154,7 +196,7 @@ export async function fetchAction(uses: string): Promise<string | null> {
       fs.mkdirSync(extractDir, { recursive: true });
     }
 
-    await execAsync(`tar -xzf ${tarballPath} -C ${extractDir}`);
+    await execFileAsync('tar', ['-xzf', tarballPath, '-C', extractDir]);
 
     // Find the action.yml or action.yaml file
     // GitHub tarballs create a directory like repo-ref/
@@ -186,6 +228,10 @@ export async function fetchAction(uses: string): Promise<string | null> {
     logger.error(
       `Failed to fetch action ${uses}: ${error instanceof Error ? error.message : 'Unknown error'}`
     );
+    // Don't leave a half-populated cache entry behind.
+    if (createdRoot) {
+      fs.rmSync(createdRoot, { recursive: true, force: true });
+    }
     return null;
   }
 }
