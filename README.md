@@ -169,6 +169,10 @@ jobs:
     steps: [...]
 ```
 
+### Shells and `defaults.run`
+
+`run:` scripts are written to a file and run the way GitHub's runner does. With no `shell:`, that's `bash --noprofile --norc -eo pipefail {0}`, or `sh -e {0}` when bash isn't installed, so a step fails at its first failing command, including inside a pipeline. `shell: bash|sh|python|pwsh|powershell|cmd` map to GitHub's templates. Custom templates such as `shell: perl {0}` work too. `defaults.run.shell` and `defaults.run.working-directory` apply at workflow and job level; step-level values win, and they don't apply inside composite actions.
+
 ### Step Outputs
 
 Steps can write to `$GITHUB_OUTPUT` to expose values to later steps via `${{ steps.<id>.outputs.<name> }}`.

@@ -41,6 +41,7 @@ import {
   readStepFiles,
   StepFiles
 } from './runner-env';
+import { resolveShell, shellCommandLine } from './shell';
 
 const DEFAULT_CONTAINER_IMAGE = 'ubuntu:22.04';
 
@@ -379,7 +380,12 @@ export async function executeWorkflow(
           logger.step(`Executing job: ${jobLabel}`);
           const jobStartTime = Date.now();
           const stepResults: StepResult[] = [];
-          const runtime = createJobRuntime(github, runDir);
+          const runtime = createJobRuntime(github, runDir, {
+            shell: job.defaults?.run?.shell ?? parsed.file.defaults?.run?.shell,
+            workingDirectory:
+              job.defaults?.run?.['working-directory'] ??
+              parsed.file.defaults?.run?.['working-directory']
+          });
 
           if (
             !(await startJobContainer(job, jobCtx, options, runtime, runDir))
@@ -595,6 +601,8 @@ interface JobRuntime {
   postSteps: PostStep[];
   /** Set when the job's steps run in a container (see startJobContainer). */
   container?: JobContainerHandle;
+  /** `defaults.run` (job-level, else workflow-level) for `run:` steps. */
+  defaults: { shell?: string; workingDirectory?: string };
 }
 
 /** A per-job container that `run:` steps and JS actions are exec'd into. */
@@ -604,6 +612,8 @@ interface JobContainerHandle {
   image: string;
   /** Host directory mounted at CONTAINER_EXCHANGE_DIR. */
   exchangeDir: string;
+  /** Whether the image has bash (decides the default shell). */
+  bash: boolean;
   /** The image's `node` and base PATH, probed once; null if no node. */
   node?: { path: string; basePath: string } | null;
   /** Host action directory -> its copy's path inside the container. */
@@ -716,11 +726,16 @@ async function startJobContainer(
     return false;
   }
 
+  const bashProbe = await containerRuntime.exec(started.id, {
+    command: 'command -v bash'
+  });
+
   runtime.container = {
     runtime: containerRuntime,
     id: started.id,
     image,
     exchangeDir,
+    bash: bashProbe.success,
     actionDirs: new Map()
   };
   installContainerCleanup();
@@ -777,7 +792,26 @@ function createRunDir(): string {
   return dir;
 }
 
-function createJobRuntime(github: GithubContext, runDir: string): JobRuntime {
+let hostBash: boolean | undefined;
+
+/** Whether bash is available on the host (decides the default shell). */
+function hostHasBash(): boolean {
+  if (hostBash === undefined) {
+    try {
+      execSync('command -v bash', { stdio: 'ignore' });
+      hostBash = true;
+    } catch {
+      hostBash = false;
+    }
+  }
+  return hostBash;
+}
+
+function createJobRuntime(
+  github: GithubContext,
+  runDir: string,
+  defaults: JobRuntime['defaults'] = {}
+): JobRuntime {
   const homeDir = process.env.HOME || process.env.USERPROFILE || os.tmpdir();
   const eventPath = path.join(runDir, 'event.json');
   return {
@@ -790,7 +824,8 @@ function createJobRuntime(github: GithubContext, runDir: string): JobRuntime {
     eventPath,
     env: {},
     path: [],
-    postSteps: []
+    postSteps: [],
+    defaults
   };
 }
 
@@ -962,19 +997,33 @@ async function executeStep(
       }
 
       const files = createStepFiles();
+      const shell = resolveShell(step.shell ?? runtime.defaults.shell, {
+        bashAvailable: hostHasBash()
+      });
+      const scriptPath = path.join(files.dir, `script${shell.extension}`);
+      fs.writeFileSync(scriptPath, command);
+      const workingDirectory =
+        step['working-directory'] ?? runtime.defaults.workingDirectory;
 
       try {
-        const { stdout, stderr } = await execAsync(command, {
-          cwd: step['working-directory'] || process.cwd(),
-          shell: step.shell || 'bash',
-          env: {
-            ...process.env,
-            ...runtime.runnerEnv,
-            ...mergedEnv,
-            PATH: prependPath(runtime.path, mergedEnv.PATH ?? process.env.PATH),
-            ...fileCommandEnv(files)
+        const { stdout, stderr } = await execAsync(
+          shellCommandLine(shell.template, scriptPath),
+          {
+            cwd: workingDirectory
+              ? path.resolve(process.cwd(), workingDirectory)
+              : process.cwd(),
+            env: {
+              ...process.env,
+              ...runtime.runnerEnv,
+              ...mergedEnv,
+              PATH: prependPath(
+                runtime.path,
+                mergedEnv.PATH ?? process.env.PATH
+              ),
+              ...fileCommandEnv(files)
+            }
           }
-        });
+        );
 
         const { outputs } = finishStepOutput(stdout, files, runtime);
         if (stderr) {
@@ -1050,12 +1099,24 @@ async function executeInJobContainer(
   const { files, containerDir } = createContainerStepFiles(container);
 
   try {
-    const workingDir = step['working-directory']
-      ? path.posix.resolve(CONTAINER_WORKDIR, step['working-directory'])
+    const workingDirectory =
+      step['working-directory'] ?? runtime.defaults.workingDirectory;
+    const workingDir = workingDirectory
+      ? path.posix.resolve(CONTAINER_WORKDIR, workingDirectory)
       : CONTAINER_WORKDIR;
 
+    const shell = resolveShell(step.shell ?? runtime.defaults.shell, {
+      bashAvailable: container.bash
+    });
+    const scriptName = `script${shell.extension}`;
+    fs.writeFileSync(path.join(files.dir, scriptName), command, {
+      mode: 0o644
+    });
+
     const result = await container.runtime.exec(container.id, {
-      command: containerPathPrefix(runtime) + command,
+      command:
+        containerPathPrefix(runtime) +
+        shellCommandLine(shell.template, `${containerDir}/${scriptName}`),
       workingDir,
       env: {
         ...containerRunnerEnv(runtime),
@@ -1624,60 +1685,67 @@ async function executeAction(
         callerCtx.github
       );
 
-      for (const compositeStep of compositeSteps) {
-        const envCtx: ExpressionContext = {
-          ...actionCtx,
-          env: { ...actionCtx.env, ...runtime.env }
-        };
-        const stepCtx: ExpressionContext = {
-          ...envCtx,
-          env: {
-            ...envCtx.env,
-            ...substituteRecord(compositeStep.env, envCtx)
-          }
-        };
+      // `defaults.run` doesn't apply inside composite actions.
+      const callerDefaults = runtime.defaults;
+      runtime.defaults = {};
+      try {
+        for (const compositeStep of compositeSteps) {
+          const envCtx: ExpressionContext = {
+            ...actionCtx,
+            env: { ...actionCtx.env, ...runtime.env }
+          };
+          const stepCtx: ExpressionContext = {
+            ...envCtx,
+            env: {
+              ...envCtx.env,
+              ...substituteRecord(compositeStep.env, envCtx)
+            }
+          };
 
-        if (!evaluateCondition(compositeStep.if, stepCtx)) {
-          logger.info(
-            `Skipping composite step: ${compositeStep.name || compositeStep.id || 'unnamed'} (condition not met)`
+          if (!evaluateCondition(compositeStep.if, stepCtx)) {
+            logger.info(
+              `Skipping composite step: ${compositeStep.name || compositeStep.id || 'unnamed'} (condition not met)`
+            );
+            if (compositeStep.id) {
+              actionCtx.steps[compositeStep.id] = {
+                outcome: 'skipped',
+                outputs: {}
+              };
+            }
+            continue;
+          }
+
+          const stepOptions: RunOptions = {
+            ...options,
+            inputs: actionInputs
+          };
+
+          const stepResult = await executeStep(
+            compositeStep,
+            stepOptions,
+            runtime,
+            stepCtx
           );
+
           if (compositeStep.id) {
             actionCtx.steps[compositeStep.id] = {
-              outcome: 'skipped',
-              outputs: {}
+              outcome: stepResult.success ? 'success' : 'failure',
+              outputs: stepResult.outputs || {}
             };
           }
-          continue;
+
+          if (!stepResult.success) {
+            actionCtx.jobFailed = true;
+            return {
+              step,
+              success: false,
+              error: `Composite action step failed: ${compositeStep.name || 'unnamed'}`,
+              duration: Date.now() - startTime
+            };
+          }
         }
-
-        const stepOptions: RunOptions = {
-          ...options,
-          inputs: actionInputs
-        };
-
-        const stepResult = await executeStep(
-          compositeStep,
-          stepOptions,
-          runtime,
-          stepCtx
-        );
-
-        if (compositeStep.id) {
-          actionCtx.steps[compositeStep.id] = {
-            outcome: stepResult.success ? 'success' : 'failure',
-            outputs: stepResult.outputs || {}
-          };
-        }
-
-        if (!stepResult.success) {
-          actionCtx.jobFailed = true;
-          return {
-            step,
-            success: false,
-            error: `Composite action step failed: ${compositeStep.name || 'unnamed'}`,
-            duration: Date.now() - startTime
-          };
-        }
+      } finally {
+        runtime.defaults = callerDefaults;
       }
 
       // Resolve the action's declared outputs (e.g.

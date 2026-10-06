@@ -61,6 +61,13 @@ function fakeJobContainerRuntime(
   };
 }
 
+/** The exec calls that ran a step's script (not runtime probes). */
+function stepExecCalls(fake: ReturnType<typeof fakeJobContainerRuntime>) {
+  return fake.exec.mock.calls
+    .map((c) => c[1] as ExecCall & { workingDir?: string })
+    .filter((c) => /\/script\.[a-z0-9]*'?$/.test(c.command ?? ''));
+}
+
 describe('Executor', () => {
   const fixturesDir = path.join(__dirname, '../../test/fixtures');
   const tempTestDir = path.join(os.tmpdir(), 'ghact-test');
@@ -238,7 +245,9 @@ jobs:
       expect(fake.exec).toHaveBeenCalledWith(
         'ctr-1',
         expect.objectContaining({
-          command: 'echo "hi"',
+          command: expect.stringMatching(
+            /-eo pipefail '\/ghact-exchange\/step-[^/]+\/script\.sh'$/
+          ),
           workingDir: '/ghact-workspace',
           env: expect.objectContaining({
             GITHUB_WORKSPACE: '/ghact-workspace',
@@ -1590,9 +1599,9 @@ jobs:
 
       expect(result.success).toBe(true);
       expect(fake.start).toHaveBeenCalledTimes(2);
-      expect(fake.exec).toHaveBeenCalledTimes(3);
-      expect(fake.exec.mock.calls[1][1]).toMatchObject({
-        command: 'echo two',
+      const stepCalls = stepExecCalls(fake);
+      expect(stepCalls).toHaveLength(3);
+      expect(stepCalls[1]).toMatchObject({
         workingDir: '/ghact-workspace/sub'
       });
       expect(fake.start.mock.calls[0][0]).toMatchObject({
@@ -1685,7 +1694,7 @@ jobs:
       });
 
       expect(result.success).toBe(false);
-      expect(fake.exec).toHaveBeenCalledTimes(1);
+      expect(stepExecCalls(fake)).toHaveLength(1);
       expect(fake.stop).toHaveBeenCalledWith('ctr-1');
     });
 
@@ -1911,5 +1920,158 @@ jobs:
       },
       180000
     );
+  });
+
+  describe('run: shell semantics', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-shell-'));
+    });
+
+    function writeWorkflow(content: string): string {
+      const file = path.join(tempDir, 'workflow.yml');
+      fs.writeFileSync(file, content);
+      return file;
+    }
+
+    it('fails a step at the first failing command (bash -e)', async () => {
+      const workflowPath = writeWorkflow(`
+name: Errexit
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          false
+          echo "should not run"
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(false);
+      expect(result.jobs[0].steps[0].output ?? '').not.toContain(
+        'should not run'
+      );
+    });
+
+    it('fails a step when any command in a pipeline fails (pipefail)', async () => {
+      const workflowPath = writeWorkflow(`
+name: Pipefail
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: false | true
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(false);
+    });
+
+    it('honours defaults.run.working-directory and shell at workflow and job level', async () => {
+      fs.mkdirSync(path.join(process.cwd(), '.ghact-test-wd', 'wf'), {
+        recursive: true
+      });
+      fs.mkdirSync(path.join(process.cwd(), '.ghact-test-wd', 'job'), {
+        recursive: true
+      });
+      const workflowPath = writeWorkflow(`
+name: Defaults
+on: push
+defaults:
+  run:
+    working-directory: .ghact-test-wd/wf
+jobs:
+  wf:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "dir=$(basename "$PWD") bash=\${BASH_VERSION:+yes}"
+  job:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .ghact-test-wd/job
+        shell: sh
+    steps:
+      - run: echo "dir=$(basename "$PWD") bash=\${BASH_VERSION:+yes}"
+      - run: echo "dir=$(basename "$PWD")"
+        working-directory: .ghact-test-wd
+`);
+
+      try {
+        const result = await executeWorkflow(workflowPath);
+
+        expect(result.success).toBe(true);
+        expect(result.jobs[0].steps[0].output).toContain('dir=wf bash=yes');
+        expect(result.jobs[1].steps[0].output).toContain('dir=job bash=\n');
+        expect(result.jobs[1].steps[1].output).toContain('dir=.ghact-test-wd');
+      } finally {
+        fs.rmSync(path.join(process.cwd(), '.ghact-test-wd'), {
+          recursive: true,
+          force: true
+        });
+      }
+    });
+
+    it('supports custom shell templates with {0}', async () => {
+      const workflowPath = writeWorkflow(`
+name: Custom Shell
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: print("from " + "python")
+        shell: python3 {0}
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain('from python');
+    });
+
+    it('runs container steps through the shell template with a script file', async () => {
+      let script = '';
+      const fake = fakeJobContainerRuntime((_id, opts) => {
+        const match = opts.command?.match(/'\/ghact-exchange\/([^']+)'/);
+        if (match) {
+          // The script lives in the exchange dir mounted from the host.
+          const hostExchange = fake.start.mock.calls[0][0].exchangeDir;
+          script = fs.readFileSync(path.join(hostExchange, match[1]), 'utf-8');
+        }
+        return {};
+      });
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const workflowPath = writeWorkflow(`
+name: Container Shell
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo in-container
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker'
+      });
+
+      expect(result.success).toBe(true);
+      const commands = fake.exec.mock.calls.map(
+        (c) => (c[1] as ExecCall).command ?? ''
+      );
+      expect(commands).toContainEqual(
+        expect.stringMatching(
+          /^bash --noprofile --norc -eo pipefail '\/ghact-exchange\/step-[^/]+\/script\.sh'$/
+        )
+      );
+      expect(script).toBe('echo in-container');
+    });
   });
 });
