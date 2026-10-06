@@ -72,6 +72,22 @@ describe('Executor', () => {
   const fixturesDir = path.join(__dirname, '../../test/fixtures');
   const tempTestDir = path.join(os.tmpdir(), 'ghact-test');
 
+  // Keep tests hermetic when the suite itself runs in GitHub Actions (or in
+  // ghact): the github context prefers $GITHUB_* / $RUNNER_* from the host.
+  let savedRunnerEnv: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    savedRunnerEnv = {};
+    for (const key of Object.keys(process.env)) {
+      if (/^(GITHUB|RUNNER)_/.test(key)) {
+        savedRunnerEnv[key] = process.env[key];
+        delete process.env[key];
+      }
+    }
+  });
+  afterEach(() => {
+    Object.assign(process.env, savedRunnerEnv);
+  });
+
   beforeEach(async () => {
     resolveContainerRuntimeMock.mockReset();
     resolveContainerRuntimeMock.mockResolvedValue(null);
@@ -2028,14 +2044,14 @@ jobs:
   a:
     runs-on: ubuntu-latest
     steps:
-      - run: print("from " + "python")
-        shell: python3 {0}
+      - run: console.log("from " + "node")
+        shell: node {0}
 `);
 
       const result = await executeWorkflow(workflowPath);
 
       expect(result.success).toBe(true);
-      expect(result.jobs[0].steps[0].output).toContain('from python');
+      expect(result.jobs[0].steps[0].output).toContain('from node');
     });
 
     it('runs container steps through the shell template with a script file', async () => {

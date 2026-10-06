@@ -218,8 +218,8 @@ export default mergeConfig(
           'src/**/*.d.ts',
           'src/**/*.test.ts',
           'src/**/__tests__/**',
-          'src/cli.ts',        // Excluded from coverage
-          'src/index.ts'       // Excluded from coverage
+          'src/cli.ts', // Excluded from coverage
+          'src/index.ts' // Excluded from coverage
         ],
         thresholds: {
           branches: 65,

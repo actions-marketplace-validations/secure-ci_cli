@@ -255,7 +255,10 @@ async function executeWorkflow(
 
 ```typescript
 function evaluateExpression(expr: string, context: ExpressionContext): boolean;
-function resolveExpressionValue(expr: string, context: ExpressionContext): string;
+function resolveExpressionValue(
+  expr: string,
+  context: ExpressionContext
+): string;
 ```
 
 #### Container Runtime (`runner/container-runtime.ts`)

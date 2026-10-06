@@ -1,5 +1,7 @@
 # ghact
 
+[![ghact CI/CD](https://github.com/jabranr/actly/actions/workflows/ghact-ci.yaml/badge.svg)](https://github.com/jabranr/actly/actions/workflows/ghact-ci.yaml)
+
 A CLI tool to locally test GitHub Actions and workflows without pushing to remote.
 
 ## Features
@@ -242,6 +244,13 @@ npm run build
 # Lint
 npm run lint
 ```
+
+Every pull request and push to `main` runs [`ghact-ci.yaml`](.github/workflows/ghact-ci.yaml): lint, `prettier --check`, tests with the coverage thresholds from `vitest.config.mts`, build, and ghact validating its own workflow. It uses the Node version from `volta.node` in `package.json`.
+
+Opt-in test suites:
+
+- `RUN_DOCKER_TESTS=1 npm test`: real-engine container tests (needs a running Docker daemon).
+- `RUN_NETWORK_TESTS=1 npm test`: tests that fetch real actions from GitHub.
 
 ## Testing Strategy
 

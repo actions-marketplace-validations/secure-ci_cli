@@ -8,9 +8,7 @@ describe('Logger secret masking', () => {
   beforeEach(() => {
     logger.setLevel(LogLevel.DEBUG);
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    errorSpy = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => undefined);
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
   });
 
   afterEach(() => {
@@ -70,4 +68,3 @@ describe('Logger secret masking', () => {
     expect(() => logger.registerSecrets(undefined)).not.toThrow();
   });
 });
-

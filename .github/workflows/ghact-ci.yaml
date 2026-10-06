@@ -4,18 +4,17 @@ on:
   workflow_dispatch:
   pull_request:
     types: [opened, reopened, synchronize]
-  # push:
-  #   branches:
-  #     - main
+  push:
+    branches:
+      - main
 
+# Least privilege by default; the publish jobs ask for what they need.
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
 
 jobs:
   test:
-    name: Run Tests
+    name: Lint, test and build
     runs-on: ubuntu-latest
 
     steps:
@@ -25,7 +24,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          # Reads volta.node from package.json, matching local development.
+          node-version-file: package.json
           cache: 'npm'
           cache-dependency-path: package-lock.json
 
@@ -35,16 +35,28 @@ jobs:
       - name: Run linter
         run: npm run lint
 
-      - name: Run tests
-        run: npm test
+      - name: Check formatting
+        run: npx prettier --check .
 
-      # - name: Run test coverage
-      #   run: npm run test:coverage
+      - name: Run tests with coverage thresholds
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
+      - name: Validate this repo's workflows with ghact (dogfooding)
+        run: |
+          node dist/cli.js --validate .github/workflows/ghact-ci.yaml
+          node dist/cli.js --dry-run .github/workflows/ghact-ci.yaml
 
   publish-prerelease:
     name: Publish Pre-release
     needs: test
+    # Disabled until the first ghact release is published (see #18, #19).
     if: false
+    permissions:
+      contents: write
+      id-token: write
     # if: |
     # github.event_name == 'pull_request' &&
     # contains(github.event.head_commit.message, '[publish]')
@@ -84,7 +96,11 @@ jobs:
   publish-release:
     name: Publish Release
     needs: test
+    # Disabled until the first ghact release is published (see #18, #19).
     if: false
+    permissions:
+      contents: write
+      id-token: write
     # if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
