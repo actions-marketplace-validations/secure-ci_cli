@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const resolveContainerRuntimeMock = vi.fn();
 const fetchActionMock = vi.fn();
@@ -2072,6 +2072,169 @@ jobs:
         )
       );
       expect(script).toBe('echo in-container');
+    });
+  });
+
+  describe('action resolution', () => {
+    let tempDir: string;
+    const localDir = path.join(process.cwd(), '.ghact-test-actions');
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-resolve-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(localDir, { recursive: true, force: true });
+    });
+
+    function writeWorkflow(content: string): string {
+      const file = path.join(tempDir, 'workflow.yml');
+      fs.writeFileSync(file, content);
+      return file;
+    }
+
+    it('fails the step when a remote action cannot be fetched', async () => {
+      fetchActionMock.mockResolvedValueOnce(null);
+      const workflowPath = writeWorkflow(`
+name: Missing Action
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: does-not-exist/nope@v1
+      - run: echo never
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(false);
+      expect(result.jobs[0].steps).toHaveLength(1);
+      expect(result.jobs[0].steps[0].error).toMatch(
+        /Could not resolve action "does-not-exist\/nope@v1"/
+      );
+    });
+
+    it('fails the step for an unknown runs.using', async () => {
+      fs.mkdirSync(path.join(tempDir, 'weird'));
+      fs.writeFileSync(
+        path.join(tempDir, 'weird', 'action.yml'),
+        'name: Weird\ndescription: d\nruns:\n  using: node99x\n  main: x.js\n'
+      );
+      fetchActionMock.mockResolvedValueOnce(
+        path.join(tempDir, 'weird', 'action.yml')
+      );
+      const workflowPath = writeWorkflow(`
+name: Weird
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: org/weird@v1
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(false);
+      expect(result.jobs[0].steps[0].error).toMatch(
+        /Unsupported action type "node99x"/
+      );
+    });
+
+    it('runs local ./ actions relative to the workspace (action.yml or action.yaml)', async () => {
+      fs.mkdirSync(path.join(localDir, 'one'), { recursive: true });
+      fs.mkdirSync(path.join(localDir, 'two'), { recursive: true });
+      const composite = (msg: string) =>
+        `name: Local\ndescription: d\nruns:\n  using: composite\n  steps:\n    - id: say\n      shell: bash\n      run: echo "msg=${msg}" >> $GITHUB_OUTPUT\noutputs:\n  msg:\n    value: \${{ steps.say.outputs.msg }}\n`;
+      fs.writeFileSync(
+        path.join(localDir, 'one', 'action.yml'),
+        composite('one')
+      );
+      fs.writeFileSync(
+        path.join(localDir, 'two', 'action.yaml'),
+        composite('two')
+      );
+
+      const workflowPath = writeWorkflow(`
+name: Local Actions
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.ghact-test-actions/one
+      - uses: ./.ghact-test-actions/two
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(true);
+      expect(fetchActionMock).not.toHaveBeenCalled();
+      expect(result.jobs[0].steps[0].outputs).toEqual({ msg: 'one' });
+      expect(result.jobs[0].steps[1].outputs).toEqual({ msg: 'two' });
+    });
+
+    it('fails clearly when a local action does not exist', async () => {
+      const workflowPath = writeWorkflow(`
+name: Missing Local
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.ghact-test-actions/nope
+`);
+
+      const result = await executeWorkflow(workflowPath);
+
+      expect(result.success).toBe(false);
+      expect(result.jobs[0].steps[0].error).toMatch(
+        /Could not resolve action "\.\/\.ghact-test-actions\/nope"/
+      );
+    });
+
+    it('runs docker:// steps with with.args and with.entrypoint', async () => {
+      const executeMock = vi.fn().mockResolvedValue({
+        success: true,
+        stdout: 'docker-step-ran\n',
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        durationMs: 1
+      });
+      resolveContainerRuntimeMock.mockResolvedValue({
+        ...fakeJobContainerRuntime(),
+        execute: executeMock
+      });
+
+      const workflowPath = writeWorkflow(`
+name: Docker Step
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker://alpine:3.20
+        with:
+          entrypoint: /bin/sh
+          args: -c "echo \${{ inputs.word }}"
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker',
+        inputs: { word: 'docker-step-ran' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(fetchActionMock).not.toHaveBeenCalled();
+      expect(executeMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          image: 'alpine:3.20',
+          entrypoint: '/bin/sh',
+          args: ['-c', 'echo docker-step-ran']
+        })
+      );
     });
   });
 });

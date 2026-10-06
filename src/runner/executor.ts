@@ -1616,8 +1616,33 @@ function resolveActionInputs(
   return { ...inputs, ...substituteRecord(withValues, callerCtx) };
 }
 
+function isLocalActionRef(uses: string): boolean {
+  return uses.startsWith('./') || uses.startsWith('../');
+}
+
 /**
- * Execute a remote action
+ * Resolve a local action (`uses: ./path/to/action`) relative to the
+ * workspace, like the runner does, to its action.yml / action.yaml.
+ */
+function resolveLocalAction(uses: string): string | null {
+  const dir = path.resolve(process.cwd(), uses);
+  for (const name of ['action.yml', 'action.yaml']) {
+    const candidate = path.join(dir, name);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/** Split a `with.args` string into argv, honouring simple quoting. */
+function splitArgs(args: string): string[] {
+  return (args.match(/"[^"]*"|'[^']*'|\S+/g) || []).map((arg) =>
+    /^(["']).*\1$/.test(arg) ? arg.slice(1, -1) : arg
+  );
+}
+
+/**
+ * Execute an action step: local (`./`), remote (`owner/repo@ref`) or
+ * `docker://image`.
  */
 async function executeAction(
   step: Step,
@@ -1636,15 +1661,49 @@ async function executeAction(
   }
 
   try {
-    // Fetch the action
-    const actionPath = await fetchAction(step.uses);
+    const callerCtx = ctx ?? createContext({}, {}, options.secrets);
+
+    // `uses: docker://image` runs the image directly, with `with.args` /
+    // `with.entrypoint` as its argv and entrypoint.
+    if (step.uses.startsWith('docker://')) {
+      const withValues = substituteRecord(step.with, callerCtx);
+      const dockerAction: ActionFile = {
+        name: step.uses,
+        description: '',
+        runs: {
+          using: 'docker',
+          image: step.uses,
+          entrypoint: withValues.entrypoint,
+          args: withValues.args ? splitArgs(withValues.args) : []
+        }
+      };
+      return await executeDockerAction(
+        dockerAction,
+        path.join(process.cwd(), 'action.yml'),
+        step,
+        {},
+        callerCtx.env,
+        options,
+        runtime,
+        startTime
+      );
+    }
+
+    const actionPath = isLocalActionRef(step.uses)
+      ? resolveLocalAction(step.uses)
+      : await fetchAction(step.uses);
 
     if (!actionPath) {
-      logger.warn(`Failed to fetch action: ${step.uses} - skipping`);
+      const error = `Could not resolve action "${step.uses}"${
+        isLocalActionRef(step.uses)
+          ? ` (no action.yml or action.yaml in ${path.resolve(process.cwd(), step.uses)})`
+          : ''
+      }`;
+      logger.error(error);
       return {
         step,
-        success: true,
-        output: 'Skipped - could not fetch action',
+        success: false,
+        error,
         duration: Date.now() - startTime
       };
     }
@@ -1666,7 +1725,6 @@ async function executeAction(
 
     // Resolve `with:` values against the calling step's context before they
     // become the action's inputs (INPUT_* env vars / `inputs.*`).
-    const callerCtx = ctx ?? createContext({}, {}, options.secrets);
     const actionInputs = resolveActionInputs(action, step.with, callerCtx);
 
     // Handle different action types
@@ -1767,7 +1825,7 @@ async function executeAction(
         outputs,
         duration: Date.now() - startTime
       };
-    } else if (action.runs.using.startsWith('node')) {
+    } else if (/^node\d+$/.test(action.runs.using)) {
       return await executeNodeAction(
         action,
         actionPath,
@@ -1790,11 +1848,12 @@ async function executeAction(
         startTime
       );
     } else {
-      logger.warn(`Unknown action type: ${action.runs.using}`);
+      const error = `Unsupported action type "${action.runs.using}" in ${step.uses}`;
+      logger.error(error);
       return {
         step,
-        success: true,
-        output: `Skipped - Unknown action type: ${action.runs.using}`,
+        success: false,
+        error,
         duration: Date.now() - startTime
       };
     }
