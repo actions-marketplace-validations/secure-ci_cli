@@ -171,6 +171,10 @@ export interface RunOptions {
   networkDisabled?: boolean;
   /** The `vars` context (configuration variables), e.g. from --var. */
   vars?: Record<string, string>;
+  /** JSON file with the triggering event payload (`github.event`). */
+  eventPath?: string;
+  /** `github.event_name`. Default: $GITHUB_EVENT_NAME, else workflow_dispatch. */
+  eventName?: string;
 }
 
 export interface StepResult {

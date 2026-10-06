@@ -50,6 +50,14 @@ program
     '--var <key=value...>',
     'Set a configuration variable for the vars context (can be used multiple times)'
   )
+  .option(
+    '--event-path <file>',
+    'JSON event payload for github.event / $GITHUB_EVENT_PATH'
+  )
+  .option(
+    '--event-name <name>',
+    'github.event_name (default: $GITHUB_EVENT_NAME or workflow_dispatch)'
+  )
   .option('-j, --job <name>', 'Run a specific job')
   .option('--verbose', 'Enable verbose logging')
   .option('-l, --list', 'List available workflows in .github/workflows/')
@@ -136,6 +144,8 @@ program
         inputs,
         secrets,
         vars,
+        eventPath: options.eventPath,
+        eventName: options.eventName,
         job: options.job,
         verbose: options.verbose,
         containerRuntime: options.containerRuntime,

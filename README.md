@@ -205,9 +205,20 @@ Every step (`run:`, JavaScript and Docker actions) gets its own `$GITHUB_OUTPUT`
 
 Workflow commands printed to stdout are interpreted: `::add-mask::`, `::set-output`, `::save-state`, `::warning::`, `::error::`, `::notice::`, `::debug::` and `::group::`/`::endgroup::`.
 
+### Events and the `github` Context
+
+```bash
+ghact .github/workflows/ci.yml --event-name pull_request --event-path event.json
+```
+
+- `github.event_name`: `--event-name`, else `$GITHUB_EVENT_NAME`, else `workflow_dispatch` if the workflow declares it, else the workflow's first trigger.
+- `github.event`: the JSON object from `--event-path`, also written to `$GITHUB_EVENT_PATH`. Without it, `workflow_dispatch` gets `{ "inputs": {...} }` like on GitHub, and other events get `{}`.
+- `github.repository` / `repository_owner`: `$GITHUB_REPOSITORY`, else the payload's `repository`, else parsed from the git `origin` remote, else the folder name. `github.sha` / `ref` come from `$GITHUB_SHA` / `$GITHUB_REF`, the payload's `ref`, or local git.
+- `inputs.*`: `--input` values over the `default`s declared under `on.workflow_dispatch.inputs` / `on.workflow_call.inputs`.
+
 ### Default Environment Variables
 
-Steps receive the runner's default variables, derived from the local `github` context: `CI`, `GITHUB_ACTIONS`, `GITHUB_WORKFLOW`, `GITHUB_JOB`, `GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_EVENT_NAME`, `GITHUB_ACTOR`, `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_OWNER`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKSPACE`, `GITHUB_EVENT_PATH` (an empty `{}` payload for now), `RUNNER_OS`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` (`~/.ghact/toolcache`).
+Steps receive the runner's default variables, derived from the local `github` context: `CI`, `GITHUB_ACTIONS`, `GITHUB_WORKFLOW`, `GITHUB_JOB`, `GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_EVENT_NAME`, `GITHUB_ACTOR`, `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_OWNER`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKSPACE`, `GITHUB_EVENT_PATH` (see above), `RUNNER_OS`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` (`~/.ghact/toolcache`).
 
 ### Secret Masking
 

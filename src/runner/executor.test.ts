@@ -23,7 +23,7 @@ vi.mock('./action-fetcher', async () => {
   };
 });
 
-import { executeWorkflow } from './executor';
+import { executeWorkflow, parseRepositoryFromRemote } from './executor';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -1241,7 +1241,7 @@ jobs:
 
       expect(result.success).toBe(true);
       expect(result.jobs[0].steps[0].outputs).toEqual({
-        said: 'hello-workflow_dispatch//from-job'
+        said: 'hello-push//from-job'
       });
     });
 
@@ -2404,6 +2404,126 @@ jobs:
         /region=eu-west-1 os=(Linux|macOS|Windows) idx=0\/2/
       );
       expect(result.jobs[1].steps[0].output).toContain('idx=1/2');
+    });
+  });
+
+  describe('event payload and github context', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghact-event-'));
+    });
+
+    function writeWorkflow(content: string): string {
+      const file = path.join(tempDir, 'workflow.yml');
+      fs.writeFileSync(file, content);
+      return file;
+    }
+
+    it('loads --event-path into github.event and $GITHUB_EVENT_PATH', async () => {
+      const eventPath = path.join(tempDir, 'event.json');
+      const payload = {
+        pull_request: { number: 42, head: { ref: 'feature' } },
+        repository: { full_name: 'octo/repo', owner: { login: 'octo' } }
+      };
+      fs.writeFileSync(eventPath, JSON.stringify(payload));
+
+      const workflowPath = writeWorkflow(`
+name: Event
+on: pull_request
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - run: |
+          echo "pr=\${{ github.event.pull_request.number }} head=\${{ github.event.pull_request.head.ref }} repo=\${{ github.repository }} owner=\${{ github.repository_owner }}"
+          echo "file=$(cat "$GITHUB_EVENT_PATH")"
+`);
+
+      const result = await executeWorkflow(workflowPath, {
+        eventPath,
+        eventName: 'pull_request'
+      });
+
+      expect(result.success).toBe(true);
+      const output = result.jobs[0].steps[0].output ?? '';
+      expect(output).toContain('pr=42 head=feature repo=octo/repo owner=octo');
+      expect(output).toContain(`file=${JSON.stringify(payload)}`);
+    });
+
+    it('fails clearly when the event payload is not valid JSON', async () => {
+      const eventPath = path.join(tempDir, 'event.json');
+      fs.writeFileSync(eventPath, '{ not json');
+      const workflowPath = writeWorkflow(`
+name: Bad Event
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo never
+`);
+
+      const errorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => undefined);
+      try {
+        const result = await executeWorkflow(workflowPath, { eventPath });
+        expect(result.success).toBe(false);
+        expect(result.jobs).toHaveLength(0);
+        const logged = errorSpy.mock.calls.flat().join('\n');
+        expect(logged).toMatch(/Invalid event payload .*event\.json/);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('defaults to a workflow_dispatch event carrying the inputs', async () => {
+      const workflowPath = writeWorkflow(`
+name: Dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        default: staging
+      debug:
+        type: boolean
+        default: false
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "event=\${{ github.event_name }} env=\${{ inputs.env }} debug=\${{ inputs.debug }} payload=\${{ github.event.inputs.env }}"
+`);
+
+      const defaults = await executeWorkflow(workflowPath);
+      expect(defaults.jobs[0].steps[0].output).toContain(
+        'event=workflow_dispatch env=staging debug=false payload=staging'
+      );
+
+      const overridden = await executeWorkflow(workflowPath, {
+        inputs: { env: 'prod' }
+      });
+      expect(overridden.jobs[0].steps[0].output).toContain(
+        'env=prod debug=false payload=prod'
+      );
+    });
+
+    it('parses owner/repo from common git remote URL forms', () => {
+      expect(parseRepositoryFromRemote('git@github.com:octo/repo.git')).toBe(
+        'octo/repo'
+      );
+      expect(
+        parseRepositoryFromRemote('https://github.com/octo/repo.git')
+      ).toBe('octo/repo');
+      expect(
+        parseRepositoryFromRemote('https://user@ghe.example.com/octo/repo')
+      ).toBe('octo/repo');
+      expect(
+        parseRepositoryFromRemote('ssh://git@github.com/octo/repo.git')
+      ).toBe('octo/repo');
+      expect(parseRepositoryFromRemote('/local/path/repo')).toBeUndefined();
     });
   });
 });
