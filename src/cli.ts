@@ -11,6 +11,7 @@ import {
   validatePipelineContract,
   ContractRecurse
 } from './parser/pipeline-contract-validator';
+import { formatValidation, ReportFormat } from './report';
 import { logger, LogLevel } from './utils/logger';
 import { parseKeyValuePairs } from './utils/key-value';
 import {
@@ -227,13 +228,30 @@ program
       .choices(['none', 'local', 'all'])
       .default('local')
   )
+  .addOption(
+    new Option(
+      '--format <format>',
+      'Output format: text (default), or json / sarif for machine-readable results (sarif uploads to GitHub code scanning)'
+    )
+      .choices(['text', 'json', 'sarif'])
+      .default('text')
+  )
   .action(
     async (
       file: string,
-      options: { contract?: string; contractRecurse: ContractRecurse }
+      options: {
+        contract?: string;
+        contractRecurse: ContractRecurse;
+        format: ReportFormat;
+      }
     ) => {
       requireFile(file);
-      await validateFile(file, options.contract, options.contractRecurse);
+      await validateFile(
+        file,
+        options.contract,
+        options.contractRecurse,
+        options.format
+      );
     }
   );
 
@@ -247,22 +265,31 @@ program
 async function validateFile(
   filePath: string,
   contractFile?: string,
-  recurse: ContractRecurse = 'local'
+  recurse: ContractRecurse = 'local',
+  format: ReportFormat = 'text'
 ): Promise<void> {
+  // Only text mode narrates; json/sarif write nothing but the report to
+  // stdout, so the output is pipeable.
+  const quiet = format !== 'text';
+  const say = (fn: () => void) => {
+    if (!quiet) fn();
+  };
   try {
     const parsed = parseFile(filePath);
     let result;
 
     if (parsed.type === 'workflow') {
       result = validateWorkflow(filePath);
-      logger.info('Validating workflow...');
+      say(() => logger.info('Validating workflow...'));
     } else {
       result = validateAction(filePath);
-      logger.info('Validating action...');
+      say(() => logger.info('Validating action...'));
     }
 
     if (contractFile) {
-      logger.info(`Validating against pipeline contract: ${contractFile}`);
+      say(() =>
+        logger.info(`Validating against pipeline contract: ${contractFile}`)
+      );
       if (parsed.type !== 'workflow') {
         result = {
           valid: false,
@@ -288,6 +315,13 @@ async function validateFile(
       }
     }
 
+    if (quiet) {
+      // eslint-disable-next-line no-console
+      console.log(formatValidation(filePath, result, format));
+      if (!result.valid) process.exit(1);
+      return;
+    }
+
     if (result.valid) {
       logger.success('Validation passed!');
       result.errors.forEach((error) => {
@@ -305,6 +339,27 @@ async function validateFile(
       process.exit(1);
     }
   } catch (error) {
+    if (quiet) {
+      // eslint-disable-next-line no-console
+      console.log(
+        formatValidation(
+          filePath,
+          {
+            valid: false,
+            errors: [
+              {
+                path: 'root',
+                message:
+                  error instanceof Error ? error.message : 'Unknown error',
+                severity: 'error'
+              }
+            ]
+          },
+          format
+        )
+      );
+      process.exit(1);
+    }
     logger.error(
       `Validation error: ${error instanceof Error ? error.message : 'Unknown error'}`
     );

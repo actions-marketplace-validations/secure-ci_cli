@@ -367,6 +367,38 @@ describe('secureci commands', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
+  it('validate --format json and sarif are machine-readable', () => {
+    const good = path.join(tempDir, '.github', 'workflows', 'ci.yml');
+    const json = run(['validate', good, '--format', 'json']);
+    expect(json.status).toBe(0);
+    const parsed = JSON.parse(json.stdout);
+    expect(parsed).toMatchObject({ valid: true, errors: [] });
+    // Only the JSON object is printed, nothing else.
+    expect(json.stdout.trim().startsWith('{')).toBe(true);
+
+    const bad = path.join(tempDir, 'bad.yml');
+    fs.writeFileSync(
+      bad,
+      [
+        'name: Bad',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: echo hi',
+        '        if: nope()'
+      ].join('\n')
+    );
+    const sarif = run(['validate', bad, '--format', 'sarif']);
+    expect(sarif.status).not.toBe(0);
+    const log = JSON.parse(sarif.stdout);
+    expect(log.version).toBe('2.1.0');
+    expect(log.runs[0].results[0].message.text).toContain(
+      "Unrecognized function: 'nope'"
+    );
+  });
+
   it('shows effective values, marking built-in defaults, in config list', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cfg-home-'));
     const env = { ...process.env, HOME: home };

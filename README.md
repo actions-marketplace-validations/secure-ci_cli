@@ -185,6 +185,19 @@ If the caller's workflow calls `org/deploy` before `org/security-scan` (or uses 
 - **Action references** are matched as exact strings against `uses:` (minus any `@version` suffix) — this covers the common `owner/repo` or `owner/repo/path` marketplace-action form, as well as local paths (`./.github/actions/foo`, matched with no version). `docker://image` references are matched as-is (the whole string, including `docker://`) and have no version-pin concept.
 - The `owner/repo` part of an action reference is matched **case-insensitively**, as GitHub resolves it (`Org/Action` matches a contract entry for `org/action`). A path inside the repo (`owner/repo/Path`), local paths and `docker://` references (whose tags are case-sensitive) are matched exactly.
 
+### Machine-readable output (`--format`)
+
+`secureci validate` can emit results as JSON or SARIF for CI, instead of the default human-readable text. Both cover syntax validation and `--contract` findings, exit non-zero when validation fails, and print nothing but the report to stdout.
+
+```bash
+secureci validate .github/workflows/ci.yml --format json
+secureci validate .github/workflows/ci.yml --contract contract.yml --format sarif > results.sarif
+```
+
+- **`json`**: `{ file, valid, errors: [{ path, message, severity }] }`.
+- **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
+
+
 ## Workflow Features
 
 ### Conditional Execution (`if:`)
