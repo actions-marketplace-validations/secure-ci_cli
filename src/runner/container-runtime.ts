@@ -75,17 +75,32 @@ export interface ContainerExecResult {
   durationMs: number;
 }
 
-/** Options for starting a long-lived per-job container. */
+/**
+ * Options for starting a long-lived container: a job container (idles
+ * until stopped, with the workspace mounted) or, with `service`, a service
+ * container running its image's own entrypoint.
+ */
 export interface ContainerStartOptions {
   image: string;
   /** Host directory mounted as the container's working directory. */
-  workingDir: string;
+  workingDir?: string;
   /** Host directory mounted read-write for exchanging file commands etc. */
-  exchangeDir: string;
+  exchangeDir?: string;
   env?: Record<string, string>;
   memoryLimit?: string;
   /** Disable container networking. Default: false (network on). */
   networkDisabled?: boolean;
+  /** Run the image's own entrypoint/command instead of idling. */
+  service?: boolean;
+  /** User-defined network to join, and the hostname to have on it. */
+  network?: string;
+  networkAlias?: string;
+  /** `-p` port specs (`5432`, `8080:80`). */
+  ports?: string[];
+  /** `-v` volume specs. */
+  volumes?: string[];
+  /** Further `run` arguments (e.g. `jobs.<id>.services.<id>.options`). */
+  extraArgs?: string[];
 }
 
 export interface ContainerStartResult {
@@ -126,6 +141,15 @@ export interface ContainerRuntime {
   stop(id: string): Promise<void>;
   /** Synchronous `stop`, for signal/exit handlers. */
   stopSync(id: string): void;
+  /** Create a user-defined network; false if it couldn't be created. */
+  createNetwork(name: string): Promise<boolean>;
+  removeNetwork(name: string): Promise<void>;
+  /** Synchronous `removeNetwork`, for signal/exit handlers. */
+  removeNetworkSync(name: string): void;
+  /** Health status: healthy, unhealthy, starting, or none (no check). */
+  health(id: string): Promise<string>;
+  /** Published ports: container port -> host port. */
+  ports(id: string): Promise<Record<string, string>>;
   /** Build an image from a Dockerfile directory, for Docker-type actions. */
   build(
     contextDir: string,
@@ -267,27 +291,41 @@ class CliContainerRuntime implements ContainerRuntime {
   }
 
   start(options: ContainerStartOptions): Promise<ContainerStartResult> {
-    const args = [
-      'run',
-      '-d',
-      '-w',
-      CONTAINER_WORKDIR,
-      '-v',
-      `${options.workingDir}:${CONTAINER_WORKDIR}`,
-      '-v',
-      `${options.exchangeDir}:${CONTAINER_EXCHANGE_DIR}`
-    ];
+    const args = ['run', '-d'];
+    if (options.workingDir) {
+      args.push(
+        '-w',
+        CONTAINER_WORKDIR,
+        '-v',
+        `${options.workingDir}:${CONTAINER_WORKDIR}`
+      );
+    }
+    if (options.exchangeDir) {
+      args.push('-v', `${options.exchangeDir}:${CONTAINER_EXCHANGE_DIR}`);
+    }
     if (options.networkDisabled === true) {
       args.push('--network', 'none');
+    } else if (options.network) {
+      args.push('--network', options.network);
+      if (options.networkAlias) {
+        args.push('--network-alias', options.networkAlias);
+      }
     }
     if (options.memoryLimit) {
       args.push('--memory', options.memoryLimit);
     }
+    for (const port of options.ports ?? []) args.push('-p', port);
+    for (const volume of options.volumes ?? []) args.push('-v', volume);
+    args.push(...(options.extraArgs ?? []));
     const env = envTransport(options.env);
     args.push(...env.args);
-    // Idle forever; steps are run in it via `exec` and it's removed at job
-    // end. `tail` exists in practically every image (busybox included).
-    args.push('--entrypoint', 'tail', options.image, '-f', '/dev/null');
+    if (options.service) {
+      args.push(options.image);
+    } else {
+      // Idle forever; steps are run in it via `exec` and it's removed at
+      // job end. `tail` exists in practically every image (busybox too).
+      args.push('--entrypoint', 'tail', options.image, '-f', '/dev/null');
+    }
 
     return this.runCli(args, undefined, env).then((result) =>
       result.success
@@ -316,6 +354,42 @@ class CliContainerRuntime implements ContainerRuntime {
       args.push(id, 'sh', '-c', options.command || '');
     }
     return this.runCli(args, options.timeoutMs, env);
+  }
+
+  async createNetwork(name: string): Promise<boolean> {
+    return (await this.runCli(['network', 'create', name])).success;
+  }
+
+  async removeNetwork(name: string): Promise<void> {
+    await this.runCli(['network', 'rm', name]);
+  }
+
+  removeNetworkSync(name: string): void {
+    try {
+      execFileSync(this.binary, ['network', 'rm', name], { stdio: 'ignore' });
+    } catch {
+      // Best effort: the network may already be gone
+    }
+  }
+
+  async health(id: string): Promise<string> {
+    const result = await this.runCli([
+      'inspect',
+      '--format',
+      '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}',
+      id
+    ]);
+    return result.success ? result.stdout.trim() : 'unknown';
+  }
+
+  async ports(id: string): Promise<Record<string, string>> {
+    const result = await this.runCli(['port', id]);
+    const ports: Record<string, string> = {};
+    for (const line of result.stdout.split('\n')) {
+      const match = line.match(/^(\d+)\/\w+\s*->\s*.*:(\d+)\s*$/);
+      if (match && !(match[1] in ports)) ports[match[1]] = match[2];
+    }
+    return ports;
   }
 
   async stop(id: string): Promise<void> {

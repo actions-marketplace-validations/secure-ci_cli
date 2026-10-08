@@ -681,8 +681,10 @@ export async function executeWorkflow(
           const stepResults: StepResult[] = [];
 
           if (
+            !(await startJobServices(job, jobCtx, options, runtime)) ||
             !(await startJobContainer(job, jobCtx, options, runtime, runDir))
           ) {
+            await stopJobContainer(runtime);
             jobs.push({
               job: jobLabel,
               success: false,
@@ -955,6 +957,8 @@ interface JobRuntime {
   postSteps: PostStep[];
   /** Set when the job's steps run in a container (see startJobContainer). */
   container?: JobContainerHandle;
+  /** The job's service containers and network (see startJobServices). */
+  services?: { runtime: ContainerRuntime; ids: string[]; network?: string };
   /** `defaults.run` (job-level, else workflow-level) for `run:` steps. */
   defaults: { shell?: string; workingDirectory?: string };
   /** What steps wrote to `$GITHUB_STEP_SUMMARY`, in order. */
@@ -980,7 +984,8 @@ interface JobContainerHandle {
   actionDirs: Map<string, string>;
 }
 
-const activeContainers = new Set<JobContainerHandle>();
+const activeContainers = new Set<{ runtime: ContainerRuntime; id: string }>();
+const activeNetworks = new Set<{ runtime: ContainerRuntime; name: string }>();
 let containerCleanupInstalled = false;
 
 /**
@@ -996,6 +1001,10 @@ function installContainerCleanup(): void {
       container.runtime.stopSync(container.id);
     }
     activeContainers.clear();
+    for (const network of activeNetworks) {
+      network.runtime.removeNetworkSync(network.name);
+    }
+    activeNetworks.clear();
   };
 
   process.once('exit', cleanup);
@@ -1078,7 +1087,8 @@ async function startJobContainer(
     exchangeDir,
     env: containerEnv,
     memoryLimit: options.containerMemoryLimit,
-    networkDisabled: options.networkDisabled === true
+    networkDisabled: options.networkDisabled === true,
+    network: runtime.services?.network
   });
 
   if (!started.success || !started.id) {
@@ -1146,10 +1156,145 @@ function runnerImage(
 
 async function stopJobContainer(runtime: JobRuntime): Promise<void> {
   const container = runtime.container;
-  if (!container) return;
-  activeContainers.delete(container);
-  runtime.container = undefined;
-  await container.runtime.stop(container.id);
+  if (container) {
+    activeContainers.delete(container);
+    runtime.container = undefined;
+    await container.runtime.stop(container.id);
+  }
+  await stopJobServices(runtime);
+}
+
+/** How long services may take to report healthy. */
+const SERVICE_HEALTH_TIMEOUT_MS = 5 * 60 * 1000;
+const SERVICE_HEALTH_POLL_MS = 1000;
+
+/**
+ * Start `jobs.<id>.services`, before the job container. In container
+ * mode, services join a per-job network under their service id (so steps
+ * reach `postgres:5432`), and the job container joins it too; on the host,
+ * they're reached through their published `ports` on localhost. Waits
+ * for health checks, and exposes `job.services.<id>.{id,network,ports}`.
+ * Returns false (after cleaning up) if a service can't be started.
+ */
+async function startJobServices(
+  job: Job,
+  ctx: ExpressionContext,
+  options: RunOptions,
+  runtime: JobRuntime
+): Promise<boolean> {
+  const specs = Object.entries(job.services ?? {});
+  if (specs.length === 0) return true;
+
+  const preference = options.containerRuntime ?? 'none';
+  const jobRuntime =
+    preference === 'none' ? null : await resolveContainerRuntime(preference);
+  const containerRuntime =
+    jobRuntime ?? (await resolveContainerRuntime('auto'));
+  if (!containerRuntime) {
+    logger.error(
+      'jobs.<id>.services need a container runtime (docker, podman or containerd), but none is available.'
+    );
+    return false;
+  }
+  if (jobRuntime && options.networkDisabled) {
+    logger.error(
+      'jobs.<id>.services need networking, but container networking is disabled (--no-network).'
+    );
+    return false;
+  }
+
+  const services: NonNullable<JobRuntime['services']> = {
+    runtime: containerRuntime,
+    ids: []
+  };
+  runtime.services = services;
+  installContainerCleanup();
+  if (jobRuntime) {
+    const network = `secureci-${crypto.randomBytes(6).toString('hex')}`;
+    if (!(await containerRuntime.createNetwork(network))) {
+      logger.error(`Failed to create the job network ${network}`);
+      return false;
+    }
+    services.network = network;
+    activeNetworks.add({ runtime: containerRuntime, name: network });
+  }
+
+  const contexts: Record<string, unknown> = {};
+  for (const [serviceId, spec] of specs) {
+    const service = typeof spec === 'string' ? { image: spec } : spec;
+    if (service.credentials) {
+      logger.warn(
+        `services.${serviceId}: credentials are ignored; log in with \`docker login\` instead.`
+      );
+    }
+    const image = substituteExpressions(service.image, ctx);
+    logger.info(`Starting service ${serviceId}: ${image}`);
+    const started = await containerRuntime.start({
+      image,
+      service: true,
+      ...(services.network
+        ? { network: services.network, networkAlias: serviceId }
+        : {}),
+      ports: (service.ports ?? []).map((port) =>
+        substituteExpressions(String(port), ctx)
+      ),
+      volumes: (service.volumes ?? []).map((v) =>
+        substituteExpressions(v, ctx)
+      ),
+      extraArgs: service.options
+        ? splitArgs(substituteExpressions(service.options, ctx))
+        : [],
+      env: substituteRecord(service.env, ctx)
+    });
+    if (!started.success || !started.id) {
+      logger.error(
+        `Failed to start service ${serviceId} (${image}): ${started.error}`
+      );
+      return false;
+    }
+    services.ids.push(started.id);
+    activeContainers.add({ runtime: containerRuntime, id: started.id });
+
+    const deadline = Date.now() + SERVICE_HEALTH_TIMEOUT_MS;
+    for (;;) {
+      const health = await containerRuntime.health(started.id);
+      if (health === 'healthy' || health === 'none') break;
+      if (health === 'unhealthy' || Date.now() > deadline) {
+        logger.error(`Service ${serviceId} is not healthy (${health}).`);
+        return false;
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, SERVICE_HEALTH_POLL_MS)
+      );
+    }
+
+    contexts[serviceId] = {
+      id: started.id,
+      network: services.network ?? '',
+      ports: await containerRuntime.ports(started.id)
+    };
+  }
+  ctx.job = { ...ctx.job, services: contexts };
+  return true;
+}
+
+/** Remove the job's service containers and network. */
+async function stopJobServices(runtime: JobRuntime): Promise<void> {
+  const services = runtime.services;
+  if (!services) return;
+  runtime.services = undefined;
+  for (const id of services.ids) {
+    for (const entry of activeContainers) {
+      if (entry.id === id) activeContainers.delete(entry);
+    }
+    await services.runtime.stop(id);
+  }
+  if (services.network) {
+    for (const entry of activeNetworks) {
+      if (entry.name === services.network) activeNetworks.delete(entry);
+    }
+    await services.runtime.removeNetwork(services.network);
+  }
 }
 
 /** Step files inside the job container's exchange dir, writable from it. */

@@ -628,4 +628,97 @@ describe('container-runtime', () => {
       expect(captures[0].args).not.toContain('-e');
     });
   });
+
+  describe('service containers (#33)', () => {
+    async function dockerRuntime() {
+      execMock.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
+      const runtime = await resolveContainerRuntime('docker');
+      if (!runtime) throw new Error('expected a runtime');
+      return runtime;
+    }
+
+    /** Respond to each spawn in turn with [exitCode, stdout]. */
+    function respond(...replies: Array<[number, string]>) {
+      const captures: string[][] = [];
+      spawnMock.mockImplementation((_bin: string, args: string[]) => {
+        captures.push(args);
+        const child = fakeChildProcess();
+        const [code, out] = replies.shift() ?? [0, ''];
+        setImmediate(() => {
+          if (out) child.stdout.emit('data', Buffer.from(out));
+          child.emit('close', code);
+        });
+        return child;
+      });
+      return captures;
+    }
+
+    it('creates and removes networks', async () => {
+      const runtime = await dockerRuntime();
+      const calls = respond([0, 'netid\n'], [0, '']);
+      expect(await runtime.createNetwork('secureci-net-1')).toBe(true);
+      await runtime.removeNetwork('secureci-net-1');
+      expect(calls).toEqual([
+        ['network', 'create', 'secureci-net-1'],
+        ['network', 'rm', 'secureci-net-1']
+      ]);
+    });
+
+    it('starts a service with network alias, ports, volumes and options', async () => {
+      const runtime = await dockerRuntime();
+      const calls = respond([0, 'svc1\n']);
+      const started = await runtime.start({
+        image: 'postgres:16',
+        service: true,
+        network: 'secureci-net-1',
+        networkAlias: 'db',
+        ports: ['5432', '6000:6379'],
+        volumes: ['/data:/var/lib/data'],
+        extraArgs: ['--health-cmd', 'pg_isready', '--health-interval', '1s'],
+        env: { POSTGRES_PASSWORD: 'pw' }
+      });
+      expect(started).toEqual({ success: true, id: 'svc1' });
+      const args = calls[0];
+      expect(args.slice(0, 2)).toEqual(['run', '-d']);
+      expect(args).toEqual(
+        expect.arrayContaining([
+          '--network',
+          'secureci-net-1',
+          '--network-alias',
+          'db',
+          '-p',
+          '5432',
+          '-p',
+          '6000:6379',
+          '-v',
+          '/data:/var/lib/data',
+          '--health-cmd',
+          'pg_isready',
+          '--env-file'
+        ])
+      );
+      expect(args.join(' ')).not.toContain('pw');
+      // Services keep their image's own entrypoint and command.
+      expect(args).not.toContain('--entrypoint');
+      expect(args[args.length - 1]).toBe('postgres:16');
+    });
+
+    it('reads health status and published ports', async () => {
+      const runtime = await dockerRuntime();
+      const calls = respond(
+        [0, 'healthy\n'],
+        [
+          0,
+          '5432/tcp -> 0.0.0.0:49153\n5432/tcp -> [::]:49153\n6379/tcp -> 0.0.0.0:6000\n'
+        ]
+      );
+      expect(await runtime.health('svc1')).toBe('healthy');
+      expect(await runtime.ports('svc1')).toEqual({
+        '5432': '49153',
+        '6379': '6000'
+      });
+      expect(calls[0].slice(0, 2)).toEqual(['inspect', '--format']);
+      expect(calls[1]).toEqual(['port', 'svc1']);
+    });
+  });
 });

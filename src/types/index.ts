@@ -37,6 +37,8 @@ export interface Job {
   outputs?: Record<string, string>;
   strategy?: JobStrategy;
   container?: string | JobContainer;
+  /** Sidecar containers (databases, caches...) for the job. */
+  services?: Record<string, string | JobService>;
   /** Let the job (or a matrix combination) fail without failing the run. */
   'continue-on-error'?: boolean | string;
 }
@@ -48,6 +50,17 @@ export interface JobContainer {
   options?: string;
   volumes?: string[];
   ports?: Array<string | number>;
+  credentials?: Record<string, string>;
+}
+
+/** `jobs.<id>.services.<id>`. */
+export interface JobService {
+  image: string;
+  env?: Record<string, string>;
+  ports?: Array<string | number>;
+  volumes?: string[];
+  /** Extra `docker run` options, e.g. `--health-cmd ...`. */
+  options?: string;
   credentials?: Record<string, string>;
 }
 

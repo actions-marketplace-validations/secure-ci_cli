@@ -95,7 +95,7 @@ secureci run .github/workflows/ci.yml --container-runtime=podman --container-mem
   4. `container-image` from the config file, else `catthehacker/ubuntu:act-22.04`, for labels with no mapping (self-hosted, custom), with a warning. `windows-*` / `macos-*` jobs also run in this Linux image, with a warning.
 - The runner images are large (about 2 GB unpacked) and pulled on first use.
 - JavaScript actions run with the image's own `node`. If an image has no Node.js (e.g. a plain `ubuntu:22.04` via `--container-image`), they fail with a clear error.
-- `services:` containers are not supported yet.
+- `jobs.<id>.services` are supported: see [Service Containers](#service-containers-jobsidservices).
 - `--container-timeout` fails a step that runs longer than the given time, and kills its processes in the job container (including background ones it started).
 
 ### Security: what runs where
@@ -235,6 +235,15 @@ jobs:
     runs-on: ubuntu-latest
     steps: [...]
 ```
+
+### Service Containers (`jobs.<id>.services`)
+
+Sidecar containers such as databases and caches start before the job's steps and are removed when the job ends (also on failure or Ctrl-C):
+
+- **Container mode:** the job gets its own network. Each service joins it under its service id, so steps reach it by hostname (`postgres:5432`), as on GitHub.
+- **Host mode** (`--container-runtime none`): services still run in containers (a container runtime is required). Steps reach them through their published `ports` on `localhost`.
+- `image`, `env`, `ports`, `volumes` and `options` (e.g. `--health-cmd ...`) are supported. Steps start once every service with a health check reports healthy; an unhealthy service fails the job. `credentials` are ignored (log in with `docker login`).
+- `${{ job.services.<id>.ports['5432'] }}` is the host port a container port is published on; `job.services.<id>.id` and `.network` are also set.
 
 ### Matrix Builds (`strategy.matrix`)
 

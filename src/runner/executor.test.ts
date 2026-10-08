@@ -64,7 +64,12 @@ function fakeJobContainerRuntime(
       ...(execImpl ? execImpl(id, opts) : {})
     })),
     stop: vi.fn().mockResolvedValue(undefined),
-    stopSync: vi.fn()
+    stopSync: vi.fn(),
+    createNetwork: vi.fn().mockResolvedValue(true),
+    removeNetwork: vi.fn().mockResolvedValue(undefined),
+    removeNetworkSync: vi.fn(),
+    health: vi.fn().mockResolvedValue('healthy'),
+    ports: vi.fn().mockResolvedValue({ '5432': '49153' })
   };
 }
 
@@ -3439,6 +3444,193 @@ jobs:
         (c) => c.command?.includes('kill') && c.command.includes(String(marker))
       );
       expect(kill).toBeDefined();
+    });
+  });
+
+  describe('service containers (#33)', () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-services-'));
+    });
+    afterEach(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    const workflow = `
+name: Services
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:\${{ inputs.pg }}
+        env:
+          POSTGRES_PASSWORD: pw
+        ports:
+          - 5432
+        options: --health-cmd "pg_isready -U postgres" --health-interval 1s
+    steps:
+      - run: echo "port=$PORT"
+        env:
+          PORT: \${{ job.services.db.ports['5432'] }}
+`;
+
+    function write(): string {
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(file, workflow);
+      return file;
+    }
+
+    /** start() calls: services first, then the job container. */
+    function startCall(
+      fake: ReturnType<typeof fakeJobContainerRuntime>,
+      predicate: (o: Record<string, unknown>) => boolean
+    ) {
+      return fake.start.mock.calls
+        .map((c) => c[0] as Record<string, unknown>)
+        .find(predicate);
+    }
+
+    it('runs services on a job network, waits for health, and tears everything down', async () => {
+      const fake = fakeJobContainerRuntime();
+      fake.start.mockImplementation(async (o: { service?: boolean }) => ({
+        success: true,
+        id: o.service ? 'svc-1' : 'job-1'
+      }));
+      fake.health
+        .mockResolvedValueOnce('starting')
+        .mockResolvedValueOnce('healthy');
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const result = await executeWorkflow(write(), {
+        containerRuntime: 'docker',
+        inputs: { pg: '16' }
+      });
+
+      expect(result.success).toBe(true);
+      const network = fake.createNetwork.mock.calls[0][0] as string;
+      expect(network).toMatch(/^secureci-/);
+      expect(startCall(fake, (o) => !!o.service)).toMatchObject({
+        image: 'postgres:16',
+        service: true,
+        network,
+        networkAlias: 'db',
+        ports: ['5432'],
+        env: { POSTGRES_PASSWORD: 'pw' },
+        extraArgs: [
+          '--health-cmd',
+          'pg_isready -U postgres',
+          '--health-interval',
+          '1s'
+        ]
+      });
+      expect(startCall(fake, (o) => !o.service)).toMatchObject({ network });
+      expect(fake.health).toHaveBeenCalledTimes(2);
+      expect(stepExecCalls(fake)[0].env?.PORT).toBe('49153');
+      expect(fake.stop.mock.calls.map((c) => c[0]).sort()).toEqual([
+        'job-1',
+        'svc-1'
+      ]);
+      expect(fake.removeNetwork).toHaveBeenCalledWith(network);
+    });
+
+    it('fails the job, without running steps, when a service is unhealthy', async () => {
+      const fake = fakeJobContainerRuntime();
+      fake.health.mockResolvedValue('unhealthy');
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const result = await executeWorkflow(write(), {
+        containerRuntime: 'docker',
+        inputs: { pg: '16' }
+      });
+
+      expect(result.success).toBe(false);
+      expect(stepExecCalls(fake)).toHaveLength(0);
+      expect(fake.stop).toHaveBeenCalled();
+      expect(fake.removeNetwork).toHaveBeenCalled();
+    });
+
+    it('on the host, publishes service ports instead of using a network', async () => {
+      const fake = fakeJobContainerRuntime();
+      fake.start.mockResolvedValue({ success: true, id: 'svc-1' });
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const result = await executeWorkflow(write(), {
+        containerRuntime: 'none',
+        inputs: { pg: '16' }
+      });
+
+      expect(result.success).toBe(true);
+      expect(fake.createNetwork).not.toHaveBeenCalled();
+      expect(fake.start).toHaveBeenCalledTimes(1);
+      expect(fake.start.mock.calls[0][0]).toMatchObject({
+        service: true,
+        ports: ['5432']
+      });
+      expect(fake.start.mock.calls[0][0]).not.toHaveProperty('network');
+      expect(result.jobs[0].steps[0].output).toContain('port=49153');
+      expect(fake.stop).toHaveBeenCalledWith('svc-1');
+    });
+
+    // Real-engine check: opt in with RUN_DOCKER_TESTS=1 (needs a running
+    // docker daemon and the postgres:16-alpine image or network access).
+    it.skipIf(!process.env.RUN_DOCKER_TESTS)(
+      'reaches a real postgres service by hostname from the job container',
+      async () => {
+        const actual = await vi.importActual<
+          typeof import('./container-runtime')
+        >('./container-runtime');
+        resolveContainerRuntimeMock.mockImplementation(
+          actual.resolveContainerRuntime
+        );
+        const file = path.join(dir, 'real.yml');
+        fs.writeFileSync(
+          file,
+          `
+name: Real Services
+on: push
+jobs:
+  db:
+    runs-on: ubuntu-latest
+    container: postgres:16-alpine
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+        options: --health-cmd "pg_isready -U postgres" --health-interval 1s --health-retries 60
+    steps:
+      - run: pg_isready -h postgres -U postgres
+`
+        );
+
+        const result = await executeWorkflow(file, {
+          containerRuntime: 'docker'
+        });
+        expect(result.success).toBe(true);
+        expect(result.jobs[0].steps[0].output).toContain(
+          'accepting connections'
+        );
+      },
+      180_000
+    );
+
+    it('fails clearly when no container runtime is available for services', async () => {
+      resolveContainerRuntimeMock.mockResolvedValue(null);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const result = await executeWorkflow(write(), {
+          containerRuntime: 'none',
+          inputs: { pg: '16' }
+        });
+        expect(result.success).toBe(false);
+        expect(errorSpy.mock.calls.flat().join('\n')).toContain(
+          'services need a container runtime'
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
   });
 });
