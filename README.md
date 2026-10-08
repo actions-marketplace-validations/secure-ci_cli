@@ -197,7 +197,6 @@ secureci validate .github/workflows/ci.yml --contract contract.yml --format sari
 - **`json`**: `{ file, valid, errors: [{ path, message, severity }] }`.
 - **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
 
-
 ## Workflow Features
 
 ### Conditional Execution (`if:`)
