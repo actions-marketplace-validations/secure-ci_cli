@@ -1,8 +1,6 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import * as fs from 'fs';
 import * as path from 'path';
-import * as crypto from 'crypto';
 import { logger } from '../utils/logger';
 import { RunOptions, StepResult, Step, ActionFile } from '../types';
 import {
@@ -10,7 +8,7 @@ import {
   ifEvaluationError,
   ExpressionContext
 } from './expression';
-import { CONTAINER_EXCHANGE_DIR, CONTAINER_WORKDIR } from './container-runtime';
+import { CONTAINER_WORKDIR } from './container-runtime';
 import {
   cleanupStepFiles,
   createStepFiles,
@@ -20,6 +18,8 @@ import {
 } from './runner-env';
 import {
   JobRuntime,
+  actionDirInContainer,
+  effectiveTimeout,
   createContainerStepFiles,
   killStepProcesses,
   fileCommandEnv,
@@ -92,23 +92,13 @@ export async function executeNodeAction(
       return { step, success: false, error, duration: Date.now() - startTime };
     }
 
-    containerActionDir = container.actionDirs.get(actionDir);
-    if (!containerActionDir) {
-      const hash = crypto
-        .createHash('sha1')
-        .update(actionDir)
-        .digest('hex')
-        .slice(0, 12);
-      fs.cpSync(actionDir, path.join(container.exchangeDir, 'actions', hash), {
-        recursive: true
-      });
-      containerActionDir = `${CONTAINER_EXCHANGE_DIR}/actions/${hash}`;
-      container.actionDirs.set(actionDir, containerActionDir);
-    }
+    containerActionDir = actionDirInContainer(container, actionDir);
   }
 
   let state: Record<string, string> = {};
   let output = '';
+
+  const limit = effectiveTimeout(runtime, options.containerTimeoutMs);
 
   /** Run one script (pre/main/post) on the host or in the job container. */
   const invokeScript = async (
@@ -130,6 +120,7 @@ export async function executeNodeAction(
         workingDir: CONTAINER_WORKDIR,
         env: {
           ...containerRunnerEnv(runtime),
+          ...runtime.actionEnv,
           ...callerCtx.env,
           ...inputEnv,
           ...stateEnv,
@@ -140,7 +131,7 @@ export async function executeNodeAction(
           ...fileCommandEnv(files, containerDir),
           SECURECI_STEP: path.basename(files.dir)
         },
-        timeoutMs: options.containerTimeoutMs
+        timeoutMs: limit.ms
       });
       if (result.timedOut) {
         await killStepProcesses(container, path.basename(files.dir));
@@ -152,7 +143,7 @@ export async function executeNodeAction(
         error: result.success
           ? undefined
           : result.timedOut
-            ? `Timed out after ${options.containerTimeoutMs}ms`
+            ? limit.message
             : `node exited with code ${result.exitCode}`
       };
     }
@@ -164,9 +155,12 @@ export async function executeNodeAction(
         {
           cwd: process.cwd(),
           maxBuffer: 64 * 1024 * 1024,
+          timeout: limit.ms,
+          killSignal: 'SIGKILL',
           env: {
             ...hostBaseEnv(),
             ...runtime.runnerEnv,
+            ...runtime.actionEnv,
             ...callerCtx.env,
             ...inputEnv,
             ...stateEnv,
@@ -185,12 +179,13 @@ export async function executeNodeAction(
         message: string;
         stdout?: string;
         stderr?: string;
+        killed?: boolean;
       };
       return {
         success: false,
         stdout: error.stdout || '',
         stderr: error.stderr || '',
-        error: error.message
+        error: error.killed && limit.ms ? limit.message : error.message
       };
     }
   };

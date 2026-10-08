@@ -26,18 +26,21 @@ import {
   buildGithubContext,
   declaredInputDefaults,
   workflowCallOutputs,
-  loadEvent
+  loadEvent,
+  typedInputs
 } from './github-context';
 import {
   matrixLabel,
   isTruthySetting,
   expandMatrix,
+  numberSetting,
   topologicalJobOrder
 } from './job-plan';
 import {
   createRunDir,
   runnerContext,
   createJobRuntime,
+  stepActionEnv,
   runPostSteps
 } from './job-runtime';
 import {
@@ -185,6 +188,7 @@ export async function executeWorkflow(
         }
       };
       const event = loadEvent(options, options.inputs ?? {}, parsed.file.on);
+      const inputs = typedInputs(parsed.file.on, options.inputs ?? {});
       fs.writeFileSync(
         path.join(runDir, 'event.json'),
         JSON.stringify(event.payload)
@@ -228,7 +232,7 @@ export async function executeWorkflow(
         }
         const vars = options.vars ?? {};
         const jobIfCtx: ExpressionContext = {
-          ...createContext({}, options.inputs, options.secrets, github),
+          ...createContext({}, inputs, options.secrets, github),
           needs,
           vars,
           dependencies: {
@@ -324,7 +328,7 @@ export async function executeWorkflow(
             ...substituteRecord(parsed.file.env, {
               ...createContext(
                 { ...options.env },
-                options.inputs,
+                inputs,
                 options.secrets,
                 github
               ),
@@ -334,7 +338,7 @@ export async function executeWorkflow(
           const jobEnv = substituteRecord(job.env, {
             ...createContext(
               workflowEnv,
-              options.inputs,
+              inputs,
               options.secrets,
               github,
               matrixValues
@@ -345,7 +349,7 @@ export async function executeWorkflow(
           const jobCtx: ExpressionContext = {
             ...createContext(
               { ...workflowEnv, ...jobEnv },
-              options.inputs,
+              inputs,
               options.secrets,
               github,
               matrixValues
@@ -365,6 +369,14 @@ export async function executeWorkflow(
 
           logger.step(`Executing job: ${jobLabel}`);
           const jobStartTime = Date.now();
+          const jobTimeoutMinutes = numberSetting(
+            job['timeout-minutes'],
+            jobCtx
+          );
+          const jobDeadline = jobTimeoutMinutes
+            ? jobStartTime + jobTimeoutMinutes * 60_000
+            : undefined;
+          const jobTimeoutMessage = `The job running on runner secureci has exceeded the maximum execution time of ${jobTimeoutMinutes} minutes.`;
           const stepResults: StepResult[] = [];
 
           if (
@@ -407,8 +419,13 @@ export async function executeWorkflow(
                 ...jobCtx,
                 env: { ...jobCtx.env, ...runtime.env }
               };
+              runtime.actionEnv = stepActionEnv(runtime, step);
               const stepCtx: ExpressionContext = {
                 ...envCtx,
+                github: {
+                  ...envCtx.github,
+                  action: runtime.actionEnv.GITHUB_ACTION
+                },
                 env: { ...envCtx.env, ...substituteRecord(step.env, envCtx) }
               };
 
@@ -465,13 +482,44 @@ export async function executeWorkflow(
                 continue;
               }
 
+              // timeout-minutes: the step's own, or what's left of the job's.
+              const stepMinutes = numberSetting(
+                step['timeout-minutes'],
+                stepCtx
+              );
+              const jobLeft =
+                jobDeadline !== undefined
+                  ? Math.max(jobDeadline - Date.now(), 1)
+                  : undefined;
+              const stepMs = stepMinutes ? stepMinutes * 60_000 : undefined;
+              runtime.stepTimeout =
+                jobLeft !== undefined &&
+                (stepMs === undefined || jobLeft < stepMs)
+                  ? { ms: jobLeft, message: jobTimeoutMessage }
+                  : stepMs !== undefined
+                    ? {
+                        ms: stepMs,
+                        message: `The action '${step.name || step.id || step.uses || 'run'}' has timed out after ${stepMinutes} minutes.`
+                      }
+                    : undefined;
               const stepResult = await executeStep(
                 step,
                 options,
                 runtime,
                 stepCtx
               );
+              runtime.stepTimeout = undefined;
               stepResults.push(stepResult);
+              if (jobDeadline !== undefined && Date.now() >= jobDeadline) {
+                // The job is cancelled: no further steps run.
+                if (stepResult.success) {
+                  stepResult.success = false;
+                  stepResult.error = jobTimeoutMessage;
+                }
+                logger.error(jobTimeoutMessage);
+                jobCtx.jobFailed = true;
+                break;
+              }
 
               const outcome = stepResult.success ? 'success' : 'failure';
               if (step.id) {
@@ -554,7 +602,7 @@ export async function executeWorkflow(
         ...(callOutputs
           ? {
               outputs: substituteRecord(callOutputs, {
-                ...createContext({}, options.inputs, options.secrets),
+                ...createContext({}, inputs, options.secrets),
                 vars: options.vars ?? {},
                 jobs: Object.fromEntries(jobResults)
               })

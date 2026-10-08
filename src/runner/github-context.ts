@@ -131,6 +131,47 @@ export function declaredInputDefaults(on: unknown): Record<string, string> {
   return defaults;
 }
 
+/**
+ * The `inputs` context: values as given (strings), with `boolean` and
+ * `number` inputs declared in `on.workflow_dispatch` / `on.workflow_call`
+ * converted to their types, as on GitHub (so `if: inputs.flag` is false
+ * for `flag: false`, not the truthy string "false").
+ */
+export function typedInputs(
+  on: unknown,
+  inputs: Record<string, string>
+): Record<string, unknown> {
+  const types: Record<string, string> = {};
+  if (on && typeof on === 'object' && !Array.isArray(on)) {
+    for (const trigger of ['workflow_dispatch', 'workflow_call']) {
+      const declared = (on as Record<string, { inputs?: unknown }>)[trigger]
+        ?.inputs;
+      if (!declared || typeof declared !== 'object') continue;
+      for (const [name, def] of Object.entries(
+        declared as Record<string, { type?: unknown }>
+      )) {
+        if (def && typeof def.type === 'string' && !(name in types)) {
+          types[name] = def.type;
+        }
+      }
+    }
+  }
+
+  const typed: Record<string, unknown> = { ...inputs };
+  for (const [name, value] of Object.entries(inputs)) {
+    if (types[name] === 'boolean' && /^(true|false)$/i.test(value.trim())) {
+      typed[name] = value.trim().toLowerCase() === 'true';
+    } else if (
+      types[name] === 'number' &&
+      value.trim() !== '' &&
+      Number.isFinite(Number(value))
+    ) {
+      typed[name] = Number(value);
+    }
+  }
+  return typed;
+}
+
 /** `on.workflow_call.outputs` as name -> value expression, if declared. */
 export function workflowCallOutputs(
   on: unknown

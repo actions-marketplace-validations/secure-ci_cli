@@ -39,6 +39,8 @@ export interface Job {
   container?: string | JobContainer;
   /** Sidecar containers (databases, caches...) for the job. */
   services?: Record<string, string | JobService>;
+  /** Minutes before the job is stopped and fails (may be an expression). */
+  'timeout-minutes'?: number | string;
   /** Let the job (or a matrix combination) fail without failing the run. */
   'continue-on-error'?: boolean | string;
 }
@@ -80,6 +82,8 @@ export interface Step {
   env?: Record<string, string>;
   if?: string;
   'continue-on-error'?: boolean;
+  /** Minutes before the step is stopped and fails (may be an expression). */
+  'timeout-minutes'?: number | string;
   'working-directory'?: string;
   shell?: string;
 }

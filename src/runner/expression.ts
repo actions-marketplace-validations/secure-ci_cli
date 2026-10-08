@@ -35,7 +35,8 @@ export interface NeedsInfo {
 
 export interface ExpressionContext {
   env: Record<string, string>;
-  inputs: Record<string, string>;
+  /** Strings, or booleans/numbers for typed workflow inputs. */
+  inputs: Record<string, unknown>;
   secrets: Record<string, string>;
   steps: Record<string, StepOutcomeInfo>;
   github: GithubContext;
@@ -60,7 +61,7 @@ export interface ExpressionContext {
 
 export function createContext(
   env: Record<string, string> = {},
-  inputs: Record<string, string> = {},
+  inputs: Record<string, unknown> = {},
   secrets: Record<string, string> = {},
   github: GithubContext = {},
   matrix: Record<string, unknown> = {}

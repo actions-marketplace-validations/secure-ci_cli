@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -54,6 +55,12 @@ export interface JobRuntime {
   preState: Map<Step, Record<string, string>>;
   /** Remote action -> its fetched action.yml (or null), per job. */
   actionPaths: Map<string, string | null>;
+  /** The running step's GITHUB_ACTION* variables (see stepActionEnv). */
+  actionEnv: Record<string, string>;
+  /** How often each GITHUB_ACTION name was handed out (`__run`, ...). */
+  actionNames: Map<string, number>;
+  /** The running step's limit from timeout-minutes (step or job). */
+  stepTimeout?: { ms: number; message: string };
 }
 
 /** A per-job container that `run:` steps and JS actions are exec'd into. */
@@ -175,6 +182,8 @@ export function createJobRuntime(
     postSteps: [],
     defaults,
     summary: '',
+    actionEnv: {},
+    actionNames: new Map(),
     preState: new Map(),
     actionPaths: new Map()
   };
@@ -291,4 +300,98 @@ export function finishStepOutput(
     outputs: { ...fileResults.outputs, ...commands.outputs },
     state: { ...fileResults.state, ...commands.state }
   };
+}
+
+/** The action a composite action's steps run inside, for stepActionEnv. */
+export interface ParentAction {
+  repository: string;
+  ref: string;
+  /** The action's directory, as the steps see it. */
+  path: string;
+}
+
+/**
+ * The runner's per-step GITHUB_ACTION variables: GITHUB_ACTION is the
+ * step's id, else `__run` / `__owner_repo` (numbered `_2`, `_3`... when
+ * repeated); a remote `uses:` sets GITHUB_ACTION_REPOSITORY / _REF. Inside
+ * a composite action, steps also get its GITHUB_ACTION_PATH, and run steps
+ * its repository and ref.
+ */
+export function stepActionEnv(
+  runtime: JobRuntime,
+  step: Step,
+  parent?: ParentAction
+): Record<string, string> {
+  let name = step.id;
+  if (!name) {
+    const base = step.uses
+      ? `__${step.uses
+          .replace(/@.*$/, '')
+          .replace(/[^A-Za-z0-9]+/g, '_')
+          .replace(/^_+|_+$/g, '')}`
+      : '__run';
+    const count = (runtime.actionNames.get(base) ?? 0) + 1;
+    runtime.actionNames.set(base, count);
+    name = count === 1 ? base : `${base}_${count}`;
+  }
+
+  const remote = step.uses?.match(/^([^./][^/@]*\/[^/@]+)(?:\/[^@]*)?@(.+)$/);
+  const env: Record<string, string> = {
+    GITHUB_ACTION: name,
+    GITHUB_ACTION_REPOSITORY: remote
+      ? remote[1]
+      : step.uses
+        ? ''
+        : (parent?.repository ?? ''),
+    GITHUB_ACTION_REF: remote ? remote[2] : step.uses ? '' : (parent?.ref ?? '')
+  };
+  if (parent) env.GITHUB_ACTION_PATH = parent.path;
+  return env;
+}
+
+/**
+ * An action directory's path inside the job container: copied once into
+ * the mounted exchange dir (the action cache isn't mounted).
+ */
+export function actionDirInContainer(
+  container: JobContainerHandle,
+  actionDir: string
+): string {
+  let containerDir = container.actionDirs.get(actionDir);
+  if (!containerDir) {
+    const hash = crypto
+      .createHash('sha1')
+      .update(actionDir)
+      .digest('hex')
+      .slice(0, 12);
+    fs.cpSync(actionDir, path.join(container.exchangeDir, 'actions', hash), {
+      recursive: true
+    });
+    containerDir = `${CONTAINER_EXCHANGE_DIR}/actions/${hash}`;
+    container.actionDirs.set(actionDir, containerDir);
+  }
+  return containerDir;
+}
+
+/**
+ * The time limit for the running step: its (or its job's) timeout-minutes,
+ * or --container-timeout in container mode, whichever is shorter, with the
+ * message to fail it with.
+ */
+export function effectiveTimeout(
+  runtime: JobRuntime,
+  containerTimeoutMs?: number,
+  inContainer = !!runtime.container
+): { ms?: number; message: string } {
+  const own = runtime.stepTimeout;
+  const flag =
+    inContainer && containerTimeoutMs ? containerTimeoutMs : undefined;
+  if (own && (flag === undefined || own.ms <= flag)) return own;
+  if (flag !== undefined) {
+    return {
+      ms: flag,
+      message: `Timed out after ${flag}ms (--container-timeout)`
+    };
+  }
+  return { message: '' };
 }

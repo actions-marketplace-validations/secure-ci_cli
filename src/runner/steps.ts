@@ -23,6 +23,7 @@ import {
   JobContainerHandle,
   createContainerStepFiles,
   killStepProcesses,
+  effectiveTimeout,
   containerPathPrefix,
   hostHasBash,
   fileCommandEnv,
@@ -114,16 +115,20 @@ export async function executeStep(
       const workingDirectory =
         step['working-directory'] ?? runtime.defaults.workingDirectory;
 
+      const limit = effectiveTimeout(runtime);
       try {
         const { stdout, stderr } = await execAsync(
           shellCommandLine(shell.template, scriptPath),
           {
+            timeout: limit.ms,
+            killSignal: 'SIGKILL',
             cwd: workingDirectory
               ? path.resolve(process.cwd(), workingDirectory)
               : process.cwd(),
             env: {
               ...hostBaseEnv(),
               ...runtime.runnerEnv,
+              ...runtime.actionEnv,
               ...mergedEnv,
               PATH: prependPath(
                 runtime.path,
@@ -153,7 +158,9 @@ export async function executeStep(
           message: string;
           stdout?: string;
           stderr?: string;
+          killed?: boolean;
         };
+        if (error.killed && limit.ms) error.message = limit.message;
         logger.error(`Step failed: ${error.message}`);
 
         const { outputs } = finishStepOutput(error.stdout, files, runtime);
@@ -222,6 +229,7 @@ export async function executeInJobContainer(
       mode: 0o644
     });
 
+    const limit = effectiveTimeout(runtime, options.containerTimeoutMs);
     const result = await container.runtime.exec(container.id, {
       command:
         containerPathPrefix(runtime) +
@@ -229,11 +237,12 @@ export async function executeInJobContainer(
       workingDir,
       env: {
         ...containerRunnerEnv(runtime),
+        ...runtime.actionEnv,
         ...mergedEnv,
         ...fileCommandEnv(files, containerDir),
         SECURECI_STEP: path.basename(files.dir)
       },
-      timeoutMs: options.containerTimeoutMs
+      timeoutMs: limit.ms
     });
     if (result.timedOut) {
       await killStepProcesses(container, path.basename(files.dir));
@@ -245,13 +254,11 @@ export async function executeInJobContainer(
     }
 
     if (result.timedOut) {
-      logger.error(
-        `Step timed out after ${options.containerTimeoutMs}ms (container: ${container.runtime.name})`
-      );
+      logger.error(`${limit.message} (container: ${container.runtime.name})`);
       return {
         step,
         success: false,
-        error: `Timed out after ${options.containerTimeoutMs}ms`,
+        error: limit.message,
         output: result.stdout,
         outputs,
         duration: Date.now() - startTime

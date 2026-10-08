@@ -1823,6 +1823,35 @@ jobs:
       });
     });
 
+    it('treats a container: expression that evaluates to empty as no container', async () => {
+      const fake = fakeJobContainerRuntime();
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+      const workflowPath = writeWorkflow(`
+name: Optional Container
+on:
+  workflow_dispatch:
+    inputs:
+      image: { type: string, default: '' }
+jobs:
+  a:
+    runs-on: ubuntu-22.04
+    container: \${{ inputs.image || null }}
+    steps:
+      - run: echo a
+`);
+
+      await executeWorkflow(workflowPath, { containerRuntime: 'docker' });
+      await executeWorkflow(workflowPath, {
+        containerRuntime: 'docker',
+        inputs: { image: 'node:20' }
+      });
+
+      expect(fake.start.mock.calls.map((c) => c[0].image)).toEqual([
+        'catthehacker/ubuntu:act-22.04',
+        'node:20'
+      ]);
+    });
+
     it('passes networkDisabled through when networking is turned off', async () => {
       const fake = fakeJobContainerRuntime();
       resolveContainerRuntimeMock.mockResolvedValue(fake);
@@ -4115,6 +4144,257 @@ ${extra}
         result.jobs.map((j) => [j.job, j.success, j.steps.length])
       ).toEqual([['a', false, 0]]);
       expect(errors()).toContain("Error when evaluating 'if' for job 'a'");
+    });
+  });
+
+  describe('typed workflow inputs', () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-typed-'));
+    });
+    afterEach(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('gives boolean and number inputs their types in the inputs context, like GitHub', async () => {
+      fs.writeFileSync(
+        path.join(dir, 'reuse.yml'),
+        `
+name: R
+on:
+  workflow_call:
+    inputs:
+      flag: { type: boolean, default: true }
+      count: { type: number, default: 3 }
+      label: { type: string, default: x }
+jobs:
+  gated:
+    if: \${{ inputs.flag }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "gated ran"
+  always:
+    runs-on: ubuntu-latest
+    steps:
+      - if: \${{ !inputs.flag }}
+        run: echo "inverse branch ran"
+      - run: echo "count-is-number=\${{ inputs.count == 3 && inputs.count > 2 }} json=\${{ toJSON(inputs.flag) }} label=\${{ inputs.label }}"
+`
+      );
+      const caller = path.join(dir, 'caller.yml');
+      fs.writeFileSync(
+        caller,
+        'name: C\non: push\njobs:\n  off:\n    uses: ./reuse.yml\n    with:\n      flag: false\n      count: 3\n'
+      );
+
+      const result = await executeWorkflow(caller);
+      const out = result.jobs
+        .flatMap((j) => j.steps.map((s) => s.output ?? ''))
+        .join('\n');
+      expect(result.success).toBe(true);
+      expect(out).not.toContain('gated ran');
+      expect(out).toContain('inverse branch ran');
+      expect(out).toContain('count-is-number=true json=false label=x');
+    });
+
+    it('types workflow_dispatch inputs passed with --input', async () => {
+      const file = path.join(dir, 'dispatch.yml');
+      fs.writeFileSync(
+        file,
+        `
+name: D
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run: { type: boolean, default: false }
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - if: \${{ inputs.dry-run }}
+        run: echo "dry run"
+      - if: \${{ !inputs.dry-run }}
+        run: echo "real run"
+`
+      );
+      const off = await executeWorkflow(file, {
+        inputs: { 'dry-run': 'false' }
+      });
+      const on = await executeWorkflow(file, { inputs: { 'dry-run': 'true' } });
+      const text = (r: typeof off) =>
+        r.jobs[0].steps.map((s) => s.output ?? '').join('\n');
+      expect(text(off)).toContain('real run');
+      expect(text(off)).not.toContain('dry run');
+      expect(text(on)).toContain('dry run');
+      expect(text(on)).not.toContain('real run');
+    });
+  });
+
+  describe('per-step action variables', () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-action-env-'));
+    });
+    afterEach(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('sets GITHUB_ACTION and github.action like the runner', async () => {
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        [
+          'name: A',
+          'on: push',
+          'jobs:',
+          '  a:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - run: echo "one=$GITHUB_ACTION ctx=${{ github.action }}"',
+          '      - run: echo "two=$GITHUB_ACTION"',
+          '      - id: named',
+          '        run: echo "three=$GITHUB_ACTION"'
+        ].join('\n')
+      );
+      const result = await executeWorkflow(file);
+      const out = result.jobs[0].steps.map((s) => s.output).join('\n');
+      expect(out).toContain('one=__run ctx=__run');
+      expect(out).toContain('two=__run_2');
+      expect(out).toContain('three=named');
+    });
+
+    it('sets GITHUB_ACTION_REPOSITORY/REF for remote actions, and GITHUB_ACTION_PATH in composites', async () => {
+      const comp = path.join(dir, 'comp');
+      fs.mkdirSync(comp);
+      fs.writeFileSync(
+        path.join(comp, 'hello.sh'),
+        'echo "script in action dir ran"\n'
+      );
+      fs.writeFileSync(
+        path.join(comp, 'action.yml'),
+        [
+          'name: comp',
+          'description: d',
+          'runs:',
+          '  using: composite',
+          '  steps:',
+          '    - shell: bash',
+          '      run: |',
+          '        bash "$GITHUB_ACTION_PATH/hello.sh"',
+          '        test "${{ github.action_path }}" = "$GITHUB_ACTION_PATH" && echo "path-matches=true"',
+          '        echo "repo=$GITHUB_ACTION_REPOSITORY ref=$GITHUB_ACTION_REF"'
+        ].join('\n')
+      );
+      fetchActionMock.mockResolvedValueOnce(path.join(comp, 'action.yml'));
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        'name: B\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: org/comp@v2\n'
+      );
+
+      const logSpy = vi.spyOn(console, 'log');
+      let out = '';
+      let result: Awaited<ReturnType<typeof executeWorkflow>>;
+      try {
+        result = await executeWorkflow(file);
+        out = logSpy.mock.calls.flat().join('\n');
+      } finally {
+        logSpy.mockRestore();
+      }
+      expect(result.success).toBe(true);
+      expect(out).toContain('script in action dir ran');
+      expect(out).toContain('path-matches=true');
+      expect(out).toContain('repo=org/comp ref=v2');
+    });
+  });
+
+  describe('timeout-minutes', () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-timeout-'));
+    });
+    afterEach(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    function write(body: string): string {
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(file, body);
+      return file;
+    }
+
+    it('fails a step that runs past its timeout-minutes (expressions allowed)', async () => {
+      const started = Date.now();
+      const result = await executeWorkflow(
+        write(`
+name: T
+on:
+  workflow_dispatch:
+    inputs:
+      limit: { type: number, default: 0.02 }
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - name: slow
+        timeout-minutes: \${{ inputs.limit }}
+        run: sleep 5
+      - if: always()
+        run: echo "after"
+`),
+        { containerRuntime: 'host' }
+      );
+      expect(Date.now() - started).toBeLessThan(4500);
+      expect(result.success).toBe(false);
+      expect(result.jobs[0].steps[0].error).toContain(
+        "The action 'slow' has timed out after 0.02 minutes"
+      );
+      expect(result.jobs[0].steps[1].output).toContain('after');
+    });
+
+    it('stops a job at its timeout-minutes and skips the remaining steps', async () => {
+      const result = await executeWorkflow(
+        write(`
+name: J
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    timeout-minutes: 0.02
+    steps:
+      - run: sleep 5
+      - run: echo "never"
+`),
+        { containerRuntime: 'host' }
+      );
+      expect(result.success).toBe(false);
+      const steps = result.jobs[0].steps;
+      expect(steps[0].success).toBe(false);
+      expect(steps[0].error).toContain(
+        'exceeded the maximum execution time of 0.02 minutes'
+      );
+      expect(steps.map((s) => s.output ?? '').join('')).not.toContain('never');
+    });
+
+    it('passes the step timeout to the job container', async () => {
+      const fake = fakeJobContainerRuntime();
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+      await executeWorkflow(
+        write(`
+name: C
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - timeout-minutes: 2
+        run: echo hi
+`),
+        { containerRuntime: 'docker' }
+      );
+      const call = fake.exec.mock.calls
+        .map((c) => c[1] as { command?: string; timeoutMs?: number })
+        .find((c) => /script\.sh/.test(c.command ?? ''));
+      expect(call?.timeoutMs).toBe(120000);
     });
   });
 });

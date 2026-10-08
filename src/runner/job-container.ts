@@ -119,11 +119,17 @@ export async function startJobContainer(
     );
   }
 
-  const image = spec?.image
-    ? substituteExpressions(spec.image, ctx)
-    : options.containerImage || runnerImage(job?.['runs-on'], ctx, options);
+  // `container: ${{ inputs.image || null }}` that comes out empty means no
+  // container image, as on GitHub: use the image for runs-on.
+  const specImage = spec?.image
+    ? substituteExpressions(spec.image, ctx).trim()
+    : '';
+  const image =
+    specImage ||
+    options.containerImage ||
+    runnerImage(job?.['runs-on'], ctx, options);
   const containerEnv = substituteRecord(
-    spec && 'env' in spec ? spec.env : undefined,
+    specImage && spec && 'env' in spec ? spec.env : undefined,
     ctx
   );
 

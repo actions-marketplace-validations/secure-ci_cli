@@ -25,7 +25,12 @@ import {
   ExpressionContext
 } from './expression';
 import { CONTAINER_WORKDIR } from './container-runtime';
-import { JobRuntime } from './job-runtime';
+import {
+  JobRuntime,
+  ParentAction,
+  actionDirInContainer,
+  stepActionEnv
+} from './job-runtime';
 import { isLocalCheckout, localCheckout } from './checkout';
 import { executeStep } from './steps';
 import { executeDockerAction } from './docker-action';
@@ -421,12 +426,23 @@ export async function executeAction(
       const outputs: Record<string, string> = {};
       // Composite steps see only the action's own inputs, plus the
       // caller's env and github context - never the workflow's inputs.
+      // The action's files, as its steps see them (copied into the job
+      // container in container mode).
+      const actionDir = runtime.container
+        ? actionDirInContainer(runtime.container, path.dirname(actionPath))
+        : path.dirname(actionPath);
+      const callerActionEnv = runtime.actionEnv;
+      const parent: ParentAction = {
+        repository: callerActionEnv.GITHUB_ACTION_REPOSITORY ?? '',
+        ref: callerActionEnv.GITHUB_ACTION_REF ?? '',
+        path: actionDir
+      };
       const actionCtx: ExpressionContext = {
         ...createContext(
           { ...callerCtx.env },
           actionInputs,
           {},
-          callerCtx.github
+          { ...callerCtx.github, action_path: actionDir }
         ),
         secretsUnavailable: true,
         vars: callerCtx.vars,
@@ -440,8 +456,13 @@ export async function executeAction(
       runtime.defaults = {};
       try {
         for (const compositeStep of compositeSteps) {
+          runtime.actionEnv = stepActionEnv(runtime, compositeStep, parent);
           const envCtx: ExpressionContext = {
             ...actionCtx,
+            github: {
+              ...actionCtx.github,
+              action: runtime.actionEnv.GITHUB_ACTION
+            },
             env: { ...actionCtx.env, ...runtime.env }
           };
           const stepCtx: ExpressionContext = {
@@ -512,6 +533,7 @@ export async function executeAction(
         }
       } finally {
         runtime.defaults = callerDefaults;
+        runtime.actionEnv = callerActionEnv;
       }
 
       // Resolve the action's declared outputs (e.g.

@@ -12,6 +12,7 @@ import {
 import { createStepFiles } from './runner-env';
 import {
   JobRuntime,
+  effectiveTimeout,
   fileCommandEnv,
   containerRunnerEnv,
   finishStepOutput
@@ -122,6 +123,7 @@ export async function executeDockerAction(
   fs.copyFileSync(runtime.eventPath, path.join(exchangeDir, 'event.json'));
 
   try {
+    const limit = effectiveTimeout(runtime, options.containerTimeoutMs, true);
     const result = await containerRuntime.execute({
       image,
       args,
@@ -130,11 +132,12 @@ export async function executeDockerAction(
       exchangeDir,
       env: {
         ...containerRunnerEnv(runtime),
+        ...runtime.actionEnv,
         ...callerEnv,
         ...inputEnv,
         ...fileCommandEnv(files, CONTAINER_EXCHANGE_DIR)
       },
-      timeoutMs: options.containerTimeoutMs,
+      timeoutMs: limit.ms,
       memoryLimit: options.containerMemoryLimit,
       networkDisabled: options.networkDisabled === true
     });
@@ -145,13 +148,11 @@ export async function executeDockerAction(
     }
 
     if (result.timedOut) {
-      logger.error(
-        `Docker action timed out after ${options.containerTimeoutMs}ms (${containerRuntime.name})`
-      );
+      logger.error(`${limit.message} (${containerRuntime.name})`);
       return {
         step,
         success: false,
-        error: `Timed out after ${options.containerTimeoutMs}ms`,
+        error: limit.message,
         output: result.stdout,
         outputs,
         duration: Date.now() - startTime

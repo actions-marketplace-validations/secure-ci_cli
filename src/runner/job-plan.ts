@@ -37,6 +37,16 @@ export function isTruthySetting(
   return resolved === true || resolved === 'true';
 }
 
+/** A positive number setting (e.g. timeout-minutes), possibly an expression. */
+export function numberSetting(
+  value: unknown,
+  ctx: ExpressionContext
+): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const n = Number(matrixValue(value, ctx));
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 /** A `${{ }}` string resolved to its value (e.g. via fromJSON), else as is. */
 export function matrixValue(value: unknown, ctx: ExpressionContext): unknown {
   if (typeof value !== 'string' || !/^\s*\$\{\{[\s\S]*\}\}\s*$/.test(value)) {
