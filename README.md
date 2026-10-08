@@ -145,7 +145,7 @@ If the caller's workflow calls `org/deploy` before `org/security-scan` (or uses 
 
 - Only `uses:` steps declared directly in the given workflow file are considered — in whole-workflow order, resolving job order via `needs:` and then step order within each job. Steps inside a called reusable workflow or composite action are **not** resolved/recursed into.
 - `ordering: relative` (default): required actions must appear in that relative order, with any other steps allowed in between. `ordering: strict`: required actions must run back-to-back, with no other step in between.
-- A missing required action, a required action below `min-version`, an ordering violation, or any forbidden-action match is an **error** (validation fails). A required action whose version can't be compared (e.g. pinned to a branch or SHA) is a **warning**.
+- A missing required action, a required action below `min-version`, an ordering violation, or any forbidden-action match is an **error** (validation fails). A required action whose version can't be compared (e.g. pinned to a branch or SHA) is a **warning**. Ordering is checked for every required action that is present, including one below `min-version` (its first occurrence is used), and errors name the contract's own `required[N]` entry.
 - `--contract` runs the normal syntax validation too, and currently applies to workflow files only (not standalone actions, since the contract is about a job/step sequence). Passing `--contract` against an action file fails with a clear error.
 
 **Known limitations (v1 scope):**
@@ -153,7 +153,7 @@ If the caller's workflow calls `org/deploy` before `org/security-scan` (or uses 
 - **Jobs with no `needs:` relationship between them** (i.e. jobs GitHub Actions would run in parallel) are ordered by their declaration order in the YAML, since there's no real concurrency model here — this is an approximation for a static order check, not a simulation of actual parallel execution. If your contract's ordering spans two jobs that don't have a `needs:` edge between them, reordering those jobs in the YAML can change the validation result even though nothing semantically changed.
 - **`strategy.matrix` jobs** are checked once against the job's `steps:` as authored, not once per expanded matrix combination — the contract is about pipeline _structure_, not the runtime values substituted into it.
 - **Action references** are matched as exact strings against `uses:` (minus any `@version` suffix) — this covers the common `owner/repo` or `owner/repo/path` marketplace-action form, as well as local paths (`./.github/actions/foo`, matched with no version). `docker://image` references are matched as-is (the whole string, including `docker://`) and have no version-pin concept.
-- Action references are matched **case-sensitively** and are not normalized (e.g. `Org/Action` won't match a contract entry for `org/action`).
+- The `owner/repo` part of an action reference is matched **case-insensitively**, as GitHub resolves it (`Org/Action` matches a contract entry for `org/action`). A path inside the repo (`owner/repo/Path`), local paths and `docker://` references (whose tags are case-sensitive) are matched exactly.
 
 ## Workflow Features
 

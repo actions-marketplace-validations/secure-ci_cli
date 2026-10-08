@@ -38,7 +38,7 @@ export function validatePipelineContract(
   for (const entry of spec.forbidden ?? []) {
     for (const usage of sequence) {
       if (
-        usage.name === entry.uses &&
+        usage.name === normalizeActionName(entry.uses) &&
         (entry.version === undefined || usage.version === entry.version)
       ) {
         errors.push({
@@ -55,11 +55,14 @@ export function validatePipelineContract(
   const matchedPositions: {
     entry: PipelineContractEntry;
     usage: UsageEntry;
+    /** Index of the entry in the contract's `required` list. */
+    index: number;
   }[] = [];
 
   (spec.required ?? []).forEach((entry, idx) => {
     const path = `required[${idx}]`;
-    const candidates = sequence.filter((u) => u.name === entry.uses);
+    const name = normalizeActionName(entry.uses);
+    const candidates = sequence.filter((u) => u.name === name);
 
     if (candidates.length === 0) {
       errors.push({
@@ -71,7 +74,7 @@ export function validatePipelineContract(
     }
 
     if (!entry['min-version']) {
-      matchedPositions.push({ entry, usage: candidates[0] });
+      matchedPositions.push({ entry, usage: candidates[0], index: idx });
       return;
     }
 
@@ -79,9 +82,13 @@ export function validatePipelineContract(
       (c) => c.version && isVersionAtLeast(c.version, entry['min-version']!)
     );
     if (satisfying) {
-      matchedPositions.push({ entry, usage: satisfying });
+      matchedPositions.push({ entry, usage: satisfying, index: idx });
       return;
     }
+
+    // Present but too old (or not comparable): still check its ordering,
+    // using its first occurrence.
+    matchedPositions.push({ entry, usage: candidates[0], index: idx });
 
     const comparable = candidates.find(
       (c) =>
@@ -100,7 +107,6 @@ export function validatePipelineContract(
         message: `Required action "${entry.uses}" was found, but its version could not be compared against the required minimum "${entry['min-version']}"`,
         severity: 'warning'
       });
-      matchedPositions.push({ entry, usage: candidates[0] });
     }
   });
 
@@ -111,14 +117,14 @@ export function validatePipelineContract(
     if (ordering === 'strict') {
       if (curr.usage.globalIndex !== prev.usage.globalIndex + 1) {
         errors.push({
-          path: `required[${i}]`,
+          path: `required[${curr.index}]`,
           message: `Required action "${curr.entry.uses}" must run immediately after "${prev.entry.uses}" (ordering: strict), but other steps appear in between`,
           severity: 'error'
         });
       }
     } else if (curr.usage.globalIndex <= prev.usage.globalIndex) {
       errors.push({
-        path: `required[${i}]`,
+        path: `required[${curr.index}]`,
         message: `Required action "${curr.entry.uses}" must run after "${prev.entry.uses}", but it does not`,
         severity: 'error'
       });
@@ -152,8 +158,28 @@ function collectUsageSequence(workflow: WorkflowFile): UsageEntry[] {
 
 function splitActionRef(uses: string): { name: string; version?: string } {
   const atIndex = uses.lastIndexOf('@');
-  if (atIndex === -1) return { name: uses };
-  return { name: uses.slice(0, atIndex), version: uses.slice(atIndex + 1) };
+  if (atIndex === -1 || uses.startsWith('docker://')) {
+    return { name: normalizeActionName(uses) };
+  }
+  return {
+    name: normalizeActionName(uses.slice(0, atIndex)),
+    version: uses.slice(atIndex + 1)
+  };
+}
+
+/**
+ * Lower-case the `owner/repo` part of a marketplace-style reference, which
+ * GitHub resolves case-insensitively. A path inside the repo, local paths
+ * (`./...`) and `docker://` references (whose tags are case-sensitive) are
+ * kept as they are.
+ */
+function normalizeActionName(name: string): string {
+  if (name.startsWith('.') || name.startsWith('docker://')) return name;
+  const parts = name.split('/');
+  return [
+    ...parts.slice(0, 2).map((p) => p.toLowerCase()),
+    ...parts.slice(2)
+  ].join('/');
 }
 
 /**

@@ -208,4 +208,103 @@ describe('validatePipelineContract', () => {
       expect.objectContaining({ severity: 'warning' })
     ]);
   });
+
+  describe('ordering of required actions below min-version (#38)', () => {
+    it('still checks ordering for a required action that fails min-version', () => {
+      const wf = workflow({
+        build: {
+          'runs-on': 'ubuntu-latest',
+          steps: [
+            { uses: 'acme/deploy@v2' },
+            { uses: 'acme/security-scan@v1.1.0' }
+          ]
+        }
+      });
+
+      const result = validatePipelineContract(wf, {
+        required: [
+          { uses: 'acme/security-scan', 'min-version': 'v1.2.0' },
+          { uses: 'acme/deploy' }
+        ]
+      });
+
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          path: 'required[0]',
+          message: expect.stringContaining('below the required minimum')
+        }),
+        expect.objectContaining({
+          path: 'required[1]',
+          message: expect.stringContaining('must run after')
+        })
+      ]);
+    });
+
+    it('uses the contract index in ordering errors when an earlier entry is missing', () => {
+      const wf = workflow({
+        build: {
+          'runs-on': 'ubuntu-latest',
+          steps: [{ uses: 'acme/deploy@v1' }, { uses: 'acme/scan@v1' }]
+        }
+      });
+
+      const result = validatePipelineContract(wf, {
+        required: [
+          { uses: 'acme/missing' },
+          { uses: 'acme/scan' },
+          { uses: 'acme/deploy' }
+        ]
+      });
+
+      expect(result.errors).toEqual([
+        expect.objectContaining({ path: 'required[0]' }),
+        expect.objectContaining({
+          path: 'required[2]',
+          message: expect.stringContaining(
+            '"acme/deploy" must run after "acme/scan"'
+          )
+        })
+      ]);
+    });
+  });
+
+  describe('case-insensitive owner/repo matching (#16)', () => {
+    const wf = workflow({
+      build: {
+        'runs-on': 'ubuntu-latest',
+        steps: [
+          { uses: 'Org/Security-Scan@v1.3.0' },
+          { uses: 'ORG/legacy-deploy/sub/Path@v1' },
+          { uses: './.github/actions/Local' },
+          { uses: 'docker://alpine:Latest' }
+        ]
+      }
+    });
+
+    it('matches required entries and min-version regardless of owner/repo case', () => {
+      const result = validatePipelineContract(wf, {
+        required: [{ uses: 'org/security-scan', 'min-version': 'v1.2.0' }]
+      });
+      expect(result.errors).toEqual([]);
+    });
+
+    it('matches forbidden entries regardless of owner/repo case', () => {
+      const result = validatePipelineContract(wf, {
+        forbidden: [{ uses: 'org/Legacy-Deploy/sub/Path' }]
+      });
+      expect(result.valid).toBe(false);
+      expect(result.errors[0].path).toBe('jobs.build.steps[1]');
+    });
+
+    it('keeps the path inside the repo, local paths and docker refs case-sensitive', () => {
+      const result = validatePipelineContract(wf, {
+        forbidden: [
+          { uses: 'org/legacy-deploy/sub/path' },
+          { uses: './.github/actions/local' },
+          { uses: 'docker://alpine:latest' }
+        ]
+      });
+      expect(result.errors).toEqual([]);
+    });
+  });
 });
