@@ -6,7 +6,7 @@ import * as path from 'path';
  * Convert a glob (`**`, `*`, `?`) to a regex over `/`-separated paths
  * relative to the workspace.
  */
-function globToRegExp(pattern: string): RegExp {
+export function globToRegExp(pattern: string): RegExp {
   let source = '';
   for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i];

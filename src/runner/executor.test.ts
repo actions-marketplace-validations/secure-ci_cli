@@ -3633,4 +3633,238 @@ jobs:
       }
     });
   });
+
+  it('keeps github.run_id the same across jobs and called workflows', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-runid-'));
+    fs.writeFileSync(
+      path.join(dir, 'called.yml'),
+      'name: C\non: workflow_call\njobs:\n  c:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo "id=${{ github.run_id }}"\n'
+    );
+    const file = path.join(dir, 'wf.yml');
+    fs.writeFileSync(
+      file,
+      [
+        'name: R',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: sleep 0.05; echo "id=${{ github.run_id }}"',
+        '  b:',
+        '    needs: a',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: echo "id=$GITHUB_RUN_ID"',
+        '  c:',
+        '    needs: b',
+        '    uses: ./called.yml'
+      ].join('\n')
+    );
+    try {
+      const result = await executeWorkflow(file);
+      const ids = result.jobs.map(
+        (j) => j.steps[0].output?.match(/id=(\d+)/)?.[1]
+      );
+      expect(ids[0]).toBeTruthy();
+      expect(new Set(ids).size).toBe(1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  describe('artifacts and actions/cache (#13)', () => {
+    let work: string;
+    let home: string;
+    let cwdSpy: ReturnType<typeof vi.spyOn>;
+    let savedHome: string | undefined;
+
+    beforeEach(() => {
+      work = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-art-work-'));
+      home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-art-home-'));
+      cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(work);
+      savedHome = process.env.HOME;
+      process.env.HOME = home;
+      process.env.GITHUB_REPOSITORY = 'octo/proj';
+    });
+    afterEach(() => {
+      cwdSpy.mockRestore();
+      process.env.HOME = savedHome;
+      delete process.env.GITHUB_REPOSITORY;
+      fs.rmSync(work, { recursive: true, force: true });
+      fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    function wf(jobs: string): string {
+      const file = path.join(work, 'wf.yml');
+      fs.writeFileSync(file, `name: A\non: push\njobs:\n${jobs}`);
+      return file;
+    }
+
+    const outputOf = (r: Awaited<ReturnType<typeof executeWorkflow>>) =>
+      r.jobs.flatMap((j) => j.steps.map((s) => s.output ?? '')).join('\n');
+
+    it('uploads in one job and downloads in another, keeping structure', async () => {
+      const result = await executeWorkflow(
+        wf(`
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: mkdir -p dist/sub dist/.hidden && echo a > dist/a.txt && echo b > dist/sub/b.txt && echo h > dist/.hidden/h.txt && echo x > dist/skip.log
+      - id: up
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: |
+            dist/**/*.txt
+            !dist/skip.log
+  use:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - id: down
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: out
+      - run: cat out/a.txt out/sub/b.txt && test ! -e out/.hidden && echo "path=\${{ steps.down.outputs.download-path }}"
+`)
+      );
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[1].outputs?.['artifact-id']).toMatch(/^\d+$/);
+      expect(outputOf(result)).toContain(`path=${path.join(work, 'out')}`);
+    });
+
+    it('downloads every artifact into <path>/<name>, or merged', async () => {
+      const result = await executeWorkflow(
+        wf(`
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo one > one.txt && echo two > two.txt
+      - uses: actions/upload-artifact@v4
+        with: { name: first, path: one.txt }
+      - uses: actions/upload-artifact@v4
+        with: { name: second, path: two.txt }
+      - uses: actions/download-artifact@v4
+        with: { path: all }
+      - uses: actions/download-artifact@v4
+        with: { path: merged, pattern: '*', merge-multiple: true }
+      - run: cat all/first/one.txt all/second/two.txt merged/one.txt merged/two.txt
+`)
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('applies if-no-files-found and refuses to overwrite by default', async () => {
+      const missing = await executeWorkflow(
+        wf(`
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: { name: x, path: nothing/, if-no-files-found: error }
+`)
+      );
+      expect(missing.success).toBe(false);
+
+      const twice = await executeWorkflow(
+        wf(`
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 1 > f.txt
+      - uses: actions/upload-artifact@v4
+        with: { name: x, path: f.txt }
+      - uses: actions/upload-artifact@v4
+        with: { name: x, path: f.txt }
+      - uses: actions/upload-artifact@v4
+        with: { name: x, path: f.txt, overwrite: true }
+`)
+      );
+      expect(twice.jobs[0].steps.map((s) => s.success)).toEqual([
+        true,
+        true,
+        false,
+        true
+      ]);
+    });
+
+    const cacheJob = (key: string, extra = '') => `
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          key: ${key}
+          path: |
+            deps
+            ~/.tool-cache
+          restore-keys: |
+            deps-
+${extra}
+      - run: echo "hit=[\${{ steps.cache.outputs.cache-hit }}] matched=[\${{ steps.cache.outputs.cache-matched-key }}]"
+      - run: mkdir -p deps ~/.tool-cache && echo "\${{ github.run_id }}" > deps/stamp && echo t > ~/.tool-cache/t
+`;
+
+    it('saves at job end and restores by exact key, then by restore-keys', async () => {
+      const first = await executeWorkflow(wf(cacheJob('deps-1')));
+      expect(first.success).toBe(true);
+      expect(outputOf(first)).toContain('hit=[] matched=[]');
+
+      fs.rmSync(path.join(work, 'deps'), { recursive: true });
+      fs.rmSync(path.join(home, '.tool-cache'), { recursive: true });
+      const exact = await executeWorkflow(
+        wf(cacheJob('deps-1').replace(/ +- run: mkdir[^\n]*\n/, ''))
+      );
+      expect(outputOf(exact)).toContain('hit=[true] matched=[deps-1]');
+      expect(fs.existsSync(path.join(work, 'deps', 'stamp'))).toBe(true);
+      expect(fs.existsSync(path.join(home, '.tool-cache', 't'))).toBe(true);
+
+      const partial = await executeWorkflow(wf(cacheJob('deps-2')));
+      expect(outputOf(partial)).toContain('hit=[false] matched=[deps-1]');
+
+      const again = await executeWorkflow(wf(cacheJob('deps-2')));
+      expect(outputOf(again)).toContain('hit=[true] matched=[deps-2]');
+    });
+
+    it('supports lookup-only, fail-on-cache-miss, and cache/restore + cache/save', async () => {
+      const miss = await executeWorkflow(
+        wf(cacheJob('other-1', '          fail-on-cache-miss: true'))
+      );
+      expect(miss.success).toBe(false);
+
+      const saved = await executeWorkflow(
+        wf(`
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: mkdir -p deps && echo s > deps/s
+      - uses: actions/cache/save@v4
+        with: { key: split-1, path: deps }
+`)
+      );
+      expect(saved.success).toBe(true);
+      fs.rmSync(path.join(work, 'deps'), { recursive: true });
+
+      const lookup = await executeWorkflow(
+        wf(`
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - id: c
+        uses: actions/cache/restore@v4
+        with: { key: split-1, path: deps, lookup-only: true }
+      - run: echo "hit=\${{ steps.c.outputs.cache-hit }}" && test ! -e deps/s
+      - id: r
+        uses: actions/cache/restore@v4
+        with: { key: split-1, path: deps }
+      - run: cat deps/s
+`)
+      );
+      expect(lookup.success).toBe(true);
+      expect(outputOf(lookup)).toContain('hit=true');
+    });
+  });
 });

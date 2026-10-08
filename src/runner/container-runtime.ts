@@ -146,6 +146,13 @@ export interface ContainerRuntime {
   removeNetwork(name: string): Promise<void>;
   /** Synchronous `removeNetwork`, for signal/exit handlers. */
   removeNetworkSync(name: string): void;
+  /** `cp` between a container and the host; false if it failed. */
+  copyFrom(
+    id: string,
+    containerPath: string,
+    hostPath: string
+  ): Promise<boolean>;
+  copyTo(id: string, hostPath: string, containerPath: string): Promise<boolean>;
   /** Health status: healthy, unhealthy, starting, or none (no check). */
   health(id: string): Promise<string>;
   /** Published ports: container port -> host port. */
@@ -370,6 +377,24 @@ class CliContainerRuntime implements ContainerRuntime {
     } catch {
       // Best effort: the network may already be gone
     }
+  }
+
+  async copyFrom(
+    id: string,
+    containerPath: string,
+    hostPath: string
+  ): Promise<boolean> {
+    return (await this.runCli(['cp', `${id}:${containerPath}`, hostPath]))
+      .success;
+  }
+
+  async copyTo(
+    id: string,
+    hostPath: string,
+    containerPath: string
+  ): Promise<boolean> {
+    return (await this.runCli(['cp', hostPath, `${id}:${containerPath}`]))
+      .success;
   }
 
   async health(id: string): Promise<string> {

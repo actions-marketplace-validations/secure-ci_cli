@@ -245,6 +245,15 @@ Sidecar containers such as databases and caches start before the job's steps and
 - `image`, `env`, `ports`, `volumes` and `options` (e.g. `--health-cmd ...`) are supported. Steps start once every service with a health check reports healthy; an unhealthy service fails the job. `credentials` are ignored (log in with `docker login`).
 - `${{ job.services.<id>.ports['5432'] }}` is the host port a container port is published on; `job.services.<id>.id` and `.network` are also set.
 
+### Artifacts and Caching (`actions/upload-artifact`, `download-artifact`, `cache`)
+
+These actions normally talk to GitHub's artifact and cache services, so the CLI runs local equivalents with the same inputs, outputs and path rules. Nothing is downloaded or sent anywhere:
+
+- **`actions/upload-artifact`** stores files in `~/.secureci/artifacts/<run-id>/<name>/`, which is kept for 7 days. Path rules are the action's own: multi-line paths, globs, `!` exclusions, structure relative to the paths' common ancestor, and hidden files skipped unless `include-hidden-files: true`. `if-no-files-found` and `overwrite` (default `false`) are honoured. Outputs: `artifact-id`, `artifact-digest`.
+- **`actions/download-artifact`** retrieves artifacts uploaded earlier in the same run (`github.run_id` is shared by all jobs and called workflows): `name` goes into `path`; without it, every artifact (or those matching `pattern`) goes into `path/<name>`, or straight into `path` with `merge-multiple: true`. Output: `download-path`.
+- **`actions/cache`** restores the cache for `key` from `~/.secureci/step-cache/<owner_repo>/`, else the newest match for each `restore-keys` prefix, and saves it at the end of a successful job when there was no exact hit. Entries are immutable and versioned by `path`, as on GitHub. Outputs: `cache-hit` (`true` for an exact match, `false` for a `restore-keys` match, empty on a miss), `cache-primary-key`, `cache-matched-key`. `lookup-only` and `fail-on-cache-miss` are supported, as are `actions/cache/restore` and `actions/cache/save`.
+- In container mode, workspace paths are read and written directly. Other paths, such as `~/.npm` inside the job container, are copied in and out of the container.
+
 ### Matrix Builds (`strategy.matrix`)
 
 A job runs once per matrix combination (sequentially), with `matrix.*` and `strategy.*` in its context and the combination in its name, e.g. `test (node: 20, os: linux)`:

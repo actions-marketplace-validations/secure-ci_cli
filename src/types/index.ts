@@ -207,6 +207,8 @@ export interface RunOptions {
   localCheckout?: boolean;
   /** Use only cached remote actions; never download. */
   offline?: boolean;
+  /** `github.run_id`, shared by every job and called workflow of a run. */
+  runId?: string;
 }
 
 export interface StepResult {

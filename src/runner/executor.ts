@@ -18,6 +18,16 @@ import * as crypto from 'crypto';
 import { fetchAction, fetchRepoFile } from './action-fetcher';
 import { repositoryRoot } from '../utils/repository';
 import {
+  builtinActionFor,
+  containerFileSystem,
+  downloadArtifact,
+  hostFileSystem,
+  runCacheAction,
+  StepFileSystem,
+  uploadArtifact,
+  BuiltinAction
+} from './builtin-actions';
+import {
   createContext,
   evaluateCondition,
   resolveExpressionValue,
@@ -121,7 +131,8 @@ function buildGithubContext(
   jobId: string,
   cwd: string,
   event: EventInfo = { name: 'workflow_dispatch', payload: {} },
-  token = ''
+  token = '',
+  runId = ''
 ): GithubContext {
   const env = process.env;
   const sha = env.GITHUB_SHA || tryGit('git rev-parse HEAD', cwd) || '';
@@ -155,7 +166,7 @@ function buildGithubContext(
       env.GITHUB_REPOSITORY_OWNER ||
       payloadString(event.payload, 'repository', 'owner', 'login') ||
       (repository.includes('/') ? repository.split('/')[0] : ''),
-    run_id: env.GITHUB_RUN_ID || String(Date.now()),
+    run_id: runId || env.GITHUB_RUN_ID || String(Date.now()),
     run_number: env.GITHUB_RUN_NUMBER || '1',
     run_attempt: env.GITHUB_RUN_ATTEMPT || '1',
     workspace: env.GITHUB_WORKSPACE || cwd,
@@ -493,6 +504,11 @@ export async function executeWorkflow(
   const startTime = Date.now();
 
   logger.registerSecrets(options.secrets);
+  // One run id for every job and called workflow of this run.
+  options = {
+    ...options,
+    runId: options.runId || process.env.GITHUB_RUN_ID || String(Date.now())
+  };
   const runDir = createRunDir();
 
   try {
@@ -531,7 +547,8 @@ export async function executeWorkflow(
           jobId,
           process.cwd(),
           event,
-          options.secrets?.GITHUB_TOKEN
+          options.secrets?.GITHUB_TOKEN,
+          options.runId
         );
 
         // `needs` results feed the job's `if:` (implicitly `success()`,
@@ -856,7 +873,8 @@ export async function executeWorkflow(
           'action',
           process.cwd(),
           undefined,
-          options.secrets?.GITHUB_TOKEN
+          options.secrets?.GITHUB_TOKEN,
+          options.runId
         );
         const runtime = createJobRuntime(github, runDir);
         const actionCtx = createContext(
@@ -978,6 +996,8 @@ interface JobContainerHandle {
   exchangeDir: string;
   /** Whether the image has bash (decides the default shell). */
   bash: boolean;
+  /** $HOME inside the container, probed once. */
+  home?: string;
   /** The image's `node` and base PATH, probed once; null if no node. */
   node?: { path: string; basePath: string } | null;
   /** Host action directory -> its copy's path inside the container. */
@@ -2237,6 +2257,7 @@ function warnUnsandboxedActions(
         step.uses &&
         !isLocalActionRef(step.uses) &&
         !step.uses.startsWith('docker://') &&
+        !builtinActionFor(step.uses) &&
         !(
           options.localCheckout !== false &&
           isLocalCheckout(step.uses, step.with, ctx)
@@ -2247,6 +2268,97 @@ function warnUnsandboxedActions(
   logger.warn(
     `Running remote actions on the host without container isolation: ${[...new Set(remote)].join(', ')}. They run with your user's privileges; use a container runtime (--container-runtime docker|podman|containerd) to sandbox them.`
   );
+}
+
+/** The file system a step sees: the host, or the job container. */
+async function stepFileSystem(runtime: JobRuntime): Promise<StepFileSystem> {
+  const container = runtime.container;
+  if (!container) return hostFileSystem(process.cwd());
+  if (container.home === undefined) {
+    const probe = await container.runtime.exec(container.id, {
+      command: 'printf %s "$HOME"'
+    });
+    container.home = (probe.success && probe.stdout.trim()) || '/root';
+  }
+  return containerFileSystem({
+    workspace: CONTAINER_WORKDIR,
+    hostWorkspace: process.cwd(),
+    home: container.home,
+    copyFrom: (from, to) => container.runtime.copyFrom(container.id, from, to),
+    copyTo: (from, to) => container.runtime.copyTo(container.id, from, to),
+    mkdir: async (dir) => {
+      await container.runtime.exec(container.id, {
+        args: ['mkdir', '-p', dir]
+      });
+    }
+  });
+}
+
+/**
+ * Run actions/upload-artifact, download-artifact or cache locally (see
+ * builtin-actions.ts); actions/cache's save is queued as a post step.
+ */
+async function runBuiltinAction(
+  kind: BuiltinAction,
+  step: Step,
+  ctx: ExpressionContext,
+  options: RunOptions,
+  runtime: JobRuntime,
+  startTime: number
+): Promise<StepResult> {
+  const inputs = substituteRecord(step.with, ctx);
+  const runId = String(ctx.github.run_id ?? options.runId ?? 'local');
+  const repository = String(ctx.github.repository ?? '');
+  const fsys = await stepFileSystem(runtime);
+  try {
+    const result =
+      kind === 'upload-artifact'
+        ? await uploadArtifact(fsys, inputs, runId)
+        : kind === 'download-artifact'
+          ? await downloadArtifact(fsys, inputs, runId)
+          : await runCacheAction(kind, fsys, inputs, repository);
+
+    if (result.warning) logger.warn(result.warning);
+    if (result.output) logger.info(result.output);
+    if (!result.success) logger.error(result.error ?? 'failed');
+
+    const post = result.post;
+    if (post) {
+      const postStep: Step = { name: `Post ${step.name || step.uses}` };
+      runtime.postSteps.push({
+        step: postStep,
+        condition: 'success()',
+        run: async () => {
+          const postFs = await stepFileSystem(runtime);
+          try {
+            const saved = await post(postFs);
+            if (saved.warning) logger.warn(saved.warning);
+            if (saved.output) logger.info(saved.output);
+            return {
+              step: postStep,
+              success: saved.success,
+              output: saved.output,
+              error: saved.error,
+              duration: 0
+            };
+          } finally {
+            postFs.cleanup();
+          }
+        }
+      });
+    }
+
+    return {
+      step,
+      success: result.success,
+      output: result.output,
+      outputs: result.outputs,
+      error: result.error,
+      duration: Date.now() - startTime
+    };
+  } finally {
+    fsys.cleanup();
+  }
 }
 
 /** Marks a `path:` copy made by localCheckout, so it may be replaced. */
@@ -2409,7 +2521,8 @@ async function runPreSteps(
     if (
       !step.uses ||
       isLocalActionRef(step.uses) ||
-      step.uses.startsWith('docker://')
+      step.uses.startsWith('docker://') ||
+      builtinActionFor(step.uses)
     ) {
       continue;
     }
@@ -2545,6 +2658,18 @@ async function executeAction(
       isLocalCheckout(step.uses, step.with, callerCtx)
     ) {
       return localCheckout(step, callerCtx, runtime, startTime);
+    }
+
+    const builtin = builtinActionFor(step.uses);
+    if (builtin) {
+      return await runBuiltinAction(
+        builtin,
+        step,
+        callerCtx,
+        options,
+        runtime,
+        startTime
+      );
     }
 
     const actionPath = isLocalActionRef(step.uses)
