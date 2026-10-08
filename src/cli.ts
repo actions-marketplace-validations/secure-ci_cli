@@ -67,8 +67,8 @@ program
     'Pass input values (can be used multiple times)'
   )
   .option(
-    '-s, --secret <key=value...>',
-    'Pass secret values (can be used multiple times)'
+    '-s, --secret <key[=value]...>',
+    'Pass secret values (can be used multiple times); a bare NAME reads $NAME from the environment, keeping the value out of the process list'
   )
   .option(
     '--var <key=value...>',
@@ -127,7 +127,8 @@ program
     try {
       const inputs = parseKeyValuePairs(options.input, '--input');
       const secrets = parseKeyValuePairs(options.secret, '--secret', {
-        redact: true
+        redact: true,
+        fromEnv: process.env
       });
       const vars = parseKeyValuePairs(options.var, '--var');
 

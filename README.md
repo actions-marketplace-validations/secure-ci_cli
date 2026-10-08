@@ -46,7 +46,9 @@ secureci run .github/workflows/ci.yml --dry-run
 # Execute a workflow
 secureci run .github/workflows/build.yml --input key=value
 
-# Run with secrets
+# Run with secrets (a bare NAME reads $NAME from your environment, which
+# keeps the value out of the process list and shell history)
+secureci run .github/workflows/deploy.yml --secret TOKEN
 secureci run .github/workflows/deploy.yml --secret TOKEN=xxx
 
 # Validate workflow syntax
@@ -227,6 +229,8 @@ Steps receive the runner's default variables, derived from the local `github` co
 ### Secret Masking
 
 Any value passed via `--secret`, or registered by a step via `::add-mask::`, is automatically masked (`***`) wherever it appears in log output.
+
+In container mode, env values (secrets included) never appear in the container client's command line: they're passed in a private env file (mode `0600`, deleted as soon as the client exits), or, for values an env file can't carry verbatim (multi-line, quote-leading or whitespace-padded), by name with the value in the client's environment. Prefer `--secret NAME` over `--secret NAME=value` so the value isn't in the `secureci` command line either.
 
 ## Development
 

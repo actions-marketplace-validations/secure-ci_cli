@@ -57,4 +57,26 @@ describe('parseKeyValuePairs', () => {
       );
     }
   });
+
+  describe('fromEnv', () => {
+    it('reads a bare NAME from the given environment', () => {
+      expect(
+        parseKeyValuePairs(['TOKEN', 'B=2'], '--secret', {
+          fromEnv: { TOKEN: 'from-env' }
+        })
+      ).toEqual({ TOKEN: 'from-env', B: '2' });
+    });
+
+    it('errors when the variable is not set, without showing values', () => {
+      expect(() =>
+        parseKeyValuePairs(['MISSING'], '--secret', { fromEnv: {} })
+      ).toThrow('--secret MISSING: environment variable MISSING is not set');
+    });
+
+    it('still rejects a bare NAME when fromEnv is not enabled', () => {
+      expect(() => parseKeyValuePairs(['TOKEN'], '--input')).toThrow(
+        'expected key=value'
+      );
+    });
+  });
 });

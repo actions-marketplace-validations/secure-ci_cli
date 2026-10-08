@@ -185,12 +185,14 @@ describe('secureci commands', () => {
 
   function run(
     args: string[],
-    cwd = root
+    cwd = root,
+    env: NodeJS.ProcessEnv = process.env
   ): { status: number; stdout: string; stderr: string } {
     try {
       const stdout = execFileSync('node', [cliPath, ...args], {
         encoding: 'utf-8',
         cwd,
+        env,
         stdio: ['ignore', 'pipe', 'pipe']
       });
       return { status: 0, stdout, stderr: '' };
@@ -216,6 +218,20 @@ describe('secureci commands', () => {
         '    runs-on: ubuntu-latest',
         '    steps:',
         '      - run: echo "hello ${{ inputs.who }}"'
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(tempDir, 'secret.yml'),
+      [
+        'name: Secret',
+        'on: push',
+        'jobs:',
+        '  check:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: test "$T" = "from-env" && echo secret matched',
+        '        env:',
+        '          T: ${{ secrets.MY_TOKEN }}'
       ].join('\n')
     );
   }, 60_000);
@@ -261,6 +277,28 @@ describe('secureci commands', () => {
     );
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('hello world');
+  });
+
+  it('reads a bare --secret NAME from the environment', () => {
+    const args = [
+      'run',
+      'secret.yml',
+      '--container-runtime',
+      'none',
+      '--secret',
+      'MY_TOKEN'
+    ];
+    const ok = run(args, tempDir, { ...process.env, MY_TOKEN: 'from-env' });
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toContain('secret matched');
+
+    const env = { ...process.env };
+    delete env.MY_TOKEN;
+    const missing = run(args, tempDir, env);
+    expect(missing.status).not.toBe(0);
+    expect(missing.stdout + missing.stderr).toContain(
+      'environment variable MY_TOKEN is not set'
+    );
   });
 
   it('dry-runs a workflow with secureci run --dry-run', () => {

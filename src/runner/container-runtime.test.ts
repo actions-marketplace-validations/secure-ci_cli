@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import * as fs from 'fs';
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 
 const execMock = vi.fn();
@@ -14,7 +15,8 @@ vi.mock('child_process', () => ({
 
 import {
   resolveContainerRuntime,
-  _resetRuntimeCacheForTests
+  _resetRuntimeCacheForTests,
+  type ContainerRuntime
 } from './container-runtime';
 
 function fakeChildProcess() {
@@ -27,6 +29,37 @@ function fakeChildProcess() {
   emitter.stderr = new EventEmitter();
   emitter.kill = vi.fn();
   return emitter;
+}
+
+interface SpawnCapture {
+  args: string[];
+  env: NodeJS.ProcessEnv | undefined;
+  envFilePath?: string;
+  envFile?: string;
+  envFileMode?: number;
+}
+
+/**
+ * Return `child` from spawn and record argv, the client env and the env
+ * file's contents/mode at spawn time (the file is deleted once the client
+ * exits, so it must be read then).
+ */
+function captureSpawn(child: ReturnType<typeof fakeChildProcess>) {
+  const captures: SpawnCapture[] = [];
+  spawnMock.mockImplementation(
+    (_bin: string, args: string[], opts?: { env?: NodeJS.ProcessEnv }) => {
+      const capture: SpawnCapture = { args, env: opts?.env };
+      const index = args.indexOf('--env-file');
+      if (index !== -1) {
+        capture.envFilePath = args[index + 1];
+        capture.envFile = fs.readFileSync(capture.envFilePath, 'utf8');
+        capture.envFileMode = fs.statSync(capture.envFilePath).mode & 0o777;
+      }
+      captures.push(capture);
+      return child;
+    }
+  );
+  return captures;
 }
 
 describe('container-runtime', () => {
@@ -119,7 +152,7 @@ describe('container-runtime', () => {
     it('runs the configured binary with expected args and resolves on success', async () => {
       execMock.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
       const child = fakeChildProcess();
-      spawnMock.mockReturnValue(child);
+      const captures = captureSpawn(child);
 
       const runtime = await resolveContainerRuntime('docker');
       const resultPromise = runtime?.execute({
@@ -147,14 +180,15 @@ describe('container-runtime', () => {
           '/host/exchange:/secureci-exchange',
           '--network',
           'none',
-          '-e',
-          'FOO=bar',
+          '--env-file',
           'ubuntu:22.04',
           'sh',
           '-c',
           'echo hi'
-        ])
+        ]),
+        expect.anything()
       );
+      expect(captures[0].envFile).toBe('FOO=bar\n');
       expect(result).toMatchObject({ success: true, exitCode: 0 });
       expect(result?.stdout).toBe('hi\n');
     });
@@ -210,7 +244,8 @@ describe('container-runtime', () => {
           'my-action:latest',
           '--flag',
           'value'
-        ])
+        ]),
+        expect.anything()
       );
     });
 
@@ -232,7 +267,8 @@ describe('container-runtime', () => {
 
       expect(spawnMock).toHaveBeenCalledWith(
         'nerdctl',
-        expect.arrayContaining(['run', '--rm', 'ubuntu:22.04'])
+        expect.arrayContaining(['run', '--rm', 'ubuntu:22.04']),
+        expect.anything()
       );
     });
   });
@@ -318,7 +354,7 @@ describe('container-runtime', () => {
     it('starts a long-lived container with mounts, env and an idle entrypoint', async () => {
       const runtime = await dockerRuntime();
       const child = fakeChildProcess();
-      spawnMock.mockReturnValue(child);
+      const captures = captureSpawn(child);
 
       const started = runtime.start({
         image: 'node:20',
@@ -342,12 +378,12 @@ describe('container-runtime', () => {
           '/host/exchange:/secureci-exchange',
           '--memory',
           '512m',
-          '-e',
-          'FOO=bar',
+          '--env-file',
           '--entrypoint',
           'tail'
         ])
       );
+      expect(captures[0].envFile).toBe('FOO=bar\n');
       expect(args).not.toContain('--network');
       expect(args.slice(-3)).toEqual(['node:20', '-f', '/dev/null']);
     });
@@ -393,7 +429,7 @@ describe('container-runtime', () => {
     it('execs a shell command in a running container', async () => {
       const runtime = await dockerRuntime();
       const child = fakeChildProcess();
-      spawnMock.mockReturnValue(child);
+      const captures = captureSpawn(child);
 
       const resultPromise = runtime.exec('abc123', {
         command: 'echo hi',
@@ -408,23 +444,24 @@ describe('container-runtime', () => {
         stdout: 'hi\n',
         exitCode: 0
       });
-      expect(spawnMock).toHaveBeenCalledWith('docker', [
+      expect(captures[0].args).toEqual([
         'exec',
         '-w',
         '/secureci-workspace/sub',
-        '-e',
-        'A=1',
+        '--env-file',
+        captures[0].envFilePath,
         'abc123',
         'sh',
         '-c',
         'echo hi'
       ]);
+      expect(captures[0].envFile).toBe('A=1\n');
     });
 
     it('execs argv directly (no shell) when args are given', async () => {
       const runtime = await dockerRuntime();
       const child = fakeChildProcess();
-      spawnMock.mockReturnValue(child);
+      const captures = captureSpawn(child);
 
       const resultPromise = runtime.exec('abc123', {
         args: ['/usr/local/bin/node', '/x/index.js'],
@@ -433,16 +470,17 @@ describe('container-runtime', () => {
       child.emit('close', 0);
       await resultPromise;
 
-      expect(spawnMock).toHaveBeenCalledWith('docker', [
+      expect(captures[0].args).toEqual([
         'exec',
         '-w',
         '/secureci-workspace',
-        '-e',
-        'INPUT_WHO-TO-GREET=me',
+        '--env-file',
+        captures[0].envFilePath,
         'abc123',
         '/usr/local/bin/node',
         '/x/index.js'
       ]);
+      expect(captures[0].envFile).toBe('INPUT_WHO-TO-GREET=me\n');
     });
 
     it('removes the container on stop, and synchronously on stopSync', async () => {
@@ -453,7 +491,11 @@ describe('container-runtime', () => {
       const stopped = runtime.stop('abc123');
       child.emit('close', 0);
       await stopped;
-      expect(spawnMock).toHaveBeenCalledWith('docker', ['rm', '-f', 'abc123']);
+      expect(spawnMock).toHaveBeenCalledWith(
+        'docker',
+        ['rm', '-f', 'abc123'],
+        expect.anything()
+      );
 
       runtime.stopSync('def456');
       expect(execFileSyncMock).toHaveBeenCalledWith(
@@ -461,6 +503,129 @@ describe('container-runtime', () => {
         ['rm', '-f', 'def456'],
         expect.objectContaining({ stdio: 'ignore' })
       );
+    });
+  });
+
+  describe('env values stay out of argv', () => {
+    const SECRET = 's3cr3t-value';
+
+    async function dockerRuntime() {
+      execMock.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
+      const runtime = await resolveContainerRuntime('docker');
+      if (!runtime) throw new Error('expected a runtime');
+      return runtime;
+    }
+
+    const env = {
+      TOKEN: SECRET,
+      WITH_EQUALS: 'a=b=c',
+      EMPTY: '',
+      MULTI: `line1\n${SECRET}\nline3`,
+      CRLF: 'a\r\nb',
+      QUOTED: '"starts with a quote',
+      PADDED: '  padded  ',
+      PATH: '/container/bin:/usr/bin'
+    };
+
+    const calls: Array<
+      [string, (runtime: ContainerRuntime) => Promise<unknown>]
+    > = [
+      [
+        'execute',
+        (runtime) =>
+          runtime.execute({
+            image: 'img',
+            command: 'true',
+            workingDir: '/w',
+            exchangeDir: '/x',
+            env
+          })
+      ],
+      [
+        'start',
+        (runtime) =>
+          runtime.start({
+            image: 'img',
+            workingDir: '/w',
+            exchangeDir: '/x',
+            env
+          })
+      ],
+      ['exec', (runtime) => runtime.exec('abc123', { command: 'true', env })]
+    ];
+
+    for (const [name, call] of calls) {
+      it(`${name}: passes values via a private env file or the client env, never argv`, async () => {
+        const runtime = await dockerRuntime();
+        const child = fakeChildProcess();
+        const captures = captureSpawn(child);
+
+        const pending = call(runtime);
+        child.stdout.emit('data', Buffer.from('id\n'));
+        child.emit('close', 0);
+        await pending;
+
+        const {
+          args,
+          env: clientEnv,
+          envFile,
+          envFileMode,
+          envFilePath
+        } = captures[0];
+        const argv = args.join('\n');
+        expect(argv).not.toContain(SECRET);
+        expect(argv).not.toContain('a=b=c');
+        expect(argv).not.toContain('/container/bin');
+
+        // Plain single-line values go in the env file, intact.
+        expect(envFile).toBe(
+          `TOKEN=${SECRET}\nWITH_EQUALS=a=b=c\nEMPTY=\nPATH=/container/bin:/usr/bin\n`
+        );
+        expect(envFileMode).toBe(0o600);
+        // ...which is removed once the client has exited.
+        expect(fs.existsSync(envFilePath as string)).toBe(false);
+
+        // Values an env file can't carry verbatim are passed by name, with
+        // the value in the client's environment.
+        for (const key of ['MULTI', 'CRLF', 'QUOTED', 'PADDED']) {
+          const index = args.indexOf(key);
+          expect(index).toBeGreaterThan(0);
+          expect(args[index - 1]).toBe('-e');
+          expect(clientEnv?.[key]).toBe(env[key as keyof typeof env]);
+        }
+
+        // The client's own environment is otherwise untouched: a PATH meant
+        // for the container must not change how the client binary runs.
+        expect(clientEnv?.PATH).toBe(process.env.PATH);
+      });
+    }
+
+    it('removes the env file when the client fails to spawn', async () => {
+      const runtime = await dockerRuntime();
+      const child = fakeChildProcess();
+      const captures = captureSpawn(child);
+
+      const pending = runtime.exec('abc123', {
+        command: 'true',
+        env: { A: '1' }
+      });
+      child.emit('error', new Error('spawn docker ENOENT'));
+      expect(await pending).toMatchObject({ success: false });
+      expect(captures[0].envFile).toBe('A=1\n');
+      expect(fs.existsSync(captures[0].envFilePath as string)).toBe(false);
+    });
+
+    it('omits --env-file when there is no env', async () => {
+      const runtime = await dockerRuntime();
+      const child = fakeChildProcess();
+      const captures = captureSpawn(child);
+
+      const pending = runtime.exec('abc123', { command: 'true' });
+      child.emit('close', 0);
+      await pending;
+
+      expect(captures[0].args).not.toContain('--env-file');
+      expect(captures[0].args).not.toContain('-e');
     });
   });
 });
