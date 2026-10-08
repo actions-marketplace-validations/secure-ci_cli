@@ -756,4 +756,64 @@ describe('validatePipelineContract', () => {
       expect(result.errors).toEqual([]);
     });
   });
+
+  describe('conditional steps and jobs (#14)', () => {
+    const contract = { required: [{ uses: 'org/security-scan' }] };
+
+    it('warns when a required action only runs under an if:', async () => {
+      for (const wf of [
+        workflow({
+          build: {
+            'runs-on': 'ubuntu-latest',
+            steps: [
+              { uses: 'org/security-scan@v1', if: "matrix.os == 'linux'" }
+            ]
+          }
+        }),
+        workflow({
+          build: {
+            'runs-on': 'ubuntu-latest',
+            if: "github.ref == 'refs/heads/main'",
+            steps: [{ uses: 'org/security-scan@v1' }]
+          }
+        })
+      ]) {
+        const result = await validatePipelineContract(wf, contract);
+        expect(result.valid).toBe(true);
+        expect(result.errors).toEqual([
+          expect.objectContaining({
+            path: 'required[0]',
+            severity: 'warning',
+            message: expect.stringContaining('may be skipped')
+          })
+        ]);
+      }
+    });
+
+    it('does not warn when an unconditional occurrence exists', async () => {
+      const wf = workflow({
+        build: {
+          'runs-on': 'ubuntu-latest',
+          steps: [
+            { uses: 'org/security-scan@v1', if: 'false' },
+            { uses: 'org/security-scan@v1' }
+          ]
+        }
+      });
+      expect((await validatePipelineContract(wf, contract)).errors).toEqual([]);
+    });
+
+    it('still errors for a forbidden action under an if:', async () => {
+      const wf = workflow({
+        build: {
+          'runs-on': 'ubuntu-latest',
+          steps: [{ uses: 'org/legacy@v1', if: 'false' }]
+        }
+      });
+      const result = await validatePipelineContract(wf, {
+        forbidden: [{ uses: 'org/legacy' }]
+      });
+      expect(result.valid).toBe(false);
+    });
+  });
 });

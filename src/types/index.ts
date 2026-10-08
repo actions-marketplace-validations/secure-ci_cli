@@ -37,6 +37,8 @@ export interface Job {
   outputs?: Record<string, string>;
   strategy?: JobStrategy;
   container?: string | JobContainer;
+  /** Let the job (or a matrix combination) fail without failing the run. */
+  'continue-on-error'?: boolean | string;
 }
 
 /** `jobs.<id>.container`: the image (and env) the job's steps run in. */
@@ -50,7 +52,8 @@ export interface JobContainer {
 }
 
 export interface JobStrategy {
-  matrix?: Record<string, unknown>;
+  /** Axes plus include/exclude, or an expression producing them. */
+  matrix?: Record<string, unknown> | string;
   'fail-fast'?: boolean;
   'max-parallel'?: number;
 }
@@ -209,6 +212,8 @@ export interface JobResult {
   steps: StepResult[];
   /** Evaluated `jobs.<id>.outputs`. */
   outputs?: Record<string, string>;
+  /** Failed, but allowed to by job-level `continue-on-error`. */
+  continueOnError?: boolean;
   duration: number;
 }
 

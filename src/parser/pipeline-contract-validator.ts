@@ -32,6 +32,8 @@ interface UsageEntry {
   path: string;
   name: string;
   version?: string;
+  /** The step, or a job/step enclosing it, has an `if:` and may not run. */
+  conditional: boolean;
 }
 
 interface JobNode {
@@ -105,6 +107,13 @@ export async function validatePipelineContract(
     const path = `required[${idx}]`;
     const name = normalizeActionName(entry.uses);
     const candidates = sequence.filter((u) => u.name === name);
+    if (candidates.length > 0 && candidates.every((c) => c.conditional)) {
+      errors.push({
+        path,
+        message: `Required action "${entry.uses}" only runs under an if: condition (on its step or job), so it may be skipped`,
+        severity: 'warning'
+      });
+    }
 
     if (candidates.length === 0) {
       errors.push({
@@ -318,9 +327,16 @@ async function buildGraph(
     node: string,
     index: number,
     at: string,
-    uses: string
+    uses: string,
+    conditional: boolean
   ): void => {
-    graph.sequence.push({ node, index, path: at, ...splitActionRef(uses) });
+    graph.sequence.push({
+      node,
+      index,
+      path: at,
+      conditional,
+      ...splitActionRef(uses)
+    });
   };
 
   /** Flatten a job's steps (and composite action steps) into `node`. */
@@ -330,7 +346,8 @@ async function buildGraph(
     at: string,
     counter: { next: number },
     stack: string[],
-    workflowRoot: string
+    workflowRoot: string,
+    conditional: boolean
   ): Promise<void> => {
     for (const [i, step] of steps.entries()) {
       const stepPath = `${at}steps[${i}]`;
@@ -338,7 +355,8 @@ async function buildGraph(
         counter.next++;
         continue;
       }
-      addUsage(node, counter.next++, stepPath, step.uses);
+      const stepConditional = conditional || hasCondition(step.if);
+      addUsage(node, counter.next++, stepPath, step.uses, stepConditional);
       const file = await resolveRef(
         step.uses,
         'action',
@@ -354,7 +372,8 @@ async function buildGraph(
           `${stepPath} > ${step.uses} > `,
           counter,
           [...stack, file],
-          workflowRoot
+          workflowRoot,
+          stepConditional
         );
       }
     }
@@ -372,7 +391,8 @@ async function buildGraph(
     labelPrefix: string,
     at: string,
     after: string[],
-    stack: string[]
+    stack: string[],
+    conditional: boolean
   ): Promise<string[]> => {
     const added: string[] = [];
     // A job id -> the graph nodes standing for it (a reusable-workflow call
@@ -393,10 +413,11 @@ async function buildGraph(
       });
       added.push(node);
       const jobPath = `${at}jobs.${jobId}`;
+      const jobConditional = conditional || hasCondition(job.if);
 
       if (job.uses) {
         // The call itself is a one-step "job" its called jobs run after.
-        addUsage(node, 0, jobPath, job.uses);
+        addUsage(node, 0, jobPath, job.uses, jobConditional);
         (graph.nodes.get(node) as JobNode).length = 1;
         const ids = [node];
         const file = await resolveRef(
@@ -416,7 +437,8 @@ async function buildGraph(
                 `${labelPrefix}${jobId} > ${job.uses} > `,
                 `${jobPath} > ${job.uses} > `,
                 [...needs, node],
-                [...stack, file]
+                [...stack, file],
+                jobConditional
               ))
             );
           }
@@ -434,7 +456,8 @@ async function buildGraph(
         `${jobPath}.`,
         counter,
         stack,
-        workflowRoot
+        workflowRoot,
+        jobConditional
       );
       (graph.nodes.get(node) as JobNode).length = counter.next;
     }
@@ -448,9 +471,25 @@ async function buildGraph(
     '',
     '',
     [],
-    [path.resolve(parsed.path)]
+    [path.resolve(parsed.path)],
+    false
   );
   return graph;
+}
+
+/**
+ * Whether an `if:` can skip the step/job: anything but a missing value,
+ * `true`, `success()` (the default) or `always()`.
+ */
+function hasCondition(condition: unknown): boolean {
+  if (condition === undefined || condition === null || condition === true) {
+    return false;
+  }
+  const text = String(condition)
+    .trim()
+    .replace(/^\$\{\{([\s\S]*)\}\}$/, '$1')
+    .trim();
+  return !['', 'true', 'success()', 'always()'].includes(text);
 }
 
 function splitActionRef(uses: string): { name: string; version?: string } {

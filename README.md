@@ -180,7 +180,8 @@ If the caller's workflow calls `org/deploy` before `org/security-scan` (or uses 
 **Known limitations (v1 scope):**
 
 - Without `--contract-recurse all`, **remote** composite actions and reusable workflows are not inspected; only the reference itself is matched.
-- **`strategy.matrix` jobs** are checked once against the job's `steps:` as authored, not once per expanded matrix combination — the contract is about pipeline _structure_, not the runtime values substituted into it.
+- **`strategy.matrix` jobs** are checked once against the job's `steps:` as authored, not once per combination: `uses:` can't contain expressions, so a matrix can only change _whether_ steps run (via `if:`), not which actions they use.
+- **`if:` conditions** aren't evaluated. A required action that only appears in steps or jobs with an `if:` (other than `success()` / `always()`) is reported as a **warning** that it may be skipped; a forbidden action counts even under an `if:`.
 - **Action references** are matched as exact strings against `uses:` (minus any `@version` suffix) — this covers the common `owner/repo` or `owner/repo/path` marketplace-action form, as well as local paths (`./.github/actions/foo`, matched with no version). `docker://image` references are matched as-is (the whole string, including `docker://`) and have no version-pin concept.
 - The `owner/repo` part of an action reference is matched **case-insensitively**, as GitHub resolves it (`Org/Action` matches a contract entry for `org/action`). A path inside the repo (`owner/repo/Path`), local paths and `docker://` references (whose tags are case-sensitive) are matched exactly.
 
@@ -234,6 +235,15 @@ jobs:
     runs-on: ubuntu-latest
     steps: [...]
 ```
+
+### Matrix Builds (`strategy.matrix`)
+
+A job runs once per matrix combination (sequentially), with `matrix.*` and `strategy.*` in its context and the combination in its name, e.g. `test (node: 20, os: linux)`:
+
+- Combinations are expanded as on GitHub: the product of the axes, minus `exclude` matches (on all of an entry's keys), then `include` entries merged into every combination whose original values they don't change, or added as new combinations.
+- The matrix, or any axis, can be an expression, e.g. `matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}`.
+- `fail-fast` (default `true`) skips the remaining combinations after a failure. Job-level `continue-on-error` (e.g. `${{ matrix.experimental }}`) lets a combination fail without failing the job, its dependents or the run.
+- `max-parallel` is accepted but has no effect, since combinations run one after another.
 
 ### Reusable Workflows (`jobs.<id>.uses:`)
 

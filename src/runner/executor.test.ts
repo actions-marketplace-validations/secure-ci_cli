@@ -25,7 +25,12 @@ vi.mock('./action-fetcher', async () => {
   };
 });
 
-import { executeWorkflow, parseRepositoryFromRemote } from './executor';
+import {
+  executeWorkflow,
+  expandMatrix,
+  parseRepositoryFromRemote
+} from './executor';
+import { createContext } from './expression';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -3169,6 +3174,121 @@ jobs:
       const result = await executeWorkflow(caller);
       expect(result.success).toBe(false);
       expect(result.jobs.map((j) => j.job)).toEqual(['call']);
+    });
+  });
+
+  describe('matrix expansion (#14)', () => {
+    const ctx = createContext();
+
+    it('expands the cartesian product of the axes', () => {
+      expect(expandMatrix({ a: [1, 2], b: ['x'] }, ctx)).toEqual([
+        { a: 1, b: 'x' },
+        { a: 2, b: 'x' }
+      ]);
+      expect(expandMatrix(undefined, ctx)).toEqual([{}]);
+    });
+
+    it('removes combinations matching an exclude entry (partial match)', () => {
+      expect(
+        expandMatrix(
+          {
+            os: ['linux', 'mac'],
+            node: [18, 20],
+            exclude: [{ os: 'mac', node: 18 }, { node: 99 }]
+          },
+          ctx
+        )
+      ).toEqual([
+        { os: 'linux', node: 18 },
+        { os: 'linux', node: 20 },
+        { os: 'mac', node: 20 }
+      ]);
+    });
+
+    it("applies include like GitHub's documented example", () => {
+      expect(
+        expandMatrix(
+          {
+            fruit: ['apple', 'pear'],
+            animal: ['cat', 'dog'],
+            include: [
+              { color: 'green' },
+              { color: 'pink', animal: 'cat' },
+              { fruit: 'apple', shape: 'circle' },
+              { fruit: 'banana' },
+              { fruit: 'banana', animal: 'cat' }
+            ]
+          },
+          ctx
+        )
+      ).toEqual([
+        { fruit: 'apple', animal: 'cat', color: 'pink', shape: 'circle' },
+        { fruit: 'apple', animal: 'dog', color: 'green', shape: 'circle' },
+        { fruit: 'pear', animal: 'cat', color: 'pink' },
+        { fruit: 'pear', animal: 'dog', color: 'green' },
+        { fruit: 'banana' },
+        { fruit: 'banana', animal: 'cat' }
+      ]);
+    });
+
+    it('uses include entries as the combinations when there are no axes', () => {
+      expect(
+        expandMatrix({ include: [{ os: 'a' }, { os: 'b', x: 1 }] }, ctx)
+      ).toEqual([{ os: 'a' }, { os: 'b', x: 1 }]);
+    });
+
+    it('evaluates expressions for the whole matrix and for axis values', () => {
+      expect(
+        expandMatrix(
+          '${{ fromJSON(\'{"os":["a","b"],"include":[{"os":"c"}]}\') }}',
+          ctx
+        )
+      ).toEqual([{ os: 'a' }, { os: 'b' }, { os: 'c' }]);
+      expect(
+        expandMatrix({ os: '${{ fromJSON(\'["x","y"]\') }}' }, ctx)
+      ).toEqual([{ os: 'x' }, { os: 'y' }]);
+    });
+
+    it('honours job-level continue-on-error per combination', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-matrix-'));
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        `
+name: Matrix
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    continue-on-error: \${{ matrix.experimental }}
+    strategy:
+      matrix:
+        node: [18, 20]
+        experimental: [false]
+        include:
+          - node: 22
+            experimental: true
+    steps:
+      - run: '[ "\${{ matrix.node }}" != "22" ]'
+  after:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "after ran"
+`
+      );
+      try {
+        const result = await executeWorkflow(file);
+        expect(result.jobs.map((j) => [j.job, j.success])).toEqual([
+          ['test (node: 18, experimental: false)', true],
+          ['test (node: 20, experimental: false)', true],
+          ['test (node: 22, experimental: true)', false],
+          ['after', true]
+        ]);
+        expect(result.success).toBe(true);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 });

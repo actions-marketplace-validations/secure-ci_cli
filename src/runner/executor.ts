@@ -251,33 +251,114 @@ function loadEvent(
   return { name, payload: payload as Record<string, unknown> };
 }
 
-/**
- * Expand a job's `strategy.matrix` into the list of concrete variable
- * combinations to run the job with, via a cartesian product of each axis'
- * values. `include`/`exclude` entries are not yet supported.
- */
-function expandMatrix(
-  matrix: Record<string, unknown> | undefined
-): Array<Record<string, unknown>> {
-  if (!matrix) return [{}];
-
-  const axes = Object.entries(matrix).filter(
-    ([key]) => key !== 'include' && key !== 'exclude'
+/** Deep equality for matrix values (JSON-like data). */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  return (
+    keysA.length === keysB.length &&
+    keysA.every((key) =>
+      sameValue(
+        (a as Record<string, unknown>)[key],
+        (b as Record<string, unknown>)[key]
+      )
+    )
   );
-  if (axes.length === 0) return [{}];
+}
 
-  let combinations: Array<Record<string, unknown>> = [{}];
-  for (const [key, rawValues] of axes) {
-    const values = Array.isArray(rawValues) ? rawValues : [rawValues];
-    const next: Array<Record<string, unknown>> = [];
+/** `key: value, ...` for a matrix combination's job label. */
+function matrixLabel(values: Record<string, unknown>): string {
+  return Object.entries(values)
+    .map(
+      ([k, v]) => `${k}: ${v && typeof v === 'object' ? JSON.stringify(v) : v}`
+    )
+    .join(', ');
+}
+
+/** A boolean setting that may be an expression (`continue-on-error`). */
+function isTruthySetting(value: unknown, ctx: ExpressionContext): boolean {
+  const resolved = matrixValue(value, ctx);
+  return resolved === true || resolved === 'true';
+}
+
+/** A `${{ }}` string resolved to its value (e.g. via fromJSON), else as is. */
+function matrixValue(value: unknown, ctx: ExpressionContext): unknown {
+  if (typeof value !== 'string' || !/^\s*\$\{\{[\s\S]*\}\}\s*$/.test(value)) {
+    return value;
+  }
+  return resolveExpressionValue(value, ctx);
+}
+
+/**
+ * Expand a job's `strategy.matrix` into its combinations, as GitHub does:
+ * the cartesian product of the axes, minus combinations matching an
+ * `exclude` entry (on all of its keys), then each `include` entry is
+ * merged into every combination whose original axis values it doesn't
+ * change (values added by an earlier include may be overwritten), or
+ * added as a new combination if it fits none. The matrix, or any axis,
+ * may be an expression such as `${{ fromJSON(needs.x.outputs.m) }}`.
+ */
+export function expandMatrix(
+  rawMatrix: unknown,
+  ctx: ExpressionContext
+): Array<Record<string, unknown>> {
+  const matrix = matrixValue(rawMatrix, ctx);
+  if (!matrix || typeof matrix !== 'object' || Array.isArray(matrix)) {
+    return [{}];
+  }
+
+  const entries = (key: string): Array<Record<string, unknown>> => {
+    const list = matrixValue((matrix as Record<string, unknown>)[key], ctx);
+    return Array.isArray(list)
+      ? list.filter(
+          (e): e is Record<string, unknown> => !!e && typeof e === 'object'
+        )
+      : [];
+  };
+  const include = entries('include');
+  const exclude = entries('exclude');
+  const axes = Object.entries(matrix as Record<string, unknown>)
+    .filter(([key]) => key !== 'include' && key !== 'exclude')
+    .map(([key, raw]): [string, unknown[]] => {
+      const values = matrixValue(raw, ctx);
+      return [key, Array.isArray(values) ? values : [values]];
+    });
+  const axisKeys = new Set(axes.map(([key]) => key));
+
+  let combinations: Array<Record<string, unknown>> = axes.length ? [{}] : [];
+  for (const [key, values] of axes) {
+    combinations = combinations.flatMap((combo) =>
+      values.map((value) => ({ ...combo, [key]: value }))
+    );
+  }
+  combinations = combinations.filter(
+    (combo) =>
+      !exclude.some((entry) =>
+        Object.entries(entry).every(([key, value]) =>
+          sameValue(combo[key], value)
+        )
+      )
+  );
+
+  const added: Array<Record<string, unknown>> = [];
+  for (const entry of include) {
+    let merged = false;
     for (const combo of combinations) {
-      for (const value of values) {
-        next.push({ ...combo, [key]: value });
+      const fits = Object.entries(entry).every(
+        ([key, value]) => !axisKeys.has(key) || sameValue(combo[key], value)
+      );
+      if (fits) {
+        Object.assign(combo, entry);
+        merged = true;
       }
     }
-    combinations = next;
+    if (!merged) added.push({ ...entry });
   }
-  return combinations;
+  combinations.push(...added);
+  return combinations.length ? combinations : [{}];
 }
 
 /**
@@ -493,16 +574,14 @@ export async function executeWorkflow(
 
         // Handle reusable workflow calls (once per matrix combination)
         if (job.uses) {
-          const combinations = expandMatrix(job.strategy?.matrix);
+          const combinations = expandMatrix(job.strategy?.matrix, jobIfCtx);
           const callOutputs: Record<string, string> = {};
           let callFailed = false;
           for (const matrixValues of combinations) {
             if (callFailed && job.strategy?.['fail-fast'] !== false) break;
             const label =
               combinations.length > 1
-                ? `${jobId} (${Object.entries(matrixValues)
-                    .map(([k, v]) => `${k}: ${v}`)
-                    .join(', ')})`
+                ? `${jobId} (${matrixLabel(matrixValues)})`
                 : jobId;
             const reusableResult = await executeReusableWorkflowJob(
               label,
@@ -525,7 +604,7 @@ export async function executeWorkflow(
           continue;
         }
 
-        const matrixCombinations = expandMatrix(job.strategy?.matrix);
+        const matrixCombinations = expandMatrix(job.strategy?.matrix, jobIfCtx);
         const failFast = job.strategy?.['fail-fast'] !== false;
         let matrixFailed = false;
         const jobOutputs: Record<string, string> = {};
@@ -540,9 +619,7 @@ export async function executeWorkflow(
 
           const matrixSuffix =
             matrixCombinations.length > 1
-              ? ` (${Object.entries(matrixValues)
-                  .map(([k, v]) => `${k}: ${v}`)
-                  .join(', ')})`
+              ? ` (${matrixLabel(matrixValues)})`
               : '';
           const jobLabel = `${jobId}${matrixSuffix}`;
 
@@ -707,16 +784,21 @@ export async function executeWorkflow(
           const jobSuccess = stepResults.every(
             (s) => s.success || s.step['continue-on-error']
           );
+          // Job-level continue-on-error (often `${{ matrix.experimental }}`)
+          // lets this combination fail without failing the job or run.
+          const allowedFailure =
+            !jobSuccess && isTruthySetting(job['continue-on-error'], jobCtx);
 
           jobs.push({
             job: jobLabel,
             success: jobSuccess,
+            ...(allowedFailure ? { continueOnError: true } : {}),
             steps: stepResults,
             outputs: { ...jobOutputs },
             duration: Date.now() - jobStartTime
           });
 
-          if (!jobSuccess) {
+          if (!jobSuccess && !allowedFailure) {
             matrixFailed = true;
           }
         }
@@ -734,7 +816,7 @@ export async function executeWorkflow(
 
       const callOutputs = workflowCallOutputs(parsed.file.on);
       return {
-        success: jobs.every((j) => j.success),
+        success: jobs.every((j) => j.success || j.continueOnError),
         jobs,
         duration: Date.now() - startTime,
         ...(callOutputs
