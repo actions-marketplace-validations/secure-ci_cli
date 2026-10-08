@@ -1502,10 +1502,13 @@ jobs:
 
       expect(result.success).toBe(true);
       const outputs = result.jobs[0].steps.map((s) => s.output || '');
-      expect(outputs[0]).toMatch(/phase=pre[\s\S]*phase=main/);
-      expect(outputs[1]).toContain('phase=later-step');
-      expect(outputs[2]).toContain('phase=post state=from-main');
-      expect(result.jobs[0].steps).toHaveLength(3);
+      // pre runs at job start, as its own step (#36).
+      expect(outputs[0]).toContain('phase=pre');
+      expect(outputs[1]).toContain('phase=main');
+      expect(outputs[1]).not.toContain('phase=pre');
+      expect(outputs[2]).toContain('phase=later-step');
+      expect(outputs[3]).toContain('phase=post state=from-main');
+      expect(result.jobs[0].steps).toHaveLength(4);
     });
 
     it('runs post steps after a failure by default, and honours post-if', async () => {
@@ -3309,6 +3312,56 @@ jobs:
       );
       return file;
     }
+
+    it("runs remote JavaScript actions' pre scripts at job start (#36)", async () => {
+      const actionDir = path.join(dir, 'js');
+      fs.mkdirSync(actionDir);
+      fs.writeFileSync(
+        path.join(actionDir, 'action.yml'),
+        [
+          'name: js',
+          'description: d',
+          'inputs:',
+          '  who:',
+          '    default: nobody',
+          'runs:',
+          '  using: node20',
+          '  pre: pre.js',
+          '  main: main.js'
+        ].join('\n')
+      );
+      fs.writeFileSync(
+        path.join(actionDir, 'pre.js'),
+        `require('fs').appendFileSync(process.env.GITHUB_STATE, 'from_pre=' + process.env.INPUT_WHO + '\\n'); console.log('pre ran');`
+      );
+      fs.writeFileSync(
+        path.join(actionDir, 'main.js'),
+        'console.log("main sees " + process.env.STATE_from_pre)'
+      );
+      fetchActionMock.mockResolvedValue(path.join(actionDir, 'action.yml'));
+
+      const result = await executeWorkflow(
+        writeWorkflow(
+          [
+            '      - run: echo first step',
+            '      - uses: org/js@v1',
+            '        with:',
+            '          who: octo'
+          ].join('\n') + '\n'
+        )
+      );
+      const fetches = fetchActionMock.mock.calls.length;
+      fetchActionMock.mockReset();
+
+      expect(fetches).toBe(1);
+      expect(result.success).toBe(true);
+      const steps = result.jobs[0].steps;
+      expect(
+        steps.map((s) => s.step.name ?? s.step.run ?? s.step.uses)
+      ).toEqual(['Pre org/js@v1', 'echo first step', 'org/js@v1']);
+      expect(steps[0].output).toContain('pre ran');
+      expect(steps[2].output).toContain('main sees octo');
+    });
 
     it('collects $GITHUB_STEP_SUMMARY into the job result and prints it', async () => {
       const logSpy = vi.spyOn(console, 'log');

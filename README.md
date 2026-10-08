@@ -352,7 +352,7 @@ src/
 The SecureCI CLI supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps
-- **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with the CLI's own Node.js binary, in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` runs right before `main` (GitHub runs it at job start); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.
+- **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with the CLI's own Node.js binary, in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` of remote actions runs at job start, before any step, gated by `pre-if` (local actions, which usually come from the checkout, run it right before `main`); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.
 - **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it in its own container. Note: this is distinct from the job container that `--container-runtime` starts for `run:` steps and JavaScript actions.
 - **Local Actions** (`uses: ./path/to/action`): Resolved relative to the workspace (the current directory), using `action.yml` or `action.yaml`.
 - **`docker://` steps** (`uses: docker://alpine:3.20`): Run the image directly, with `with.args` as its arguments and `with.entrypoint` as its entrypoint.

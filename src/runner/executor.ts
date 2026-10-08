@@ -698,6 +698,14 @@ export async function executeWorkflow(
           }
 
           try {
+            await runPreSteps(
+              job.steps ?? [],
+              options,
+              runtime,
+              jobCtx,
+              stepResults
+            );
+
             // Execute each step
             for (const step of job.steps || []) {
               jobCtx.job = {
@@ -951,6 +959,10 @@ interface JobRuntime {
   defaults: { shell?: string; workingDirectory?: string };
   /** What steps wrote to `$GITHUB_STEP_SUMMARY`, in order. */
   summary: string;
+  /** Saved state of JavaScript actions whose `pre` ran at job start. */
+  preState: Map<Step, Record<string, string>>;
+  /** Remote action -> its fetched action.yml (or null), per job. */
+  actionPaths: Map<string, string | null>;
 }
 
 /** A per-job container that `run:` steps and JS actions are exec'd into. */
@@ -1241,7 +1253,9 @@ function createJobRuntime(
     path: [],
     postSteps: [],
     defaults,
-    summary: ''
+    summary: '',
+    preState: new Map(),
+    actionPaths: new Map()
   };
 }
 
@@ -1776,11 +1790,14 @@ async function executeNodeAction(
   callerCtx: ExpressionContext,
   options: RunOptions,
   runtime: JobRuntime,
-  startTime: number
+  startTime: number,
+  phase: 'pre' | 'main' = 'main'
 ): Promise<StepResult> {
-  logger.info(
-    `Executing JavaScript action: ${action.name} (${action.runs.using})`
-  );
+  if (phase === 'main') {
+    logger.info(
+      `Executing JavaScript action: ${action.name} (${action.runs.using})`
+    );
+  }
 
   const { main, pre, post } = action.runs;
   if (!main) {
@@ -1964,7 +1981,23 @@ async function executeNodeAction(
     }
   };
 
-  if (
+  // `pre` already ran at job start (see runPreSteps): continue from its state.
+  const preState = runtime.preState.get(step);
+  if (phase === 'pre' && pre) {
+    const preStep: Step = { name: `Pre ${step.name || step.uses}` };
+    const preResult = await runScript(pre);
+    runtime.preState.set(step, state);
+    return {
+      step: preStep,
+      success: preResult.success,
+      error: preResult.error,
+      output,
+      duration: Date.now() - startTime
+    };
+  }
+  if (preState) {
+    state = { ...preState };
+  } else if (
     pre &&
     evaluateCondition(action.runs['pre-if'] ?? 'always()', callerCtx)
   ) {
@@ -2198,6 +2231,97 @@ function localCheckout(
   };
 }
 
+/** fetchAction, once per remote action per job. */
+async function fetchActionOnce(
+  uses: string,
+  options: RunOptions,
+  runtime: JobRuntime
+): Promise<string | null> {
+  if (!runtime.actionPaths.has(uses)) {
+    runtime.actionPaths.set(
+      uses,
+      await fetchAction(uses, { offline: options.offline })
+    );
+  }
+  return runtime.actionPaths.get(uses) ?? null;
+}
+
+/**
+ * Run the `pre` scripts of the job's remote JavaScript actions at job
+ * start, before any step, as GitHub does (gated by `pre-if`, default
+ * `always()`). Their `main` later continues from the state they saved.
+ * Local actions usually come from the checkout, so their `pre` still runs
+ * right before their `main`. A failed `pre` fails the job.
+ */
+async function runPreSteps(
+  steps: Step[],
+  options: RunOptions,
+  runtime: JobRuntime,
+  jobCtx: ExpressionContext,
+  stepResults: StepResult[]
+): Promise<void> {
+  for (const step of steps) {
+    if (
+      !step.uses ||
+      isLocalActionRef(step.uses) ||
+      step.uses.startsWith('docker://')
+    ) {
+      continue;
+    }
+    const envCtx: ExpressionContext = {
+      ...jobCtx,
+      env: { ...jobCtx.env, ...runtime.env }
+    };
+    const stepCtx: ExpressionContext = {
+      ...envCtx,
+      env: { ...envCtx.env, ...substituteRecord(step.env, envCtx) }
+    };
+    if (
+      options.localCheckout !== false &&
+      isLocalCheckout(step.uses, step.with, stepCtx)
+    ) {
+      continue;
+    }
+
+    // Unresolvable actions are reported when their step runs.
+    const actionPath = await fetchActionOnce(step.uses, options, runtime);
+    if (!actionPath) continue;
+    let action: ActionFile;
+    try {
+      const parsed = parseFile(actionPath);
+      if (parsed.type !== 'action') continue;
+      action = parsed.file;
+    } catch {
+      continue;
+    }
+    if (
+      !/^node\d+$/.test(action.runs.using) ||
+      !action.runs.pre ||
+      !evaluateCondition(action.runs['pre-if'] ?? 'always()', stepCtx)
+    ) {
+      continue;
+    }
+
+    logger.info(`Running: Pre ${step.name || step.uses}`);
+    const result = await executeNodeAction(
+      action,
+      actionPath,
+      step,
+      resolveActionInputs(action, step.with, stepCtx),
+      stepCtx,
+      options,
+      runtime,
+      Date.now(),
+      'pre'
+    );
+    stepResults.push(result);
+    if (!result.success) {
+      jobCtx.jobFailed = true;
+      logger.error(`Step failed: Pre ${step.name || step.uses}`);
+    }
+  }
+}
+
 function isLocalActionRef(uses: string): boolean {
   return uses.startsWith('./') || uses.startsWith('../');
 }
@@ -2280,7 +2404,7 @@ async function executeAction(
 
     const actionPath = isLocalActionRef(step.uses)
       ? resolveLocalAction(step.uses)
-      : await fetchAction(step.uses, { offline: options.offline });
+      : await fetchActionOnce(step.uses, options, runtime);
 
     if (!actionPath) {
       const error = `Could not resolve action "${step.uses}"${
