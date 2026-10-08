@@ -90,6 +90,15 @@ secureci run .github/workflows/ci.yml --container-runtime=podman --container-mem
 - `services:` containers are not supported yet.
 - `--container-timeout` stops waiting for a step after the given time and fails it. The command itself keeps running inside the container until the job's container is removed.
 
+### `actions/checkout`
+
+`actions/checkout` of the repository being run (no `repository:` input, or the current repository) doesn't clone anything: the workspace already is your working copy, so later steps see your uncommitted changes, no network or token is needed, and your `.git` is never touched. The step's `ref` and `commit` outputs are `github.ref` and `github.sha`.
+
+- `path:` copies the working copy into that subdirectory (skipping the copy itself) and removes it when the job ends. A non-empty directory there that the CLI didn't create is never overwritten; the step fails instead.
+- `ref:` and other inputs (`fetch-depth`, `submodules`, ...) are ignored, with a warning for a `ref` other than the current one.
+- Checkouts of **other** repositories run the real action, which needs a token: pass one with `--secret GITHUB_TOKEN` (reads `$GITHUB_TOKEN`). It becomes both `secrets.GITHUB_TOKEN` and `github.token`. No token is picked up implicitly, since every action in the run could read it.
+- `--no-local-checkout` runs the real action for the current repository too.
+
 ### Global Configuration
 
 The SecureCI CLI reads defaults from `~/.secureci/config.yml` (created on first `secureci config set`, or editable by hand). Config keys match the CLI flag names (kebab-case, minus the leading `--`). CLI flags always take precedence over the config file.

@@ -2544,4 +2544,192 @@ jobs:
       expect(parseRepositoryFromRemote('/local/path/repo')).toBeUndefined();
     });
   });
+
+  describe('actions/checkout of the current repository', () => {
+    let workDir: string;
+    let cwdSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-checkout-'));
+      fs.mkdirSync(path.join(workDir, '.git'));
+      fs.writeFileSync(path.join(workDir, '.git', 'config'), 'original\n');
+      fs.writeFileSync(path.join(workDir, 'local.txt'), 'uncommitted change');
+      cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(workDir);
+      process.env.GITHUB_REPOSITORY = 'Octo/Proj';
+      process.env.GITHUB_SHA = 'abc123';
+      process.env.GITHUB_REF = 'refs/heads/main';
+    });
+
+    afterEach(() => {
+      cwdSpy.mockRestore();
+      delete process.env.GITHUB_REPOSITORY;
+      delete process.env.GITHUB_SHA;
+      delete process.env.GITHUB_REF;
+      fs.rmSync(workDir, { recursive: true, force: true });
+    });
+
+    function writeWorkflow(steps: string): string {
+      const file = path.join(workDir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        `name: Checkout\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n${steps}`
+      );
+      return file;
+    }
+
+    it('uses the local working copy instead of cloning', async () => {
+      const result = await executeWorkflow(
+        writeWorkflow(
+          [
+            '      - id: co',
+            '        uses: actions/checkout@v4',
+            '      - run: cat local.txt',
+            '      - run: echo "commit=${{ steps.co.outputs.commit }} ref=${{ steps.co.outputs.ref }}"'
+          ].join('\n')
+        )
+      );
+
+      expect(fetchActionMock).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      const steps = result.jobs[0].steps;
+      expect(steps[0].output).toContain('Using local working copy');
+      expect(steps[1].output).toContain('uncommitted change');
+      expect(steps[2].output).toContain('commit=abc123 ref=refs/heads/main');
+      expect(
+        fs.readFileSync(path.join(workDir, '.git', 'config'), 'utf8')
+      ).toBe('original\n');
+    });
+
+    it('treats repository: <this repo> (any case) as the local working copy', async () => {
+      const result = await executeWorkflow(
+        writeWorkflow(
+          [
+            '      - uses: actions/checkout@v4',
+            '        with:',
+            '          repository: octo/proj',
+            '      - uses: actions/checkout@v3',
+            '        with:',
+            '          repository: ${{ github.repository }}'
+          ].join('\n')
+        )
+      );
+
+      expect(fetchActionMock).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+    });
+
+    it('runs the real action for another repository', async () => {
+      fetchActionMock.mockResolvedValueOnce(null);
+      await executeWorkflow(
+        writeWorkflow(
+          [
+            '      - uses: actions/checkout@v4',
+            '        with:',
+            '          repository: octo/other'
+          ].join('\n')
+        )
+      );
+      expect(fetchActionMock).toHaveBeenCalledWith('actions/checkout@v4');
+    });
+
+    it('runs the real action when localCheckout is false', async () => {
+      fetchActionMock.mockResolvedValueOnce(null);
+      await executeWorkflow(
+        writeWorkflow('      - uses: actions/checkout@v4\n'),
+        { localCheckout: false }
+      );
+      expect(fetchActionMock).toHaveBeenCalledWith('actions/checkout@v4');
+    });
+
+    it('copies the working copy into path:, and removes it at job end', async () => {
+      const result = await executeWorkflow(
+        writeWorkflow(
+          [
+            '      - uses: actions/checkout@v4',
+            '        with:',
+            '          path: src/app',
+            '      - run: cat src/app/local.txt && test -f src/app/.git/config && test ! -e src/app/src/app',
+            '      - uses: actions/checkout@v4',
+            '        with:',
+            '          path: other',
+            '      - run: test ! -e other/src/app && echo "no nested copy"'
+          ].join('\n')
+        )
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[1].output).toContain('uncommitted change');
+      expect(result.jobs[0].steps[3].output).toContain('no nested copy');
+      expect(fs.existsSync(path.join(workDir, 'src', 'app'))).toBe(false);
+      expect(fs.existsSync(path.join(workDir, 'other'))).toBe(false);
+    });
+
+    it('replaces a copy left behind by an earlier run', async () => {
+      const stale = path.join(workDir, 'app');
+      fs.mkdirSync(stale);
+      fs.writeFileSync(path.join(stale, '.secureci-checkout'), '');
+      fs.writeFileSync(path.join(stale, 'stale.txt'), 'old');
+
+      const result = await executeWorkflow(
+        writeWorkflow(
+          [
+            '      - uses: actions/checkout@v4',
+            '        with:',
+            '          path: app',
+            '      - run: test ! -e app/stale.txt && cat app/local.txt'
+          ].join('\n')
+        )
+      );
+
+      expect(result.success).toBe(true);
+    });
+
+    it('refuses to overwrite a non-empty path: it did not create', async () => {
+      fs.mkdirSync(path.join(workDir, 'mine'));
+      fs.writeFileSync(path.join(workDir, 'mine', 'keep.txt'), 'precious');
+
+      const result = await executeWorkflow(
+        writeWorkflow(
+          [
+            '      - uses: actions/checkout@v4',
+            '        with:',
+            '          path: mine'
+          ].join('\n')
+        )
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.jobs[0].steps[0].error).toContain('already exists');
+      expect(
+        fs.readFileSync(path.join(workDir, 'mine', 'keep.txt'), 'utf8')
+      ).toBe('precious');
+    });
+
+    it('rejects a path: outside the workspace', async () => {
+      const result = await executeWorkflow(
+        writeWorkflow(
+          [
+            '      - uses: actions/checkout@v4',
+            '        with:',
+            '          path: ../escape'
+          ].join('\n')
+        )
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.jobs[0].steps[0].error).toContain('outside the workspace');
+    });
+
+    it('exposes secrets.GITHUB_TOKEN as github.token', async () => {
+      const result = await executeWorkflow(
+        writeWorkflow(
+          '      - run: test "${{ github.token }}" = "tok-1" && echo token matched\n'
+        ),
+        { secrets: { GITHUB_TOKEN: 'tok-1' } }
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain('token matched');
+    });
+  });
 });

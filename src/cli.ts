@@ -83,6 +83,10 @@ program
     'github.event_name (default: $GITHUB_EVENT_NAME, else workflow_dispatch if declared, else the first trigger)'
   )
   .option('-j, --job <name>', 'Run a specific job')
+  .option(
+    '--no-local-checkout',
+    'Run the real actions/checkout for the current repository instead of using the local working copy'
+  )
   .addOption(
     new Option(
       '--container-runtime <name>',
@@ -140,6 +144,7 @@ program
         eventPath: options.eventPath,
         eventName: options.eventName,
         job: options.job,
+        localCheckout: options.localCheckout,
         verbose: program.opts().verbose,
         containerRuntime: options.containerRuntime,
         containerImage: options.containerImage,

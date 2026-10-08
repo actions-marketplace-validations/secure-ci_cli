@@ -175,6 +175,11 @@ export interface RunOptions {
   eventPath?: string;
   /** `github.event_name`. Default: $GITHUB_EVENT_NAME, else workflow_dispatch. */
   eventName?: string;
+  /**
+   * Use the local working copy for `actions/checkout` of the current
+   * repository instead of running the action. Default: true.
+   */
+  localCheckout?: boolean;
 }
 
 export interface StepResult {
