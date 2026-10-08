@@ -235,6 +235,16 @@ jobs:
     steps: [...]
 ```
 
+### Reusable Workflows (`jobs.<id>.uses:`)
+
+A job that calls a reusable workflow runs the called workflow's jobs (in their own `needs:` order) as part of the run:
+
+- `uses: ./.github/workflows/x.yml` resolves against the repository root, like on GitHub; `uses: owner/repo/.github/workflows/x.yml@ref` is downloaded and cached like a remote action (see Remote Action Support).
+- `with:` and `secrets:` are evaluated in the calling job's context (`inputs`, `needs`, `vars`, ...); inputs fall back to their `on.workflow_call.inputs` defaults. The called workflow only sees the secrets passed to it (plus `GITHUB_TOKEN`), or all of them with `secrets: inherit`.
+- `on.workflow_call.outputs` (e.g. `value: ${{ jobs.build.outputs.version }}`) become the calling job's outputs, available as `needs.<id>.outputs.*`.
+- A workflow that can't be found or fetched fails the calling job.
+- `strategy.matrix` on a calling job runs the workflow once per combination (`matrix.*` is available in `with:`); `needs.<id>.outputs` holds the last combination's outputs, as on GitHub.
+
 ### Shells and `defaults.run`
 
 `run:` scripts are written to a file and run the way GitHub's runner does. With no `shell:`, that's `bash --noprofile --norc -eo pipefail {0}`, or `sh -e {0}` when bash isn't installed, so a step fails at its first failing command, including inside a pipeline. `shell: bash|sh|python|pwsh|powershell|cmd` map to GitHub's templates. Custom templates such as `shell: perl {0}` work too. `defaults.run.shell` and `defaults.run.working-directory` apply at workflow and job level; step-level values win, and they don't apply inside composite actions.

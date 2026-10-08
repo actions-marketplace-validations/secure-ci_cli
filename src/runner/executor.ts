@@ -15,7 +15,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { fetchAction } from './action-fetcher';
+import { fetchAction, fetchRepoFile } from './action-fetcher';
+import { repositoryRoot } from '../utils/repository';
 import {
   createContext,
   evaluateCondition,
@@ -188,6 +189,22 @@ function declaredInputDefaults(on: unknown): Record<string, string> {
   return defaults;
 }
 
+/** `on.workflow_call.outputs` as name -> value expression, if declared. */
+function workflowCallOutputs(on: unknown): Record<string, string> | undefined {
+  const outputs =
+    on && typeof on === 'object' && !Array.isArray(on)
+      ? (on as { workflow_call?: { outputs?: unknown } }).workflow_call?.outputs
+      : undefined;
+  if (!outputs || typeof outputs !== 'object') return undefined;
+  const values: Record<string, string> = {};
+  for (const [name, def] of Object.entries(
+    outputs as Record<string, { value?: unknown }>
+  )) {
+    if (def?.value !== undefined) values[name] = String(def.value);
+  }
+  return values;
+}
+
 /** The workflow's own triggers, in declaration order. */
 function workflowTriggers(on: unknown): string[] {
   if (typeof on === 'string') return [on];
@@ -312,62 +329,60 @@ export function topologicalJobOrder(
 }
 
 /**
- * Execute a reusable workflow called via `jobs.<id>.uses:`. Only local
- * workflow paths (e.g. `./.github/workflows/reusable.yml`) are supported;
- * remote references (`owner/repo/.github/workflows/x.yml@ref`) are warned
- * and skipped, matching the previous behavior for that case.
+ * Execute a reusable workflow called via `jobs.<id>.uses:`: a local path
+ * (`./.github/workflows/x.yml`, relative to the repository root) or a
+ * remote `owner/repo/path.yml@ref`. `with:` and `secrets:` are resolved in
+ * the calling job's context; the called workflow sees only those secrets
+ * (all of them with `secrets: inherit`), and its `on.workflow_call.outputs`
+ * become the calling job's outputs.
  */
 async function executeReusableWorkflowJob(
   jobId: string,
-  job: {
-    uses?: string;
-    with?: Record<string, string | number | boolean>;
-    secrets?: Record<string, string> | 'inherit';
-  },
-  workflowDir: string,
-  options: RunOptions
+  job: Job,
+  callerPath: string,
+  options: RunOptions,
+  ctx: ExpressionContext
 ): Promise<JobResult> {
   const startTime = Date.now();
   const uses = job.uses as string;
-
-  if (!uses.startsWith('.')) {
-    logger.warn(
-      `Skipping reusable workflow call: ${uses} (only local workflow paths are supported)`
-    );
-    return {
-      job: jobId,
-      success: true,
-      steps: [],
-      duration: Date.now() - startTime
-    };
-  }
-
-  const resolvedPath = path.resolve(workflowDir, uses);
-  if (!fs.existsSync(resolvedPath)) {
-    logger.error(`Reusable workflow not found: ${resolvedPath}`);
+  const failed = (error: string): JobResult => {
+    logger.error(error);
     return {
       job: jobId,
       success: false,
       steps: [],
       duration: Date.now() - startTime
     };
-  }
+  };
 
-  const inputs: Record<string, string> = {};
-  for (const [key, value] of Object.entries(job.with || {})) {
-    inputs[key] = String(value);
-  }
-
-  let secrets: Record<string, string> = {};
-  if (job.secrets === 'inherit') {
-    secrets = { ...(options.secrets || {}) };
-  } else if (job.secrets) {
-    const callerCtx = createContext({}, options.inputs, options.secrets);
-    for (const [key, value] of Object.entries(job.secrets)) {
-      const resolved = resolveExpressionValue(value, callerCtx);
-      secrets[key] = resolved === undefined ? value : String(resolved);
+  let resolvedPath: string | null;
+  if (isLocalActionRef(uses)) {
+    const candidates = [
+      path.resolve(repositoryRoot(callerPath), uses),
+      path.resolve(path.dirname(callerPath), uses)
+    ];
+    resolvedPath = candidates.find((file) => fs.existsSync(file)) ?? null;
+    if (!resolvedPath) {
+      return failed(`Reusable workflow not found: ${candidates[0]}`);
+    }
+  } else {
+    resolvedPath = await fetchRepoFile(uses, { offline: options.offline });
+    if (!resolvedPath) {
+      return failed(`Could not fetch reusable workflow ${uses}`);
     }
   }
+
+  const inputs = substituteRecord(job.with, ctx);
+  const secrets: Record<string, string> =
+    job.secrets === 'inherit'
+      ? { ...(options.secrets || {}) }
+      : {
+          // GITHUB_TOKEN is always available to called workflows.
+          ...(options.secrets?.GITHUB_TOKEN !== undefined
+            ? { GITHUB_TOKEN: options.secrets.GITHUB_TOKEN }
+            : {}),
+          ...substituteRecord(job.secrets, ctx)
+        };
 
   logger.step(`Executing reusable workflow: ${uses} (job: ${jobId})`);
 
@@ -378,12 +393,11 @@ async function executeReusableWorkflowJob(
     job: undefined
   });
 
-  const steps = subResult.jobs.flatMap((j) => j.steps);
-
   return {
     job: jobId,
     success: subResult.success,
-    steps,
+    steps: subResult.jobs.flatMap((j) => j.steps),
+    outputs: subResult.outputs ?? {},
     duration: Date.now() - startTime
   };
 }
@@ -431,7 +445,6 @@ export async function executeWorkflow(
           continue;
         }
 
-        const workflowDir = path.dirname(filePath);
         const github = buildGithubContext(
           parsed.file.name,
           jobId,
@@ -478,20 +491,35 @@ export async function executeWorkflow(
           continue;
         }
 
-        // Handle reusable workflow calls
+        // Handle reusable workflow calls (once per matrix combination)
         if (job.uses) {
-          const reusableResult = await executeReusableWorkflowJob(
-            jobId,
-            job,
-            workflowDir,
-            options
-          );
-          jobs.push(reusableResult);
+          const combinations = expandMatrix(job.strategy?.matrix);
+          const callOutputs: Record<string, string> = {};
+          let callFailed = false;
+          for (const matrixValues of combinations) {
+            if (callFailed && job.strategy?.['fail-fast'] !== false) break;
+            const label =
+              combinations.length > 1
+                ? `${jobId} (${Object.entries(matrixValues)
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(', ')})`
+                : jobId;
+            const reusableResult = await executeReusableWorkflowJob(
+              label,
+              job,
+              filePath,
+              options,
+              { ...jobIfCtx, matrix: matrixValues }
+            );
+            jobs.push(reusableResult);
+            Object.assign(callOutputs, reusableResult.outputs);
+            if (!reusableResult.success) callFailed = true;
+          }
           jobResults.set(jobId, {
-            result: reusableResult.success ? 'success' : 'failure',
-            outputs: reusableResult.outputs ?? {}
+            result: callFailed ? 'failure' : 'success',
+            outputs: callOutputs
           });
-          if (reusableResult.success) {
+          if (!callFailed) {
             logger.success(`Job ${jobId} completed successfully`);
           }
           continue;
@@ -704,10 +732,20 @@ export async function executeWorkflow(
         }
       }
 
+      const callOutputs = workflowCallOutputs(parsed.file.on);
       return {
         success: jobs.every((j) => j.success),
         jobs,
-        duration: Date.now() - startTime
+        duration: Date.now() - startTime,
+        ...(callOutputs
+          ? {
+              outputs: substituteRecord(callOutputs, {
+                ...createContext({}, options.inputs, options.secrets),
+                vars: options.vars ?? {},
+                jobs: Object.fromEntries(jobResults)
+              })
+            }
+          : {})
       };
     } else {
       // Handle action execution

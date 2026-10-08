@@ -216,4 +216,6 @@ export interface WorkflowResult {
   success: boolean;
   jobs: JobResult[];
   duration: number;
+  /** `on.workflow_call.outputs`, evaluated after the jobs ran. */
+  outputs?: Record<string, string>;
 }

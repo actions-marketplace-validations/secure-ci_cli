@@ -45,6 +45,8 @@ export interface ExpressionContext {
   runner: Record<string, unknown>;
   vars: Record<string, string>;
   strategy: Record<string, unknown>;
+  /** `jobs.<id>.result/outputs`, only for `on.workflow_call.outputs`. */
+  jobs?: Record<string, NeedsInfo>;
   jobFailed: boolean;
   /**
    * Set only when evaluating a job-level `if:`: success() then requires
@@ -303,6 +305,9 @@ function rootContext(name: string, ctx: ExpressionContext): unknown {
       return ctx.vars;
     case 'strategy':
       return ctx.strategy;
+    case 'jobs':
+      if (ctx.jobs) return ctx.jobs;
+      throw new Error(`Unrecognized named-value: 'jobs'`);
     default:
       throw new Error(`Unrecognized named-value: '${name}'`);
   }

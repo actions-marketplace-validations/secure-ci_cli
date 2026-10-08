@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const resolveContainerRuntimeMock = vi.fn();
 const fetchActionMock = vi.fn();
+const fetchRepoFileMock = vi.fn();
 
 vi.mock('./container-runtime', async () => {
   const actual = await vi.importActual('./container-runtime');
@@ -19,7 +20,8 @@ vi.mock('./action-fetcher', async () => {
     );
   return {
     ...actual,
-    fetchAction: (...args: unknown[]) => fetchActionMock(...args)
+    fetchAction: (...args: unknown[]) => fetchActionMock(...args),
+    fetchRepoFile: (...args: unknown[]) => fetchRepoFileMock(...args)
   };
 });
 
@@ -905,34 +907,6 @@ jobs:
 
       fs.unlinkSync(reusableWorkflowPath);
       fs.unlinkSync(callerWorkflowPath);
-    });
-
-    it('should warn and skip remote reusable workflow calls', async () => {
-      const tempDir = tempTestDir;
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-      }
-
-      const remoteCallerPath = path.join(tempDir, 'remote-reusable-caller.yml');
-      fs.writeFileSync(
-        remoteCallerPath,
-        `
-name: Remote Reusable Caller
-on: push
-jobs:
-  call-remote:
-    uses: some-org/some-repo/.github/workflows/reusable.yml@main
-`
-      );
-
-      const result = await executeWorkflow(remoteCallerPath);
-
-      expect(result.jobs.length).toBe(1);
-      expect(result.jobs[0].job).toBe('call-remote');
-      expect(result.jobs[0].success).toBe(true);
-      expect(result.jobs[0].steps.length).toBe(0);
-
-      fs.unlinkSync(remoteCallerPath);
     });
 
     it('should build and run a Docker-type action, substituting input expressions into args', async () => {
@@ -2979,6 +2953,222 @@ jobs:
       });
       expect(warnings()).not.toContain('without container isolation');
       fetchActionMock.mockReset();
+    });
+  });
+
+  describe('reusable workflow calls (#11)', () => {
+    let root: string;
+    let cwdSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      root = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-reuse-'));
+      fs.mkdirSync(path.join(root, '.github', 'workflows'), {
+        recursive: true
+      });
+      cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(root);
+      fetchRepoFileMock.mockReset();
+    });
+    afterEach(() => {
+      cwdSpy.mockRestore();
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    function write(rel: string, content: string): string {
+      const file = path.join(root, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content);
+      return file;
+    }
+
+    const reusable = `
+name: Reusable
+on:
+  workflow_call:
+    inputs:
+      who:
+        type: string
+        required: true
+      greeting:
+        type: string
+        default: hello
+    secrets:
+      token:
+        required: true
+    outputs:
+      message:
+        value: \${{ jobs.second.outputs.msg }}
+      first-result:
+        value: \${{ jobs.first.result }}
+jobs:
+  second:
+    needs: first
+    runs-on: ubuntu-latest
+    outputs:
+      msg: \${{ steps.m.outputs.msg }}
+    steps:
+      - id: m
+        run: echo "msg=\${{ needs.first.outputs.part }} \${{ inputs.who }}" >> "$GITHUB_OUTPUT"
+  first:
+    runs-on: ubuntu-latest
+    outputs:
+      part: \${{ steps.p.outputs.part }}
+    steps:
+      - id: p
+        run: |
+          test "\${{ secrets.token }}" = "s3cret" && echo "token ok"
+          test -z "\${{ secrets.OTHER }}" && echo "no other secret"
+          echo "part=\${{ inputs.greeting }}" >> "$GITHUB_OUTPUT"
+`;
+
+    it('runs a local reusable workflow from the repository root, with inputs, secrets and outputs', async () => {
+      write('.github/workflows/reuse.yml', reusable);
+      const caller = write(
+        '.github/workflows/caller.yml',
+        `
+name: Caller
+on: push
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      name: \${{ steps.n.outputs.name }}
+    steps:
+      - id: n
+        run: echo "name=octo" >> "$GITHUB_OUTPUT"
+  call:
+    needs: prep
+    uses: ./.github/workflows/reuse.yml
+    with:
+      who: \${{ needs.prep.outputs.name }}-\${{ inputs.suffix }}
+    secrets:
+      token: \${{ secrets.TOP }}
+  after:
+    needs: call
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "got [\${{ needs.call.outputs.message }}] [\${{ needs.call.outputs.first-result }}]"
+`
+      );
+
+      const result = await executeWorkflow(caller, {
+        inputs: { suffix: 'x' },
+        secrets: { TOP: 's3cret', OTHER: 'nope' }
+      });
+
+      expect(result.success).toBe(true);
+      const callJob = result.jobs.find((j) => j.job === 'call');
+      const outputs = callJob?.steps.map((s) => s.output).join('\n');
+      expect(outputs).toContain('token ok');
+      expect(outputs).toContain('no other secret');
+      expect(callJob?.outputs).toEqual({
+        message: 'hello octo-x',
+        'first-result': 'success'
+      });
+      expect(
+        result.jobs.find((j) => j.job === 'after')?.steps[0].output
+      ).toContain('got [hello octo-x] [success]');
+    });
+
+    it('runs a reusable workflow once per matrix combination', async () => {
+      write('.github/workflows/reuse.yml', reusable);
+      const caller = write(
+        '.github/workflows/caller.yml',
+        `
+name: Caller
+on: push
+jobs:
+  call:
+    strategy:
+      matrix:
+        who: [ann, bob]
+    uses: ./.github/workflows/reuse.yml
+    with:
+      who: \${{ matrix.who }}
+    secrets:
+      token: s3cret
+`
+      );
+      const result = await executeWorkflow(caller);
+      expect(result.success).toBe(true);
+      expect(result.jobs.map((j) => [j.job, j.outputs?.message])).toEqual([
+        ['call (who: ann)', 'hello ann'],
+        ['call (who: bob)', 'hello bob']
+      ]);
+    });
+
+    it('passes all secrets with secrets: inherit', async () => {
+      write(
+        '.github/workflows/reuse.yml',
+        reusable.replace('test -z', 'test -n')
+      );
+      const caller = write(
+        '.github/workflows/caller.yml',
+        `
+name: Caller
+on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reuse.yml
+    with:
+      who: me
+    secrets: inherit
+`
+      );
+      const result = await executeWorkflow(caller, {
+        secrets: { token: 's3cret', OTHER: 'yes' }
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('fetches a remote reusable workflow', async () => {
+      const remote = write('remote-cache/reuse.yml', reusable);
+      fetchRepoFileMock.mockResolvedValueOnce(remote);
+      const caller = write(
+        '.github/workflows/caller.yml',
+        `
+name: Caller
+on: push
+jobs:
+  call:
+    uses: org/shared/.github/workflows/reuse.yml@v1
+    with:
+      who: remote
+    secrets:
+      token: s3cret
+`
+      );
+
+      const result = await executeWorkflow(caller, { offline: true });
+
+      expect(fetchRepoFileMock).toHaveBeenCalledWith(
+        'org/shared/.github/workflows/reuse.yml@v1',
+        { offline: true }
+      );
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].outputs).toMatchObject({ message: 'hello remote' });
+    });
+
+    it('fails the calling job when the workflow cannot be fetched, and skips its dependents', async () => {
+      fetchRepoFileMock.mockResolvedValueOnce(null);
+      const caller = write(
+        '.github/workflows/caller.yml',
+        `
+name: Caller
+on: push
+jobs:
+  call:
+    uses: org/shared/.github/workflows/missing.yml@v1
+  after:
+    needs: call
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo never
+`
+      );
+
+      const result = await executeWorkflow(caller);
+      expect(result.success).toBe(false);
+      expect(result.jobs.map((j) => j.job)).toEqual(['call']);
     });
   });
 });

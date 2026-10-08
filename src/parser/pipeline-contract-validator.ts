@@ -11,6 +11,7 @@ import {
 } from '../types';
 import { topologicalJobOrder } from '../runner/executor';
 import { parseFile } from './workflow-parser';
+import { repositoryRoot } from '../utils/repository';
 
 /** Maximum nesting of local composite actions / reusable workflows. */
 const MAX_DEPTH = 10;
@@ -205,18 +206,6 @@ function needsTransitively(
     queue.push(...(nodes.get(id)?.needs ?? []));
   }
   return false;
-}
-
-/**
- * The repository root that `./` references resolve against: the directory
- * holding `.github/workflows/<file>`, else the current directory.
- */
-function repositoryRoot(workflowPath: string): string {
-  const dir = path.dirname(path.resolve(workflowPath));
-  return path.basename(dir) === 'workflows' &&
-    path.basename(path.dirname(dir)) === '.github'
-    ? path.dirname(path.dirname(dir))
-    : process.cwd();
 }
 
 function buildGraph(parsed: ParsedWorkflow): PipelineGraph {
