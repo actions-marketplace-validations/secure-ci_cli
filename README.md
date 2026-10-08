@@ -364,7 +364,9 @@ src/
 │   ├── job-runtime.ts        # Per-job state, step files, post steps
 │   ├── job-container.ts      # Job container, runs-on images, services, cleanup
 │   ├── steps.ts              # run: steps, on the host or in the job container
-│   ├── actions.ts            # uses: steps: composite, JavaScript, Docker, pre/post
+│   ├── actions.ts            # uses: steps: dispatch, composite, built-ins, pre
+│   ├── node-action.ts        # JavaScript actions (pre/main/post)
+│   ├── docker-action.ts      # Docker actions and docker:// steps
 │   ├── checkout.ts           # actions/checkout from the local working copy
 │   ├── builtin-actions.ts    # Local upload/download-artifact and cache
 │   ├── expression.ts         # ${{ ... }} expression evaluation

@@ -65,7 +65,9 @@ secureci-cli/
 │   │   ├── job-runtime.ts        # Per-job state, step files, post steps
 │   │   ├── job-container.ts      # Job container, runs-on images, services, cleanup
 │   │   ├── steps.ts              # run: steps, on the host or in the job container
-│   │   ├── actions.ts            # uses: steps: composite, JavaScript, Docker, pre/post
+│   │   ├── actions.ts            # uses: steps: dispatch, composite, built-ins, pre
+│   │   ├── node-action.ts        # JavaScript actions (pre/main/post)
+│   │   ├── docker-action.ts      # Docker actions and docker:// steps
 │   │   ├── checkout.ts           # actions/checkout from the local working copy
 │   │   ├── builtin-actions.ts    # Local upload/download-artifact and cache
 │   │   ├── expression.ts         # ${{ ... }} expression evaluation
@@ -241,8 +243,9 @@ and re-exports the public API:
 - `job-container.ts`: job container, `runs-on` image mapping, services,
   container cleanup
 - `steps.ts`: `run:` steps (host or job container)
-- `actions.ts`: `uses:` steps (composite, JavaScript incl. `pre`/`post`,
-  Docker, built-ins)
+- `actions.ts`: `uses:` steps: resolving/fetching, composite actions,
+  built-ins, job-start `pre`; `node-action.ts` (JavaScript actions) and
+  `docker-action.ts` (Docker actions, `docker://`) run the other types
 - `checkout.ts`, `builtin-actions.ts`: local stand-ins for
   `actions/checkout`, artifacts and cache
 
@@ -600,7 +603,7 @@ async function fetchAction(ref: string): Promise<Action> {
 
 1. Update `ActionRuns` type in `types/index.ts`
 2. Add handling in `action-fetcher.ts`
-3. Add execution logic in `actions.ts`
+3. Add execution logic in `actions.ts` (or a new `<type>-action.ts` it dispatches to)
 4. Add tests with fixtures
 
 #### 4. New Workflow Feature
