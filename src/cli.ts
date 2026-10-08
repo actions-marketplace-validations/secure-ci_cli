@@ -73,6 +73,10 @@ program
     'Pass secret values (can be used multiple times); a bare NAME reads $NAME from the environment, keeping the value out of the process list'
   )
   .option(
+    '--env <key[=value]...>',
+    "Set an env var for every step, below workflow/job/step env: (can be used multiple times); a bare NAME passes $NAME from your shell. Steps don't otherwise inherit your shell's env"
+  )
+  .option(
     '--var <key=value...>',
     'Set a configuration variable for the vars context (can be used multiple times)'
   )
@@ -136,12 +140,16 @@ program
         fromEnv: process.env
       });
       const vars = parseKeyValuePairs(options.var, '--var');
+      const env = parseKeyValuePairs(options.env, '--env', {
+        fromEnv: process.env
+      });
 
       const result = await executeWorkflow(file, {
         dryRun: false,
         inputs,
         secrets,
         vars,
+        env,
         eventPath: options.eventPath,
         eventName: options.eventName,
         job: options.job,

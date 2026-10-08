@@ -176,6 +176,8 @@ export interface RunOptions {
   containerMemoryLimit?: string;
   /** Disable container networking. Default: false (network on). */
   networkDisabled?: boolean;
+  /** Extra env for every step (`--env`), below workflow/job/step `env:`. */
+  env?: Record<string, string>;
   /** The `vars` context (configuration variables), e.g. from --var. */
   vars?: Record<string, string>;
   /** JSON file with the triggering event payload (`github.event`). */

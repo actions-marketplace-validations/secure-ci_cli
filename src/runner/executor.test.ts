@@ -2841,4 +2841,137 @@ jobs:
       expect(result.jobs[0].steps[0].output).toContain('token matched');
     });
   });
+
+  describe('running on the host (#15, #36)', () => {
+    let tempDir: string;
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-host-'));
+      process.env.SECURECI_TEST_LEAK = 'leaked-value';
+      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      delete process.env.SECURECI_TEST_LEAK;
+      warnSpy.mockRestore();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    function writeWorkflow(steps: string): string {
+      const file = path.join(tempDir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        `name: Host\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n${steps}`
+      );
+      return file;
+    }
+
+    const warnings = () => warnSpy.mock.calls.flat().join('\n');
+
+    it('does not pass the shell env to run: steps, but keeps PATH and HOME', async () => {
+      const result = await executeWorkflow(
+        writeWorkflow(
+          '      - run: test -z "${SECURECI_TEST_LEAK:-}" && test -n "$HOME" && command -v node >/dev/null && echo clean\n'
+        )
+      );
+      expect(result.success).toBe(true);
+      expect(result.jobs[0].steps[0].output).toContain('clean');
+    });
+
+    it('does not pass the shell env to JavaScript actions', async () => {
+      const actionDir = path.join(tempDir, 'js');
+      fs.mkdirSync(actionDir);
+      fs.writeFileSync(
+        path.join(actionDir, 'action.yml'),
+        'name: js\ndescription: d\nruns:\n  using: node20\n  main: index.js\n'
+      );
+      fs.writeFileSync(
+        path.join(actionDir, 'index.js'),
+        'console.log("leak=" + (process.env.SECURECI_TEST_LEAK ?? "none"))'
+      );
+      fetchActionMock.mockResolvedValueOnce(path.join(actionDir, 'action.yml'));
+
+      const result = await executeWorkflow(
+        writeWorkflow('      - uses: some/js@v1\n')
+      );
+      expect(result.jobs[0].steps[0].output).toContain('leak=none');
+    });
+
+    it('passes --env values (and NAME from the shell) as the lowest-precedence env', async () => {
+      const file = path.join(tempDir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        [
+          'name: Host',
+          'on: push',
+          'env:',
+          '  OVERRIDDEN: from-workflow',
+          'jobs:',
+          '  a:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - run: echo "$SECURECI_TEST_LEAK $EXTRA $OVERRIDDEN ${{ env.EXTRA }}"'
+        ].join('\n')
+      );
+      const result = await executeWorkflow(file, {
+        env: {
+          SECURECI_TEST_LEAK: 'leaked-value',
+          EXTRA: 'x1',
+          OVERRIDDEN: 'from-flag'
+        }
+      });
+      expect(result.jobs[0].steps[0].output).toContain(
+        'leaked-value x1 from-workflow x1'
+      );
+    });
+
+    it('warns once per job when remote actions run without container isolation', async () => {
+      fetchActionMock.mockResolvedValue(null);
+      await executeWorkflow(
+        writeWorkflow(
+          [
+            '      - uses: actions/checkout@v4',
+            '      - uses: org/one@v1',
+            '      - uses: org/two@v2',
+            '      - uses: ./local',
+            '      - uses: docker://alpine:3'
+          ].join('\n') + '\n'
+        ),
+        { containerRuntime: 'none' }
+      );
+      const matching = warnSpy.mock.calls
+        .flat()
+        .filter((m) => String(m).includes('without container isolation'));
+      expect(matching).toHaveLength(1);
+      expect(matching[0]).toContain('org/one@v1, org/two@v2');
+      expect(matching[0]).not.toContain('actions/checkout');
+      expect(matching[0]).not.toContain('./local');
+      expect(matching[0]).not.toContain('docker://');
+      fetchActionMock.mockReset();
+    });
+
+    it('also warns when it falls back to the host because no runtime is available', async () => {
+      fetchActionMock.mockResolvedValue(null);
+      await executeWorkflow(writeWorkflow('      - uses: org/one@v1\n'), {
+        containerRuntime: 'docker'
+      });
+      expect(warnings()).toContain('without container isolation');
+      fetchActionMock.mockReset();
+    });
+
+    it('does not warn in a container, or without remote actions', async () => {
+      const fake = fakeJobContainerRuntime();
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+      fetchActionMock.mockResolvedValue(null);
+      await executeWorkflow(writeWorkflow('      - uses: org/one@v1\n'), {
+        containerRuntime: 'docker'
+      });
+      resolveContainerRuntimeMock.mockResolvedValue(null);
+      await executeWorkflow(writeWorkflow('      - run: echo hi\n'), {
+        containerRuntime: 'none'
+      });
+      expect(warnings()).not.toContain('without container isolation');
+      fetchActionMock.mockReset();
+    });
+  });
 });

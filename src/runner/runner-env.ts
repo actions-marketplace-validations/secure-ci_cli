@@ -277,3 +277,24 @@ export function prependPath(
 ): string {
   return [...additions, ...(basePath ? [basePath] : [])].join(path.delimiter);
 }
+
+/**
+ * Host variables that `run:` steps and actions on the host still get: what
+ * tools need to work (PATH, HOME, locale, temp dirs, proxy and CA settings,
+ * the container client's config, and Windows system variables). Everything
+ * else in the user's shell (tokens, cloud credentials...) stays out; pass
+ * what a workflow needs with `--env`.
+ */
+const HOST_ENV_ALLOWLIST =
+  /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|TZ|LANG|LANGUAGE|LC_[A-Z_]+|TMPDIR|TEMP|TMP|(HTTPS?|FTP|ALL|NO)_PROXY|SSL_CERT_(FILE|DIR)|NODE_EXTRA_CA_CERTS|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|DOCKER_(HOST|CONTEXT|CONFIG|CERT_PATH|TLS_VERIFY)|XDG_RUNTIME_DIR|SYSTEMROOT|SYSTEMDRIVE|WINDIR|COMSPEC|PATHEXT|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMDATA|PROGRAMFILES(\(X86\))?|COMMONPROGRAMFILES(\(X86\))?)$/i;
+
+/** The allowlisted part of the host environment (see HOST_ENV_ALLOWLIST). */
+export function hostBaseEnv(
+  env: NodeJS.ProcessEnv = process.env
+): Record<string, string> {
+  const base: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && HOST_ENV_ALLOWLIST.test(key)) base[key] = value;
+  }
+  return base;
+}

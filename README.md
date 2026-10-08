@@ -46,6 +46,9 @@ secureci run .github/workflows/ci.yml --dry-run
 # Execute a workflow
 secureci run .github/workflows/build.yml --input key=value
 
+# Pass env vars to steps (a bare NAME passes $NAME from your shell)
+secureci run .github/workflows/build.yml --env NPM_CONFIG_REGISTRY
+
 # Run with secrets (a bare NAME reads $NAME from your environment, which
 # keeps the value out of the process list and shell history)
 secureci run .github/workflows/deploy.yml --secret TOKEN
@@ -94,6 +97,14 @@ secureci run .github/workflows/ci.yml --container-runtime=podman --container-mem
 - JavaScript actions run with the image's own `node`. If an image has no Node.js (e.g. a plain `ubuntu:22.04` via `--container-image`), they fail with a clear error.
 - `services:` containers are not supported yet.
 - `--container-timeout` stops waiting for a step after the given time and fails it. The command itself keeps running inside the container until the job's container is removed.
+
+### Security: what runs where
+
+> [!WARNING]
+> With `--container-runtime none` (or when no container runtime is available and the CLI falls back to the host), `run:` steps and **remote JavaScript and composite actions run directly on your machine with your user's privileges**. Any third-party action can read your files and use your network. The CLI prints a warning listing the remote actions before such a job runs. Use a container runtime to sandbox them.
+
+- On the host, steps and actions don't inherit your shell's environment: only `PATH`, `HOME`, locale, temp-dir, proxy/CA and container-client variables are passed, plus the runner's `GITHUB_*` / `RUNNER_*` variables and the workflow's own `env:`. Pass anything else explicitly with `--env NAME` (value from your shell) or `--env NAME=value`, and secrets with `--secret NAME`.
+- In container mode, env values never appear on the container client's command line (see Secret Masking below).
 
 ### `actions/checkout`
 

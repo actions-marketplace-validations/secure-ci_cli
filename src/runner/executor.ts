@@ -38,6 +38,7 @@ import {
   buildRunnerEnv,
   cleanupStepFiles,
   createStepFiles,
+  hostBaseEnv,
   prependPath,
   processWorkflowCommands,
   readStepFiles,
@@ -526,10 +527,18 @@ export async function executeWorkflow(
 
           // Workflow-level env can't reference `env` itself; job-level env
           // sees the workflow env plus matrix (matching GitHub's contexts).
-          const workflowEnv = substituteRecord(parsed.file.env, {
-            ...createContext({}, options.inputs, options.secrets, github),
-            vars
-          });
+          const workflowEnv = {
+            ...options.env,
+            ...substituteRecord(parsed.file.env, {
+              ...createContext(
+                { ...options.env },
+                options.inputs,
+                options.secrets,
+                github
+              ),
+              vars
+            })
+          };
           const jobEnv = substituteRecord(job.env, {
             ...createContext(
               workflowEnv,
@@ -577,6 +586,10 @@ export async function executeWorkflow(
             });
             matrixFailed = true;
             continue;
+          }
+
+          if (!runtime.container) {
+            warnUnsandboxedActions(job.steps ?? [], jobCtx, options);
           }
 
           try {
@@ -1272,7 +1285,7 @@ async function executeStep(
               ? path.resolve(process.cwd(), workingDirectory)
               : process.cwd(),
             env: {
-              ...process.env,
+              ...hostBaseEnv(),
               ...runtime.runnerEnv,
               ...mergedEnv,
               PATH: prependPath(
@@ -1726,7 +1739,7 @@ async function executeNodeAction(
           cwd: process.cwd(),
           maxBuffer: 64 * 1024 * 1024,
           env: {
-            ...process.env,
+            ...hostBaseEnv(),
             ...runtime.runnerEnv,
             ...callerCtx.env,
             ...inputEnv,
@@ -1875,6 +1888,34 @@ function resolveActionInputs(
     }
   }
   return { ...inputs, ...substituteRecord(withValues, callerCtx) };
+}
+
+/**
+ * Warn that a job's remote actions are about to run on the host, with the
+ * user's privileges (container mode off, or no runtime available). Local
+ * actions, `docker://` steps and a local checkout are left out.
+ */
+function warnUnsandboxedActions(
+  steps: Step[],
+  ctx: ExpressionContext,
+  options: RunOptions
+): void {
+  const remote = steps
+    .filter(
+      (step) =>
+        step.uses &&
+        !isLocalActionRef(step.uses) &&
+        !step.uses.startsWith('docker://') &&
+        !(
+          options.localCheckout !== false &&
+          isLocalCheckout(step.uses, step.with, ctx)
+        )
+    )
+    .map((step) => step.uses as string);
+  if (remote.length === 0) return;
+  logger.warn(
+    `Running remote actions on the host without container isolation: ${[...new Set(remote)].join(', ')}. They run with your user's privileges; use a container runtime (--container-runtime docker|podman|containerd) to sandbox them.`
+  );
 }
 
 /** Marks a `path:` copy made by localCheckout, so it may be replaced. */
