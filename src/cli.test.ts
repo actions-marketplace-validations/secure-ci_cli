@@ -323,6 +323,25 @@ describe('secureci commands', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
+  it('shows effective values, marking built-in defaults, in config list', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cfg-home-'));
+    const env = { ...process.env, HOME: home };
+    run(['config', 'set', 'container-memory', '512m'], tempDir, env);
+    const out = run(['config', 'list'], tempDir, env).stdout;
+    expect(out).toContain('container-runtime=docker (default)');
+    expect(out).toContain('container-memory=512m');
+    expect(out).toContain('container-image=(unset)');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('uses consistent, capitalised help text', () => {
+    const help = run(['--help']).stdout + run(['run', '--help']).stdout;
+    expect(help).not.toMatch(
+      /display help for command|output the version number/
+    );
+    expect(help).toContain('Show help');
+  });
+
   it('lists workflows with secureci list', () => {
     const result = run(['list'], tempDir);
     expect(result.status).toBe(0);

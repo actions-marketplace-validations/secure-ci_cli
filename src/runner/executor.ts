@@ -580,7 +580,9 @@ export async function executeWorkflow(
           await stopJobContainer(runtime);
         }
       } else {
-        logger.warn(`Action type ${parsed.file.runs.using} not yet supported`);
+        logger.error(
+          `Only composite actions can be run directly; call this ${parsed.file.runs.using} action from a workflow step instead.`
+        );
         return {
           success: false,
           jobs: [],

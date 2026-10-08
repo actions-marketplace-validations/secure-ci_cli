@@ -999,6 +999,50 @@ jobs:
       fs.unlinkSync(workflowPath);
     });
 
+    it('runs Docker actions with the default engine in host mode', async () => {
+      const dockerActionPath = path.join(
+        fixturesDir,
+        'docker-action',
+        'action.yml'
+      );
+      fetchActionMock.mockResolvedValueOnce(dockerActionPath);
+      const executeMock = vi.fn().mockResolvedValue({
+        success: true,
+        stdout: 'from docker\n',
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        durationMs: 1
+      });
+      const fake = {
+        ...fakeJobContainerRuntime(),
+        build: vi
+          .fn()
+          .mockResolvedValue({ success: true, stdout: '', stderr: '' }),
+        execute: executeMock
+      };
+      resolveContainerRuntimeMock.mockImplementation(async (preference) =>
+        preference === 'auto' ? fake : null
+      );
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'secureci-hostdocker-')
+      );
+      const workflowPath = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        workflowPath,
+        'name: D\non: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: test-org/docker-action@v1\n        with:\n          message: hi\n'
+      );
+      try {
+        const result = await executeWorkflow(workflowPath, {
+          containerRuntime: 'host'
+        });
+        expect(result.success).toBe(true);
+        expect(executeMock).toHaveBeenCalledTimes(1);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('should fail (not skip) a Docker action step when no container runtime is available', async () => {
       const dockerActionPath = path.join(
         fixturesDir,
@@ -1037,6 +1081,9 @@ jobs:
       expect(result.success).toBe(false);
       expect(result.jobs[0].steps[0].success).toBe(false);
       expect(result.jobs[0].steps[0].error).toContain('No container runtime');
+      expect(result.jobs[0].steps[0].error).toContain(
+        'docker, podman or containerd'
+      );
 
       fs.unlinkSync(workflowPath);
     });

@@ -34,17 +34,21 @@ export async function executeDockerAction(
   runtime: JobRuntime,
   startTime: number
 ): Promise<StepResult> {
+  // The image is the action, so even with steps on the host (`host`) it
+  // runs in a container, using whichever engine is available.
+  const preference = options.containerRuntime ?? 'auto';
   const containerRuntime = await resolveContainerRuntime(
-    options.containerRuntime ?? 'auto'
+    preference === 'host' ? 'auto' : preference
   );
   if (!containerRuntime) {
     logger.error(
-      `Docker action "${step.uses}" requires a container runtime (docker/podman), but none is available.`
+      `Docker action "${step.uses}" needs a container runtime (docker, podman or containerd), but none is available.`
     );
     return {
       step,
       success: false,
-      error: 'No container runtime (docker/podman) available for Docker action',
+      error:
+        'No container runtime (docker, podman or containerd) available for the Docker action',
       duration: Date.now() - startTime
     };
   }

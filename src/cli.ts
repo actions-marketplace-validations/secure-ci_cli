@@ -18,6 +18,7 @@ import {
   saveConfig,
   getConfigFilePath,
   getDefaultContainerRuntime,
+  DEFAULT_CONFIG,
   isValidConfigKey,
   getConfigValue,
   setConfigValue,
@@ -58,8 +59,10 @@ program
   .description(
     'SecureCI CLI: validate, check and run GitHub Actions workflows locally'
   )
-  .version(readVersion(), '-V, --version')
-  .option('--verbose', 'Enable verbose logging')
+  .version(readVersion(), '-V, --version', 'Print the version')
+  .helpOption('-h, --help', 'Show help')
+  .addHelpCommand('help [command]', 'Show help for a command')
+  .option('--verbose', 'Log debug output')
   .showHelpAfterError()
   .hook('preAction', (thisCommand) => {
     if (thisCommand.opts().verbose) {
@@ -76,70 +79,72 @@ function requireFile(file: string): void {
 
 program
   .command('run')
-  .description('Run a workflow (or composite action) locally')
+  .description(
+    'Run a workflow (or composite action) on this machine, each job in a container'
+  )
   .argument('<file>', 'Path to a workflow or action YAML file')
   .option('-d, --dry-run', 'Show what would run, without executing anything')
   .option(
     '-i, --input <key=value...>',
-    'Pass input values (can be used multiple times)'
+    'Set an input for the inputs context. Repeatable'
   )
   .option(
     '-s, --secret <key[=value]...>',
-    'Pass secret values (can be used multiple times); a bare NAME reads $NAME from the environment, keeping the value out of the process list'
+    'Set a secret for the secrets context. A bare NAME reads $NAME from your shell, keeping the value off the command line. Repeatable'
   )
   .option(
     '--env <key[=value]...>',
-    "Set an env var for every step, below workflow/job/step env: (can be used multiple times); a bare NAME passes $NAME from your shell. Steps don't otherwise inherit your shell's env"
+    'Set an env var for every step, below workflow/job/step env:. A bare NAME passes $NAME from your shell (steps get nothing else from it). Repeatable'
   )
   .option(
     '--var <key=value...>',
-    'Set a configuration variable for the vars context (can be used multiple times)'
+    'Set a configuration variable for the vars context. Repeatable'
   )
   .option(
     '--event-path <file>',
-    'JSON event payload for github.event / $GITHUB_EVENT_PATH'
+    'Read the event payload (github.event, $GITHUB_EVENT_PATH) from a JSON file'
   )
   .option(
     '--event-name <name>',
-    'github.event_name (default: $GITHUB_EVENT_NAME, else workflow_dispatch if declared, else the first trigger)'
+    'Set github.event_name. Default: $GITHUB_EVENT_NAME, else workflow_dispatch if declared, else the first trigger'
   )
-  .option('-j, --job <name>', 'Run a specific job')
+  .option('-j, --job <name>', 'Run only this job')
   .option(
     '--offline',
-    'Use only cached remote actions (~/.secureci/actions-cache); never download'
+    'Use only cached remote actions and workflows; never download'
   )
   .option(
     '--no-local-checkout',
-    'Run the real actions/checkout for the current repository instead of using the local working copy'
+    'Run the real actions/checkout for this repository instead of using the working copy'
   )
   .addOption(
     new Option(
       '--container-runtime <name>',
-      `Run each job in a container (default: "${defaultContainerRuntime}", from ~/.secureci/config.yml or built-in default; "host" runs steps directly on this machine, without a container)`
+      'Container engine for jobs. "host" runs steps directly on this machine, without a container. Config: container-runtime'
     )
       .choices(['auto', 'docker', 'podman', 'containerd', 'host'])
       .default(defaultContainerRuntime)
   )
   .option(
     '--container-image <image>',
-    'Container image for every job without jobs.<id>.container, overriding the runs-on mapping (runner-images in config; jobs with unmapped labels use container-image from config, else catthehacker/ubuntu:act-22.04)'
+    'Use this image for every job without jobs.<id>.container, instead of the image for its runs-on (config: runner-images, container-image)'
   )
   .option(
     '--container-timeout <ms>',
-    'Per-step timeout in milliseconds when containerized',
+    'Fail a step that runs longer than this, in milliseconds (container mode). Config: container-timeout',
     globalConfig['container-timeout'] !== undefined
       ? String(globalConfig['container-timeout'])
       : undefined
   )
   .option(
     '--container-memory <limit>',
-    'Memory limit for the container, e.g. 512m',
+    'Limit job container memory, e.g. 512m. Config: container-memory',
     globalConfig['container-memory']
   )
-  .option('--no-network', 'Disable container network access (on by default)')
+  .option('--no-network', 'Turn off container network access (on by default)')
   .option(
     '--allow-network',
-    'Allow container network access (the default; overrides allow-network: false in config)'
+    'Turn on container network access, overriding allow-network: false in the config'
   )
   .action(async (file: string, options) => {
     if (configError) {
@@ -344,19 +349,28 @@ const configCmd = program
 
 configCmd
   .command('path')
-  .description('Print the path to the global config file')
+  .description('Print the config file path')
   .action(() => {
     logger.info(getConfigFilePath());
   });
 
 configCmd
   .command('list')
-  .description('List effective config values (config file + built-in defaults)')
+  .description('List config values, including built-in defaults')
   .action(() => {
     const config = loadConfig();
     for (const key of CONFIG_KEYS) {
       const value = config[key];
-      logger.info(`${key}=${value === undefined ? '(unset)' : value}`);
+      const fallback = DEFAULT_CONFIG[key as keyof typeof DEFAULT_CONFIG];
+      logger.info(
+        `${key}=${
+          value !== undefined
+            ? value
+            : fallback !== undefined
+              ? `${fallback} (default)`
+              : '(unset)'
+        }`
+      );
     }
     for (const [label, image] of Object.entries(
       config['runner-images'] ?? {}
@@ -367,7 +381,7 @@ configCmd
 
 configCmd
   .command('get <key>')
-  .description('Print the value of a config key')
+  .description('Print a config value')
   .action((key: string) => {
     if (!isValidConfigKey(key)) {
       logger.error(
@@ -381,7 +395,7 @@ configCmd
 
 configCmd
   .command('set <key> <value>')
-  .description('Set a config key and persist it to the global config file')
+  .description('Set a config value')
   .action((key: string, value: string) => {
     if (!isValidConfigKey(key)) {
       logger.error(
@@ -402,7 +416,7 @@ configCmd
 
 configCmd
   .command('unset <key>')
-  .description('Remove a config key, reverting to the built-in default')
+  .description('Remove a config value, reverting to the built-in default')
   .action((key: string) => {
     if (!isValidConfigKey(key)) {
       logger.error(

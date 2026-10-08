@@ -572,7 +572,7 @@ export function resolveExpressionValue(
     return evaluate(inner, ctx);
   } catch (error) {
     logger.warn(
-      `Failed to resolve expression "${expr}": ${error instanceof Error ? error.message : 'unknown error'}.`
+      `Failed to resolve expression "${expr}": ${error instanceof Error ? error.message : 'Unknown error'}.`
     );
     return undefined;
   }
@@ -594,7 +594,7 @@ export function substituteExpressions(
       return toText(evaluate(inner.trim(), ctx));
     } catch (error) {
       logger.warn(
-        `Failed to resolve expression "${full}": ${error instanceof Error ? error.message : 'unknown error'}.`
+        `Failed to resolve expression "${full}": ${error instanceof Error ? error.message : 'Unknown error'}.`
       );
       return full;
     }
@@ -653,7 +653,7 @@ export function evaluateCondition(
     return toBoolean(evaluate(trimmed, ctx));
   } catch (error) {
     logger.warn(
-      `Failed to evaluate condition "${expr}": ${error instanceof Error ? error.message : 'unknown error'}. Defaulting to true.`
+      `Failed to evaluate condition "${expr}": ${error instanceof Error ? error.message : 'Unknown error'}. Defaulting to true.`
     );
     return true;
   }
