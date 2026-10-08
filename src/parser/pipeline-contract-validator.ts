@@ -1,19 +1,49 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import {
-  ParsedWorkflow,
   PipelineContractEntry,
   PipelineContractSpec,
+  ParsedWorkflow,
+  Step,
   ValidationError,
   ValidationResult,
   WorkflowFile
 } from '../types';
 import { topologicalJobOrder } from '../runner/executor';
+import { parseFile } from './workflow-parser';
+
+/** Maximum nesting of local composite actions / reusable workflows. */
+const MAX_DEPTH = 10;
 
 interface UsageEntry {
-  jobId: string;
-  stepIndex: number;
-  globalIndex: number;
+  /** The job (or reusable-workflow call) the step runs in. */
+  node: string;
+  /** Position among all steps of that job, nested composite steps included. */
+  index: number;
+  /** Where the step is declared, e.g. `jobs.build.steps[2] > ./x > steps[0]`. */
+  path: string;
   name: string;
   version?: string;
+}
+
+interface JobNode {
+  /** Display name, e.g. `build` or `release > ./.github/workflows/r.yml > ship`. */
+  label: string;
+  /** Jobs that finish before this one starts (direct `needs:`). */
+  needs: Set<string>;
+  /** Number of step positions in the job. */
+  length: number;
+}
+
+/**
+ * The workflow's `uses:` steps, with local composite actions and local
+ * reusable workflows resolved into them, and the `needs:` graph between
+ * jobs (a reusable-workflow call contributes its called jobs).
+ */
+interface PipelineGraph {
+  sequence: UsageEntry[];
+  nodes: Map<string, JobNode>;
+  errors: ValidationError[];
 }
 
 /**
@@ -21,18 +51,20 @@ interface UsageEntry {
  * contract: a minimum set of required actions (optionally ordered) and a
  * deny-list of forbidden actions.
  *
- * Scope (see ai-docs discussion): only `uses:` steps declared directly in
- * the given workflow file are considered, in whole-workflow order (job
- * order resolved via `needs:`, then declared step order within each job).
- * Steps inside a called reusable workflow or composite action are not
- * resolved/recursed into.
+ * Local composite actions (`uses: ./path`) and local reusable workflows
+ * (`jobs.<id>.uses: ./path.yml`) are resolved recursively, so wrapping an
+ * action doesn't hide it. Remote ones are not inspected. Ordering follows
+ * what GitHub guarantees: steps of a job run in order, and a job runs after
+ * the jobs it (transitively) `needs:`; jobs with no such relationship may
+ * run in parallel, so neither is "before" the other.
  */
 export function validatePipelineContract(
   parsed: ParsedWorkflow,
   spec: PipelineContractSpec
 ): ValidationResult {
-  const errors: ValidationError[] = [];
-  const sequence = collectUsageSequence(parsed.file);
+  const graph = buildGraph(parsed);
+  const { sequence, nodes } = graph;
+  const errors: ValidationError[] = [...graph.errors];
   const ordering = spec.ordering ?? 'relative';
 
   for (const entry of spec.forbidden ?? []) {
@@ -42,7 +74,7 @@ export function validatePipelineContract(
         (entry.version === undefined || usage.version === entry.version)
       ) {
         errors.push({
-          path: `jobs.${usage.jobId}.steps[${usage.stepIndex}]`,
+          path: usage.path,
           message: entry.version
             ? `Forbidden action "${entry.uses}@${entry.version}" is used`
             : `Forbidden action "${entry.uses}" is used (any version)`,
@@ -110,22 +142,42 @@ export function validatePipelineContract(
     }
   });
 
+  /** Whether `a` is guaranteed to have finished before `b` starts. */
+  const runsBefore = (a: UsageEntry, b: UsageEntry): boolean =>
+    a.node === b.node
+      ? a.index < b.index
+      : needsTransitively(nodes, b.node, a.node);
+
   for (let i = 1; i < matchedPositions.length; i++) {
     const prev = matchedPositions[i - 1];
     const curr = matchedPositions[i];
+    const path = `required[${curr.index}]`;
 
     if (ordering === 'strict') {
-      if (curr.usage.globalIndex !== prev.usage.globalIndex + 1) {
+      const a = prev.usage;
+      const b = curr.usage;
+      const adjacent =
+        a.node === b.node
+          ? b.index === a.index + 1
+          : a.index === (nodes.get(a.node)?.length ?? 0) - 1 &&
+            b.index === 0 &&
+            (nodes.get(b.node)?.needs.has(a.node) ?? false);
+      if (!adjacent) {
         errors.push({
-          path: `required[${curr.index}]`,
+          path,
           message: `Required action "${curr.entry.uses}" must run immediately after "${prev.entry.uses}" (ordering: strict), but other steps appear in between`,
           severity: 'error'
         });
       }
-    } else if (curr.usage.globalIndex <= prev.usage.globalIndex) {
+    } else if (!runsBefore(prev.usage, curr.usage)) {
+      const parallel = !runsBefore(curr.usage, prev.usage);
       errors.push({
-        path: `required[${curr.index}]`,
-        message: `Required action "${curr.entry.uses}" must run after "${prev.entry.uses}", but it does not`,
+        path,
+        message:
+          `Required action "${curr.entry.uses}" must run after "${prev.entry.uses}", but it does not` +
+          (parallel
+            ? ` (jobs "${nodes.get(prev.usage.node)?.label}" and "${nodes.get(curr.usage.node)?.label}" have no needs: relationship, so they may run in parallel)`
+            : ''),
         severity: 'error'
       });
     }
@@ -137,23 +189,216 @@ export function validatePipelineContract(
   };
 }
 
-function collectUsageSequence(workflow: WorkflowFile): UsageEntry[] {
-  const jobOrder = topologicalJobOrder(workflow.jobs);
-  const sequence: UsageEntry[] = [];
-  let globalIndex = 0;
-
-  for (const jobId of jobOrder) {
-    const steps = workflow.jobs[jobId].steps ?? [];
-    steps.forEach((step, stepIndex) => {
-      if (step.uses) {
-        const { name, version } = splitActionRef(step.uses);
-        sequence.push({ jobId, stepIndex, globalIndex, name, version });
-      }
-      globalIndex++;
-    });
+/** Whether job `from` (transitively) needs job `to`. */
+function needsTransitively(
+  nodes: Map<string, JobNode>,
+  from: string,
+  to: string
+): boolean {
+  const seen = new Set<string>();
+  const queue = [...(nodes.get(from)?.needs ?? [])];
+  while (queue.length > 0) {
+    const id = queue.shift() as string;
+    if (id === to) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    queue.push(...(nodes.get(id)?.needs ?? []));
   }
+  return false;
+}
 
-  return sequence;
+/**
+ * The repository root that `./` references resolve against: the directory
+ * holding `.github/workflows/<file>`, else the current directory.
+ */
+function repositoryRoot(workflowPath: string): string {
+  const dir = path.dirname(path.resolve(workflowPath));
+  return path.basename(dir) === 'workflows' &&
+    path.basename(path.dirname(dir)) === '.github'
+    ? path.dirname(path.dirname(dir))
+    : process.cwd();
+}
+
+function buildGraph(parsed: ParsedWorkflow): PipelineGraph {
+  const graph: PipelineGraph = { sequence: [], nodes: new Map(), errors: [] };
+  const root = repositoryRoot(parsed.path);
+
+  /** Resolve a local `./` reference to a file, or null. */
+  const resolveLocal = (uses: string, names: string[]): string | null => {
+    const target = path.resolve(root, uses);
+    for (const candidate of [
+      target,
+      ...names.map((n) => path.join(target, n))
+    ]) {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        return candidate;
+      }
+    }
+    return null;
+  };
+
+  /** Parse a local action/workflow, recording an error if it's invalid. */
+  const parseLocal = (file: string, at: string) => {
+    try {
+      return parseFile(file);
+    } catch (error) {
+      graph.errors.push({
+        path: at,
+        message: `Could not parse ${path.relative(root, file)}: ${error instanceof Error ? error.message : String(error)}`,
+        severity: 'error'
+      });
+      return null;
+    }
+  };
+
+  /** Check recursion limits; returns false (with an error) to stop. */
+  const canEnter = (file: string, stack: string[], at: string): boolean => {
+    if (stack.includes(file)) {
+      graph.errors.push({
+        path: at,
+        message: `Local action/workflow cycle: ${[...stack, file]
+          .map((f) => path.relative(root, f))
+          .join(' -> ')}`,
+        severity: 'error'
+      });
+      return false;
+    }
+    if (stack.length >= MAX_DEPTH) {
+      graph.errors.push({
+        path: at,
+        message: `Local actions/workflows exceed the maximum nesting depth (${MAX_DEPTH})`,
+        severity: 'error'
+      });
+      return false;
+    }
+    return true;
+  };
+
+  const addUsage = (
+    node: string,
+    index: number,
+    at: string,
+    uses: string
+  ): void => {
+    graph.sequence.push({ node, index, path: at, ...splitActionRef(uses) });
+  };
+
+  /** Flatten a job's steps (and local composite steps) into `node`. */
+  const addSteps = (
+    steps: Step[],
+    node: string,
+    at: string,
+    counter: { next: number },
+    stack: string[]
+  ): void => {
+    steps.forEach((step, i) => {
+      const stepPath = `${at}steps[${i}]`;
+      if (!step.uses) {
+        counter.next++;
+        return;
+      }
+      addUsage(node, counter.next++, stepPath, step.uses);
+      if (!step.uses.startsWith('./') && !step.uses.startsWith('../')) return;
+
+      const file = resolveLocal(step.uses, ['action.yml', 'action.yaml']);
+      if (!file) {
+        graph.errors.push({
+          path: stepPath,
+          message: `Local action "${step.uses}" could not be resolved, so its steps were not checked`,
+          severity: 'warning'
+        });
+        return;
+      }
+      if (!canEnter(file, stack, stepPath)) return;
+      const action = parseLocal(file, stepPath);
+      if (action?.type === 'action' && action.file.runs.using === 'composite') {
+        addSteps(
+          action.file.runs.steps ?? [],
+          node,
+          `${stepPath} > ${step.uses} > `,
+          counter,
+          [...stack, file]
+        );
+      }
+    });
+  };
+
+  /**
+   * Add a workflow's jobs. Every job also runs after `after` (the jobs the
+   * reusable-workflow call itself needs, plus the call). Returns the ids
+   * of the added jobs.
+   */
+  const addWorkflow = (
+    workflow: WorkflowFile,
+    prefix: string,
+    labelPrefix: string,
+    at: string,
+    after: string[],
+    stack: string[]
+  ): string[] => {
+    const added: string[] = [];
+    // A job id -> the graph nodes standing for it (a reusable-workflow call
+    // stands for the call and all of its called jobs).
+    const alias = new Map<string, string[]>();
+
+    for (const jobId of topologicalJobOrder(workflow.jobs)) {
+      const job = workflow.jobs[jobId];
+      const node = `${prefix}${jobId}`;
+      const needs = new Set(after);
+      for (const dep of [job.needs ?? []].flat()) {
+        for (const id of alias.get(dep) ?? []) needs.add(id);
+      }
+      graph.nodes.set(node, {
+        label: `${labelPrefix}${jobId}`,
+        needs,
+        length: 0
+      });
+      added.push(node);
+      const jobPath = `${at}jobs.${jobId}`;
+
+      if (job.uses) {
+        // The call itself is a one-step "job" its called jobs run after.
+        addUsage(node, 0, jobPath, job.uses);
+        (graph.nodes.get(node) as JobNode).length = 1;
+        const ids = [node];
+        const isLocal = job.uses.startsWith('./') || job.uses.startsWith('../');
+        const file = isLocal ? resolveLocal(job.uses, []) : null;
+        if (isLocal && !file) {
+          graph.errors.push({
+            path: jobPath,
+            message: `Local reusable workflow "${job.uses}" could not be resolved, so its jobs were not checked`,
+            severity: 'warning'
+          });
+        } else if (file && canEnter(file, stack, jobPath)) {
+          const called = parseLocal(file, jobPath);
+          if (called?.type === 'workflow') {
+            ids.push(
+              ...addWorkflow(
+                called.file,
+                `${node}>`,
+                `${labelPrefix}${jobId} > ${job.uses} > `,
+                `${jobPath} > ${job.uses} > `,
+                [...needs, node],
+                [...stack, file]
+              )
+            );
+          }
+        }
+        alias.set(jobId, ids);
+        added.push(...ids.slice(1));
+        continue;
+      }
+
+      alias.set(jobId, [node]);
+      const counter = { next: 0 };
+      addSteps(job.steps ?? [], node, `${jobPath}.`, counter, stack);
+      (graph.nodes.get(node) as JobNode).length = counter.next;
+    }
+    return added;
+  };
+
+  addWorkflow(parsed.file, '', '', '', [], [path.resolve(parsed.path)]);
+  return graph;
 }
 
 function splitActionRef(uses: string): { name: string; version?: string } {
