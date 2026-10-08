@@ -213,6 +213,11 @@ Jobs and steps support `if:` expressions, and `${{ }}` works anywhere a value is
 
 As on GitHub, an `if:` without a status function means `success() && (...)`. After a step fails, later steps are skipped unless their `if:` uses `always()` or `failure()`. A job whose `needs` didn't all succeed is skipped unless its `if:` uses one of them.
 
+Invalid `if:` expressions fail, as on GitHub, and never count as true:
+
+- **Checked before anything runs** (`run`, `run --dry-run` and `validate`): syntax errors, unknown functions (e.g. a typo like `sucess()`), wrong argument counts, and contexts not available where they're used. A job's `if:` can only use `github`, `needs`, `vars` and `inputs` (not `matrix`, `steps` or `env`), and composite action steps can't use `secrets`. The run stops with `Invalid workflow file`, listing each `jobs.<id>.steps[N].if`.
+- **Errors while evaluating** (e.g. `fromJSON` of invalid JSON) fail that step, or that job, with `Error when evaluating 'if' for ...`. Dependents are skipped as for any failure. The same applies to `pre-if` and `post-if`.
+
 ```yaml
 steps:
   - id: build

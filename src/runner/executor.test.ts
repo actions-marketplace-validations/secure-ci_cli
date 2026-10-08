@@ -3918,4 +3918,203 @@ ${extra}
       expect(outputOf(lookup)).toContain('hit=true');
     });
   });
+
+  describe('invalid if: expressions', () => {
+    let dir: string;
+    let errorSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-badif-'));
+      errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      errorSpy.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    const errors = () => errorSpy.mock.calls.flat().join('\n');
+
+    function write(jobs: string): string {
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(file, `name: Bad If\non: push\njobs:\n${jobs}`);
+      return file;
+    }
+
+    it('rejects the workflow before running anything, like GitHub', async () => {
+      const marker = path.join(dir, 'ran');
+      const result = await executeWorkflow(
+        write(`
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: touch ${marker}
+  b:
+    needs: a
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo deploy
+        if: unknownContext.x == 'y'
+`)
+      );
+      expect(result.success).toBe(false);
+      expect(result.jobs).toEqual([]);
+      expect(fs.existsSync(marker)).toBe(false);
+      expect(errors()).toContain('Invalid workflow file');
+      expect(errors()).toContain(
+        "jobs.b.steps[0].if: Unrecognized named-value: 'unknownContext'"
+      );
+    });
+
+    it('fails the step when its if: errors at runtime, and skips the rest', async () => {
+      const result = await executeWorkflow(
+        write(`
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo first
+      - name: guarded deploy
+        if: fromJSON('not json')
+        run: echo deployed
+      - run: echo after
+`)
+      );
+      expect(result.success).toBe(false);
+      const steps = result.jobs[0].steps;
+      expect(steps.map((s) => [s.success, s.outcome ?? ''])).toEqual([
+        [true, ''],
+        [false, ''],
+        [true, 'skipped']
+      ]);
+      expect(steps[1].output ?? '').not.toContain('deployed');
+      expect(steps[1].error).toContain("Error when evaluating 'if'");
+    });
+
+    function action(
+      name: string,
+      yml: string,
+      files: Record<string, string> = {}
+    ) {
+      const actionDir = path.join(dir, name);
+      fs.mkdirSync(actionDir);
+      fs.writeFileSync(path.join(actionDir, 'action.yml'), yml);
+      for (const [file, content] of Object.entries(files)) {
+        fs.writeFileSync(path.join(actionDir, file), content);
+      }
+      return path.join(actionDir, 'action.yml');
+    }
+
+    it('fails a composite action step whose if: is invalid or errors', async () => {
+      for (const [i, condition] of [
+        "secrets.X == 'y'",
+        "fromJSON('nope')"
+      ].entries()) {
+        fetchActionMock.mockResolvedValueOnce(
+          action(
+            `comp-${i}`,
+            `name: c\ndescription: d\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      if: ${JSON.stringify(condition)}\n      run: echo inner\n`
+          )
+        );
+        const result = await executeWorkflow(
+          write(`
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: org/comp@v1
+`)
+        );
+        expect(result.success).toBe(false);
+        expect(result.jobs[0].steps[0].output ?? '').not.toContain('inner');
+      }
+      expect(errors()).toContain(
+        "runs.steps[0].if: Unrecognized named-value: 'secrets'"
+      );
+      expect(errors()).toContain("Error when evaluating 'if'");
+    });
+
+    it('fails the pre step when pre-if errors (main is then skipped), without aborting the run', async () => {
+      fetchActionMock.mockResolvedValue(
+        action(
+          'js-pre',
+          "name: js\ndescription: d\nruns:\n  using: node20\n  pre: p.js\n  pre-if: fromJSON('x')\n  main: m.js\n",
+          {
+            'p.js': 'console.log("hook ran")',
+            'm.js': 'console.log("main ran")'
+          }
+        )
+      );
+      try {
+        const result = await executeWorkflow(
+          write(`
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: org/js@v1
+`)
+        );
+        expect(result.success).toBe(false);
+        const steps = result.jobs[0].steps;
+        expect(steps[0]).toMatchObject({
+          step: { name: 'Pre org/js@v1' },
+          success: false
+        });
+        expect(steps[0].error).toContain("Error when evaluating 'if'");
+        expect(steps[1].outcome).toBe('skipped');
+      } finally {
+        fetchActionMock.mockReset();
+      }
+    });
+
+    it('fails the post step when post-if errors', async () => {
+      fetchActionMock.mockResolvedValue(
+        action(
+          'js-post',
+          "name: js\ndescription: d\nruns:\n  using: node20\n  main: m.js\n  post: p.js\n  post-if: fromJSON('y')\n",
+          {
+            'p.js': 'console.log("hook ran")',
+            'm.js': 'console.log("main ran")'
+          }
+        )
+      );
+      try {
+        const result = await executeWorkflow(
+          write(`
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: org/js@v1
+`)
+        );
+        expect(result.success).toBe(false);
+        const steps = result.jobs[0].steps;
+        expect(steps[0].output).toContain('main ran');
+        expect(steps[1]).toMatchObject({
+          step: { name: 'Post org/js@v1' },
+          success: false
+        });
+        expect(steps[1].output ?? '').not.toContain('hook ran');
+      } finally {
+        fetchActionMock.mockReset();
+      }
+    });
+
+    it('fails the job when its if: errors at runtime, and skips dependents', async () => {
+      const result = await executeWorkflow(
+        write(`
+  a:
+    runs-on: ubuntu-latest
+    if: fromJSON('{')
+    steps:
+      - run: echo never
+  b:
+    needs: a
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo never either
+`)
+      );
+      expect(result.success).toBe(false);
+      expect(
+        result.jobs.map((j) => [j.job, j.success, j.steps.length])
+      ).toEqual([['a', false, 0]]);
+      expect(errors()).toContain("Error when evaluating 'if' for job 'a'");
+    });
+  });
 });

@@ -5,7 +5,11 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { logger } from '../utils/logger';
 import { RunOptions, StepResult, Step, ActionFile } from '../types';
-import { evaluateCondition, ExpressionContext } from './expression';
+import {
+  evaluateCondition,
+  ifEvaluationError,
+  ExpressionContext
+} from './expression';
 import { CONTAINER_EXCHANGE_DIR, CONTAINER_WORKDIR } from './container-runtime';
 import {
   cleanupStepFiles,
@@ -249,10 +253,7 @@ export async function executeNodeAction(
   }
   if (preState) {
     state = { ...preState };
-  } else if (
-    pre &&
-    evaluateCondition(action.runs['pre-if'] ?? 'always()', callerCtx)
-  ) {
+  } else if (pre && runPreIf(action, step, callerCtx)) {
     const preResult = await runScript(pre);
     if (!preResult.success) {
       return {
@@ -307,4 +308,22 @@ export async function executeNodeAction(
  */
 export function inputEnvName(name: string): string {
   return `INPUT_${name.replace(/ /g, '_').toUpperCase()}`;
+}
+
+/**
+ * Whether a JavaScript action's `pre` should run (`pre-if`, default
+ * always()). Throws a step error if `pre-if` can't be evaluated.
+ */
+export function runPreIf(
+  action: ActionFile,
+  step: Step,
+  ctx: ExpressionContext
+): boolean {
+  try {
+    return evaluateCondition(action.runs['pre-if'] ?? 'always()', ctx);
+  } catch (error) {
+    throw new Error(
+      ifEvaluationError(`step 'Pre ${step.name || step.uses}'`, error)
+    );
+  }
 }

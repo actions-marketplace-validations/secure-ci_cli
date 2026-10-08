@@ -6,7 +6,8 @@ import {
   createContext,
   evaluateCondition,
   resolveExpressionValue,
-  substituteExpressions
+  substituteExpressions,
+  validateExpression
 } from './expression';
 
 describe('evaluateCondition', () => {
@@ -93,10 +94,13 @@ describe('evaluateCondition', () => {
     expect(evaluateCondition('failure()', failedCtx)).toBe(true);
   });
 
-  it('fails open (returns true) on invalid expressions', () => {
+  it('throws on invalid expressions instead of failing open', () => {
     const ctx = createContext();
-    expect(evaluateCondition('inputs.a ===', ctx)).toBe(true);
-    expect(evaluateCondition('unknownFunc()', ctx)).toBe(true);
+    expect(() => evaluateCondition('inputs.a ===', ctx)).toThrow();
+    expect(() => evaluateCondition('unknownFunc()', ctx)).toThrow(
+      "Unrecognized function: 'unknownFunc'"
+    );
+    expect(() => evaluateCondition("fromJSON('not json')", ctx)).toThrow();
   });
 
   it('resolves matrix values', () => {
@@ -318,5 +322,64 @@ describe('expression operators and contexts', () => {
     expect(evaluateCondition("''", ctx)).toBe(false);
     expect(evaluateCondition('null', ctx)).toBe(false);
     expect(evaluateCondition("fromJSON('[]')", ctx)).toBe(true);
+  });
+});
+
+describe('validateExpression', () => {
+  it('accepts valid expressions, wrapped or not', () => {
+    expect(
+      validateExpression("github.ref == 'refs/heads/main'", 'job-if')
+    ).toBeUndefined();
+    expect(
+      validateExpression(
+        "${{ success() && needs.a.result == 'success' }}",
+        'job-if'
+      )
+    ).toBeUndefined();
+    expect(
+      validateExpression(
+        "matrix.os == 'linux' && hashFiles('**/x') != '' && contains(steps.a.outputs.x, 'y')",
+        'step-if'
+      )
+    ).toBeUndefined();
+  });
+
+  it('rejects unknown contexts and functions, like GitHub', () => {
+    expect(validateExpression("foo == 'x'", 'step-if')).toContain(
+      "Unrecognized named-value: 'foo'"
+    );
+    expect(validateExpression('bogus()', 'step-if')).toContain(
+      "Unrecognized function: 'bogus'"
+    );
+  });
+
+  it('applies context availability: a job if: has no matrix, steps or env', () => {
+    for (const expr of ["matrix.os == 'x'", 'steps.a.outcome', 'env.X']) {
+      expect(validateExpression(expr, 'job-if')).toContain(
+        'Unrecognized named-value'
+      );
+      expect(validateExpression(expr, 'step-if')).toBeUndefined();
+    }
+    expect(validateExpression("hashFiles('x')", 'job-if')).toContain(
+      "Unrecognized function: 'hashFiles'"
+    );
+  });
+
+  it('rejects secrets in composite action steps', () => {
+    expect(validateExpression('secrets.X', 'composite-step-if')).toContain(
+      "Unrecognized named-value: 'secrets'"
+    );
+  });
+
+  it('reports syntax errors', () => {
+    expect(validateExpression('github.ref ==', 'step-if')).toBeTruthy();
+    expect(validateExpression('(github.ref', 'step-if')).toBeTruthy();
+    expect(validateExpression("contains('a'", 'step-if')).toBeTruthy();
+  });
+
+  it('does not evaluate anything while validating', () => {
+    expect(
+      validateExpression("fromJSON('not json')", 'step-if')
+    ).toBeUndefined();
   });
 });

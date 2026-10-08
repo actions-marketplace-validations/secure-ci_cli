@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { parseFile } from '../parser/workflow-parser';
+import { workflowExpressionErrors } from '../parser/validator';
 import { logger } from '../utils/logger';
 import {
   RunOptions,
@@ -14,6 +15,7 @@ import { repositoryRoot } from '../utils/repository';
 import {
   createContext,
   evaluateCondition,
+  ifEvaluationError,
   substituteRecord,
   ExpressionContext,
   NeedsInfo,
@@ -163,6 +165,16 @@ export async function executeWorkflow(
     const parsed = parseFile(filePath);
 
     if (parsed.type === 'workflow') {
+      // Like GitHub, refuse a workflow with an invalid if: before any job.
+      const invalid = workflowExpressionErrors(parsed.file);
+      if (invalid.length > 0) {
+        logger.error(`Invalid workflow file: ${filePath}`);
+        for (const error of invalid) {
+          logger.error(`  ${error.path}: ${error.message}`);
+        }
+        return { success: false, jobs: [], duration: Date.now() - startTime };
+      }
+
       logger.info(`Executing workflow: ${parsed.file.name}`);
 
       options = {
@@ -226,7 +238,17 @@ export async function executeWorkflow(
             anyFailed: Object.values(needs).some((n) => n.result === 'failure')
           }
         };
-        if (!evaluateCondition(withImplicitSuccess(job.if), jobIfCtx)) {
+        let runJob: boolean;
+        try {
+          runJob = evaluateCondition(withImplicitSuccess(job.if), jobIfCtx);
+        } catch (error) {
+          // An if: that can't be evaluated fails the job, as on GitHub.
+          logger.error(ifEvaluationError(`job '${jobId}'`, error));
+          jobs.push({ job: jobId, success: false, steps: [], duration: 0 });
+          jobResults.set(jobId, { result: 'failure', outputs: {} });
+          continue;
+        }
+        if (!runJob) {
           const notOk = needsIds.find((dep) => needs[dep].result !== 'success');
           logger.info(
             notOk
@@ -392,7 +414,36 @@ export async function executeWorkflow(
 
               // After a failure, only steps whose `if:` uses a status
               // function (always(), failure(), ...) still run.
-              if (!evaluateCondition(withImplicitSuccess(step.if), stepCtx)) {
+              let runStep: boolean;
+              try {
+                runStep = evaluateCondition(
+                  withImplicitSuccess(step.if),
+                  stepCtx
+                );
+              } catch (error) {
+                // An if: that can't be evaluated fails the step.
+                const message = ifEvaluationError(
+                  `step '${step.name || step.id || step.uses || 'unnamed'}'`,
+                  error
+                );
+                logger.error(message);
+                stepResults.push({
+                  step,
+                  success: false,
+                  error: message,
+                  duration: 0
+                });
+                if (step.id) {
+                  jobCtx.steps[step.id] = {
+                    outcome: 'failure',
+                    conclusion: 'failure',
+                    outputs: {}
+                  };
+                }
+                jobCtx.jobFailed = true;
+                continue;
+              }
+              if (!runStep) {
                 logger.info(
                   `Skipping step: ${step.name || step.id || 'unnamed'} (condition not met)`
                 );

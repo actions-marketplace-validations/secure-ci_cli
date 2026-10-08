@@ -1,6 +1,10 @@
 import { parseFile } from '../parser/workflow-parser';
 import { logger } from '../utils/logger';
 import { ParsedWorkflow, ParsedAction } from '../types';
+import {
+  actionExpressionErrors,
+  workflowExpressionErrors
+} from '../parser/validator';
 
 export interface DryRunResult {
   success: boolean;
@@ -21,6 +25,19 @@ export interface DryRunResult {
 export function dryRun(filePath: string): DryRunResult {
   try {
     const parsed = parseFile(filePath);
+
+    // A file a real run would reject fails the dry run too.
+    const invalid =
+      parsed.type === 'workflow'
+        ? workflowExpressionErrors(parsed.file)
+        : actionExpressionErrors(parsed.file);
+    if (invalid.length > 0) {
+      logger.error(`Invalid ${parsed.type} file: ${filePath}`);
+      for (const error of invalid) {
+        logger.error(`  ${error.path}: ${error.message}`);
+      }
+      return { success: false, type: parsed.type };
+    }
 
     if (parsed.type === 'workflow') {
       return dryRunWorkflow(parsed);

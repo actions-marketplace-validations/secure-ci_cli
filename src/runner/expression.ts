@@ -332,11 +332,46 @@ function formatString(template: string, args: unknown[]): string {
   });
 }
 
+/** Functions and their [min, max] number of arguments. */
+const FUNCTIONS: Record<string, [number, number]> = {
+  success: [0, 0],
+  failure: [0, 0],
+  always: [0, 0],
+  cancelled: [0, 0],
+  contains: [2, 2],
+  startswith: [2, 2],
+  endswith: [2, 2],
+  format: [1, Infinity],
+  join: [1, 2],
+  tojson: [1, 1],
+  fromjson: [1, 1],
+  hashfiles: [1, Infinity]
+};
+
+/** Check a function name and its argument count, as GitHub does. */
+function checkCall(
+  name: string,
+  argCount: number,
+  allowed?: Set<string>
+): void {
+  const arity = FUNCTIONS[name.toLowerCase()];
+  if (!arity || (allowed && !allowed.has(name.toLowerCase()))) {
+    throw new Error(`Unrecognized function: '${name}'`);
+  }
+  if (argCount < arity[0]) {
+    throw new Error(`Too few parameters supplied: '${name}'`);
+  }
+  if (argCount > arity[1]) {
+    throw new Error(`Too many parameters supplied: '${name}'`);
+  }
+}
+
 function callFunction(
   name: string,
   rawArgs: unknown[],
   ctx: ExpressionContext
 ): unknown {
+  checkCall(name, rawArgs.length);
   const args = rawArgs.map(unwrap);
   switch (name.toLowerCase()) {
     case 'success':
@@ -382,16 +417,24 @@ function callFunction(
       return hashFiles(workspace, args.map(toText));
     }
     default:
-      throw new Error(`Unsupported function: ${name}()`);
+      throw new Error(`Unrecognized function: '${name}'`);
   }
+}
+
+/** What a validate-only parse may reference (see validateExpression). */
+interface ExpressionScope {
+  contexts: Set<string>;
+  functions: Set<string>;
 }
 
 class Parser {
   private pos = 0;
 
+  /** With a scope, only check names and syntax; nothing is evaluated. */
   constructor(
     private tokens: Token[],
-    private ctx: ExpressionContext
+    private ctx: ExpressionContext,
+    private scope?: ExpressionScope
   ) {}
 
   private peek(): Token {
@@ -537,7 +580,17 @@ class Parser {
             }
           }
           this.expect('rparen');
+          if (this.scope) {
+            checkCall(tok.value, args.length, this.scope.functions);
+            return undefined;
+          }
           return callFunction(tok.value, args, this.ctx);
+        }
+        if (this.scope) {
+          if (!this.scope.contexts.has(lower)) {
+            throw new Error(`Unrecognized named-value: '${tok.value}'`);
+          }
+          return undefined;
         }
         return rootContext(lower, this.ctx);
       }
@@ -649,12 +702,91 @@ export function evaluateCondition(
   if (wrapped) trimmed = wrapped[1].trim();
   if (trimmed === '') return true;
 
+  // An expression that can't be evaluated is an error, as on GitHub (where
+  // it fails the step or job), never a condition that passes.
+  return toBoolean(evaluate(trimmed, ctx));
+}
+
+/** The error for an `if:` that couldn't be evaluated, worded like GitHub's. */
+export function ifEvaluationError(target: string, error: unknown): string {
+  return `Error when evaluating 'if' for ${target}. ${error instanceof Error ? error.message : String(error)}`;
+}
+
+/** Where an expression appears, which decides what it may reference. */
+export type ExpressionLocation = 'job-if' | 'step-if' | 'composite-step-if';
+
+const STATUS_FUNCTIONS = ['success', 'failure', 'always', 'cancelled'];
+const GENERAL_FUNCTIONS = [
+  'contains',
+  'startswith',
+  'endswith',
+  'format',
+  'join',
+  'tojson',
+  'fromjson'
+];
+
+/**
+ * GitHub's context availability for `if:`
+ * (https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability).
+ */
+const SCOPES: Record<ExpressionLocation, ExpressionScope> = {
+  'job-if': {
+    contexts: new Set(['github', 'needs', 'vars', 'inputs']),
+    functions: new Set([...STATUS_FUNCTIONS, ...GENERAL_FUNCTIONS])
+  },
+  'step-if': {
+    contexts: new Set([
+      'github',
+      'needs',
+      'strategy',
+      'matrix',
+      'job',
+      'runner',
+      'env',
+      'vars',
+      'secrets',
+      'steps',
+      'inputs'
+    ]),
+    functions: new Set([...STATUS_FUNCTIONS, ...GENERAL_FUNCTIONS, 'hashfiles'])
+  },
+  'composite-step-if': {
+    contexts: new Set([
+      'github',
+      'needs',
+      'strategy',
+      'matrix',
+      'job',
+      'runner',
+      'env',
+      'vars',
+      'steps',
+      'inputs'
+    ]),
+    functions: new Set([...STATUS_FUNCTIONS, ...GENERAL_FUNCTIONS, 'hashfiles'])
+  }
+};
+
+/**
+ * Check an `if:` expression without evaluating it: syntax, and that it only
+ * uses contexts and functions available where it appears. Returns the error
+ * message, or undefined if it's valid. GitHub rejects a workflow with such
+ * an error before running any job.
+ */
+export function validateExpression(
+  expr: string | boolean | undefined,
+  location: ExpressionLocation
+): string | undefined {
+  if (expr === undefined || typeof expr === 'boolean') return undefined;
+  let trimmed = expr.trim();
+  const wrapped = trimmed.match(/^\$\{\{([\s\S]*)\}\}$/);
+  if (wrapped) trimmed = wrapped[1].trim();
+  if (trimmed === '') return undefined;
   try {
-    return toBoolean(evaluate(trimmed, ctx));
+    new Parser(tokenize(trimmed), createContext(), SCOPES[location]).parse();
+    return undefined;
   } catch (error) {
-    logger.warn(
-      `Failed to evaluate condition "${expr}": ${error instanceof Error ? error.message : 'Unknown error'}. Defaulting to true.`
-    );
-    return true;
+    return error instanceof Error ? error.message : String(error);
   }
 }

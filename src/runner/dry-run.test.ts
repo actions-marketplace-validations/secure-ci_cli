@@ -1,10 +1,35 @@
 import { dryRun } from './dry-run';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 describe('Dry Run', () => {
   const fixturesDir = path.join(__dirname, '../../test/fixtures');
 
   describe('dryRun for workflows', () => {
+    it('fails for an invalid if: expression, like a real run', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-dry-'));
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        'name: B\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo x\n        if: sucess()\n'
+      );
+      const errors: string[] = [];
+      const originalError = console.error;
+      console.error = (...args: unknown[]) => {
+        errors.push(args.join(' '));
+      };
+      try {
+        expect(dryRun(file).success).toBe(false);
+        expect(errors.join('\n')).toContain(
+          "jobs.a.steps[0].if: Unrecognized function: 'sucess'"
+        );
+      } finally {
+        console.error = originalError;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('should display workflow structure without executing', () => {
       const workflowPath = path.join(fixturesDir, 'simple-workflow.yml');
 

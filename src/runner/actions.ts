@@ -18,6 +18,7 @@ import {
 import {
   createContext,
   evaluateCondition,
+  ifEvaluationError,
   resolveExpressionValue,
   substituteExpressions,
   substituteRecord,
@@ -28,7 +29,8 @@ import { JobRuntime } from './job-runtime';
 import { isLocalCheckout, localCheckout } from './checkout';
 import { executeStep } from './steps';
 import { executeDockerAction } from './docker-action';
-import { executeNodeAction } from './node-action';
+import { executeNodeAction, runPreIf } from './node-action';
+import { actionExpressionErrors } from '../parser/validator';
 
 /**
  * Build an action's `inputs.*`: the step's `with:` values (resolved against
@@ -235,13 +237,23 @@ export async function runPreSteps(
     } catch {
       continue;
     }
-    if (
-      !/^node\d+$/.test(action.runs.using) ||
-      !action.runs.pre ||
-      !evaluateCondition(action.runs['pre-if'] ?? 'always()', stepCtx)
-    ) {
+    if (!/^node\d+$/.test(action.runs.using) || !action.runs.pre) continue;
+    let runPre: boolean;
+    try {
+      runPre = runPreIf(action, step, stepCtx);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(message);
+      stepResults.push({
+        step: { name: `Pre ${step.name || step.uses}` },
+        success: false,
+        error: message,
+        duration: 0
+      });
+      jobCtx.jobFailed = true;
       continue;
     }
+    if (!runPre) continue;
 
     logger.info(`Running: Pre ${step.name || step.uses}`);
     const result = await executeNodeAction(
@@ -388,6 +400,20 @@ export async function executeAction(
 
     // Handle different action types
     if (action.runs.using === 'composite') {
+      const invalid = actionExpressionErrors(action);
+      if (invalid.length > 0) {
+        const error = `Invalid action file for ${step.uses}: ${invalid
+          .map((e) => `${e.path}: ${e.message}`)
+          .join('; ')}`;
+        logger.error(error);
+        return {
+          step,
+          success: false,
+          error,
+          duration: Date.now() - startTime
+        };
+      }
+
       // Execute composite action steps
       logger.info(`Executing composite action: ${action.name}`);
 
@@ -426,7 +452,23 @@ export async function executeAction(
             }
           };
 
-          if (!evaluateCondition(compositeStep.if, stepCtx)) {
+          let runCompositeStep: boolean;
+          try {
+            runCompositeStep = evaluateCondition(compositeStep.if, stepCtx);
+          } catch (error) {
+            const message = ifEvaluationError(
+              `step '${compositeStep.name || compositeStep.id || 'unnamed'}' of ${step.uses}`,
+              error
+            );
+            logger.error(message);
+            return {
+              step,
+              success: false,
+              error: message,
+              duration: Date.now() - startTime
+            };
+          }
+          if (!runCompositeStep) {
             logger.info(
               `Skipping composite step: ${compositeStep.name || compositeStep.id || 'unnamed'} (condition not met)`
             );

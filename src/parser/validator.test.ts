@@ -1,4 +1,6 @@
 import { validateWorkflow, validateAction } from './validator';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 describe('Validator', () => {
@@ -19,6 +21,46 @@ describe('Validator', () => {
 
       expect(result.valid).toBe(false);
       expect(result.errors.length).toBeGreaterThan(0);
+    });
+
+    it('reports invalid if: expressions with their location', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-if-'));
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        [
+          'name: If',
+          'on: push',
+          'jobs:',
+          '  a:',
+          '    runs-on: ubuntu-latest',
+          "    if: matrix.os == 'linux'",
+          '    steps:',
+          '      - run: echo ok',
+          '        if: ${{ success() }}',
+          '      - run: echo bad',
+          '        if: github.ref == ',
+          '      - run: echo fn',
+          '        if: bogus()'
+        ].join('\n')
+      );
+      try {
+        const result = validateWorkflow(file);
+        expect(result.valid).toBe(false);
+        expect(result.errors.map((e) => [e.path, e.message])).toEqual([
+          [
+            'jobs.a.if',
+            expect.stringContaining("Unrecognized named-value: 'matrix'")
+          ],
+          ['jobs.a.steps[1].if', expect.any(String)],
+          [
+            'jobs.a.steps[2].if',
+            expect.stringContaining("Unrecognized function: 'bogus'")
+          ]
+        ]);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('should validate job structure', () => {

@@ -6,6 +6,7 @@ import { StepResult, Step } from '../types';
 import { execSync } from 'child_process';
 import {
   evaluateCondition,
+  ifEvaluationError,
   ExpressionContext,
   GithubContext
 } from './expression';
@@ -189,7 +190,22 @@ export async function runPostSteps(
   stepResults: StepResult[]
 ): Promise<void> {
   for (const post of [...runtime.postSteps].reverse()) {
-    if (!evaluateCondition(post.condition, ctx)) {
+    let run: boolean;
+    try {
+      run = evaluateCondition(post.condition, ctx);
+    } catch (error) {
+      const message = ifEvaluationError(`step '${post.step.name}'`, error);
+      logger.error(message);
+      stepResults.push({
+        step: post.step,
+        success: false,
+        error: message,
+        duration: 0
+      });
+      ctx.jobFailed = true;
+      continue;
+    }
+    if (!run) {
       logger.info(`Skipping step: ${post.step.name} (condition not met)`);
       continue;
     }

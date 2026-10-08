@@ -1,5 +1,52 @@
 import { parseWorkflow, parseAction } from './workflow-parser';
-import { ValidationResult, ValidationError } from '../types';
+import {
+  ActionFile,
+  ValidationResult,
+  ValidationError,
+  WorkflowFile
+} from '../types';
+import { validateExpression } from '../runner/expression';
+
+/**
+ * Invalid `if:` expressions in a workflow: syntax errors, or contexts and
+ * functions not available where they're used. GitHub rejects such a
+ * workflow before running any job.
+ */
+export function workflowExpressionErrors(
+  workflow: WorkflowFile
+): ValidationError[] {
+  const errors: ValidationError[] = [];
+  const check = (
+    condition: unknown,
+    location: Parameters<typeof validateExpression>[1],
+    at: string
+  ) => {
+    const message = validateExpression(
+      condition as string | boolean | undefined,
+      location
+    );
+    if (message) errors.push({ path: at, message, severity: 'error' });
+  };
+  for (const [jobId, job] of Object.entries(workflow.jobs ?? {})) {
+    check(job.if, 'job-if', `jobs.${jobId}.if`);
+    (job.steps ?? []).forEach((step, i) =>
+      check(step.if, 'step-if', `jobs.${jobId}.steps[${i}].if`)
+    );
+  }
+  return errors;
+}
+
+/** Invalid `if:` expressions in a composite action's steps. */
+export function actionExpressionErrors(action: ActionFile): ValidationError[] {
+  const errors: ValidationError[] = [];
+  (action.runs?.steps ?? []).forEach((step, i) => {
+    const message = validateExpression(step.if, 'composite-step-if');
+    if (message) {
+      errors.push({ path: `runs.steps[${i}].if`, message, severity: 'error' });
+    }
+  });
+  return errors;
+}
 
 /**
  * Validate a workflow file
@@ -88,6 +135,8 @@ export function validateWorkflow(filePath: string): ValidationResult {
         }
       });
     }
+
+    errors.push(...workflowExpressionErrors(workflow));
   } catch (error) {
     errors.push({
       path: 'root',
@@ -173,6 +222,7 @@ export function validateAction(filePath: string): ValidationResult {
               });
             }
           });
+          errors.push(...actionExpressionErrors(action));
         }
       }
     }
