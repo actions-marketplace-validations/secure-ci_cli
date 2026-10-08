@@ -45,6 +45,8 @@ export interface ExpressionContext {
   runner: Record<string, unknown>;
   vars: Record<string, string>;
   strategy: Record<string, unknown>;
+  /** Set inside composite actions, where GitHub has no `secrets` context. */
+  secretsUnavailable?: boolean;
   /** `jobs.<id>.result/outputs`, only for `on.workflow_call.outputs`. */
   jobs?: Record<string, NeedsInfo>;
   jobFailed: boolean;
@@ -288,6 +290,11 @@ function rootContext(name: string, ctx: ExpressionContext): unknown {
     case 'inputs':
       return ctx.inputs;
     case 'secrets':
+      if (ctx.secretsUnavailable) {
+        throw new Error(
+          "Unrecognized named-value: 'secrets' (composite actions get secrets as inputs)"
+        );
+      }
       return ctx.secrets;
     case 'steps':
       return stepsContext(ctx);

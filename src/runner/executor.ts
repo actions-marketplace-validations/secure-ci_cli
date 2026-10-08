@@ -765,6 +765,11 @@ export async function executeWorkflow(
             }
 
             await runPostSteps(runtime, jobCtx, stepResults);
+            if (runtime.summary.trim()) {
+              logger.info(
+                `Job summary (${jobLabel}):\n${runtime.summary.trim()}`
+              );
+            }
 
             jobCtx.job = {
               ...jobCtx.job,
@@ -793,6 +798,7 @@ export async function executeWorkflow(
             job: jobLabel,
             success: jobSuccess,
             ...(allowedFailure ? { continueOnError: true } : {}),
+            ...(runtime.summary ? { summary: runtime.summary } : {}),
             steps: stepResults,
             outputs: { ...jobOutputs },
             duration: Date.now() - jobStartTime
@@ -943,6 +949,8 @@ interface JobRuntime {
   container?: JobContainerHandle;
   /** `defaults.run` (job-level, else workflow-level) for `run:` steps. */
   defaults: { shell?: string; workingDirectory?: string };
+  /** What steps wrote to `$GITHUB_STEP_SUMMARY`, in order. */
+  summary: string;
 }
 
 /** A per-job container that `run:` steps and JS actions are exec'd into. */
@@ -1155,6 +1163,21 @@ function createContainerStepFiles(container: JobContainerHandle): {
   };
 }
 
+/**
+ * Kill what a timed-out step left running in the job container: every
+ * process whose environment carries the step's SECURECI_STEP marker
+ * (children inherit it). Killing the container client alone leaves the
+ * command running until the container is removed.
+ */
+async function killStepProcesses(
+  container: JobContainerHandle,
+  marker: string
+): Promise<void> {
+  await container.runtime.exec(container.id, {
+    command: `for p in /proc/[0-9]*; do tr '\\0' '\\n' < "$p/environ" 2>/dev/null | grep -qx 'SECURECI_STEP=${marker}' && kill -9 "\${p#/proc/}" 2>/dev/null; done; true`
+  });
+}
+
 /** `export PATH=...` prefix applying `$GITHUB_PATH` additions in a shell. */
 function containerPathPrefix(runtime: JobRuntime): string {
   return runtime.path.length
@@ -1217,7 +1240,8 @@ function createJobRuntime(
     env: {},
     path: [],
     postSteps: [],
-    defaults
+    defaults,
+    summary: ''
   };
 }
 
@@ -1307,6 +1331,7 @@ function finishStepOutput(
   }
 
   const fileResults = readStepFiles(files);
+  runtime.summary += fileResults.summary;
   Object.assign(runtime.env, fileResults.env);
   runtime.path.unshift(...[...fileResults.path].reverse());
 
@@ -1513,10 +1538,14 @@ async function executeInJobContainer(
       env: {
         ...containerRunnerEnv(runtime),
         ...mergedEnv,
-        ...fileCommandEnv(files, containerDir)
+        ...fileCommandEnv(files, containerDir),
+        SECURECI_STEP: path.basename(files.dir)
       },
       timeoutMs: options.containerTimeoutMs
     });
+    if (result.timedOut) {
+      await killStepProcesses(container, path.basename(files.dir));
+    }
 
     const { outputs } = finishStepOutput(result.stdout, files, runtime);
     if (result.stderr) {
@@ -1835,10 +1864,14 @@ async function executeNodeAction(
           PATH: [...runtime.path, container.node.basePath]
             .filter(Boolean)
             .join(':'),
-          ...fileCommandEnv(files, containerDir)
+          ...fileCommandEnv(files, containerDir),
+          SECURECI_STEP: path.basename(files.dir)
         },
         timeoutMs: options.containerTimeoutMs
       });
+      if (result.timedOut) {
+        await killStepProcesses(container, path.basename(files.dir));
+      }
       return {
         success: result.success,
         stdout: result.stdout,
@@ -2296,9 +2329,10 @@ async function executeAction(
         ...createContext(
           { ...callerCtx.env },
           actionInputs,
-          options.secrets,
+          {},
           callerCtx.github
         ),
+        secretsUnavailable: true,
         vars: callerCtx.vars,
         job: callerCtx.job,
         runner: callerCtx.runner,

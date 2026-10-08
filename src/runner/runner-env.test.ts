@@ -70,11 +70,19 @@ describe('runner-env', () => {
         outputs: { out: '1' },
         env: { FOO: 'bar' },
         path: ['/opt/a', '/opt/b'],
-        state: { pid: '42' }
+        state: { pid: '42' },
+        summary: ''
       });
 
       cleanupStepFiles(files);
       expect(fs.existsSync(files.dir)).toBe(false);
+    });
+
+    it('reads back the step summary (#36)', () => {
+      const files = createStepFiles();
+      fs.writeFileSync(files.summary, '## Results\n- ok\n');
+      expect(readStepFiles(files).summary).toBe('## Results\n- ok\n');
+      cleanupStepFiles(files);
     });
 
     it('can create files inside a given directory', () => {
@@ -128,6 +136,40 @@ describe('runner-env', () => {
     it('leaves lines that merely look similar untouched', () => {
       const result = processWorkflowCommands('not ::a-command:: here');
       expect(result.text).toBe('not ::a-command:: here');
+    });
+
+    it('hides problem-matcher and echo commands, in both syntaxes (#36)', () => {
+      const result = processWorkflowCommands(
+        [
+          '##[add-matcher]/tmp/tsc.json',
+          '::add-matcher::/tmp/eslint.json',
+          '::remove-matcher owner=tsc::',
+          '::echo::on',
+          '##[warning]legacy syntax',
+          'kept'
+        ].join('\n')
+      );
+      expect(result.text).toBe('kept');
+      expect(result.annotations).toEqual([
+        { level: 'warning', message: 'legacy syntax' }
+      ]);
+    });
+
+    it('ignores commands between ::stop-commands::<token> and ::<token>:: (#36)', () => {
+      const result = processWorkflowCommands(
+        [
+          '::stop-commands::pause-123',
+          '::add-mask::not-a-mask',
+          '::set-output name=x::nope',
+          '::pause-123::',
+          '::set-output name=y::yes'
+        ].join('\n')
+      );
+      expect(result.masks).toEqual([]);
+      expect(result.outputs).toEqual({ y: 'yes' });
+      expect(result.text).toBe(
+        ['::add-mask::not-a-mask', '::set-output name=x::nope'].join('\n')
+      );
     });
   });
 

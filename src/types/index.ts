@@ -214,6 +214,8 @@ export interface JobResult {
   outputs?: Record<string, string>;
   /** Failed, but allowed to by job-level `continue-on-error`. */
   continueOnError?: boolean;
+  /** Markdown the steps wrote to `$GITHUB_STEP_SUMMARY`. */
+  summary?: string;
   duration: number;
 }
 

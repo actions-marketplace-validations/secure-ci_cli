@@ -96,7 +96,7 @@ secureci run .github/workflows/ci.yml --container-runtime=podman --container-mem
 - The runner images are large (about 2 GB unpacked) and pulled on first use.
 - JavaScript actions run with the image's own `node`. If an image has no Node.js (e.g. a plain `ubuntu:22.04` via `--container-image`), they fail with a clear error.
 - `services:` containers are not supported yet.
-- `--container-timeout` stops waiting for a step after the given time and fails it. The command itself keeps running inside the container until the job's container is removed.
+- `--container-timeout` fails a step that runs longer than the given time, and kills its processes in the job container (including background ones it started).
 
 ### Security: what runs where
 
@@ -265,9 +265,11 @@ Steps can write to `$GITHUB_OUTPUT` to expose values to later steps via `${{ ste
 
 ### File Commands and Workflow Commands
 
-Every step (`run:`, JavaScript and Docker actions) gets its own `$GITHUB_OUTPUT`, `$GITHUB_ENV`, `$GITHUB_PATH`, `$GITHUB_STATE` and `$GITHUB_STEP_SUMMARY` files. Values written to `$GITHUB_ENV` and directories written to `$GITHUB_PATH` are available to all later steps in the job (`$GITHUB_ENV` values also appear in `${{ env.* }}`).
+Every step (`run:`, JavaScript and Docker actions) gets its own `$GITHUB_OUTPUT`, `$GITHUB_ENV`, `$GITHUB_PATH`, `$GITHUB_STATE` and `$GITHUB_STEP_SUMMARY` files. Values written to `$GITHUB_ENV` and directories written to `$GITHUB_PATH` are available to all later steps in the job (`$GITHUB_ENV` values also appear in `${{ env.* }}`). What steps write to `$GITHUB_STEP_SUMMARY` is printed at the end of the job.
 
-Workflow commands printed to stdout are interpreted: `::add-mask::`, `::set-output`, `::save-state`, `::warning::`, `::error::`, `::notice::`, `::debug::` and `::group::`/`::endgroup::`.
+Workflow commands printed to stdout are interpreted, in both the `::cmd::` and legacy `##[cmd]` syntax: `::add-mask::`, `::set-output`, `::save-state`, `::warning::`, `::error::`, `::notice::`, `::debug::`, `::group::`/`::endgroup::` and `::stop-commands::<token>` (nothing is interpreted until `::<token>::`). Problem matchers (`::add-matcher::`, `::remove-matcher::`) and `::echo::` are hidden.
+
+Composite actions don't get the `secrets` context, as on GitHub: pass secrets to them as inputs.
 
 ### Events and the `github` Context
 

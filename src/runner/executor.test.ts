@@ -3291,4 +3291,101 @@ jobs:
       }
     });
   });
+
+  describe('runner fidelity (#36)', () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-fidelity-'));
+    });
+    afterEach(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    function writeWorkflow(steps: string): string {
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        `name: F\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n${steps}`
+      );
+      return file;
+    }
+
+    it('collects $GITHUB_STEP_SUMMARY into the job result and prints it', async () => {
+      const logSpy = vi.spyOn(console, 'log');
+      try {
+        const result = await executeWorkflow(
+          writeWorkflow(
+            [
+              '      - run: echo "## Tests" >> "$GITHUB_STEP_SUMMARY"',
+              '      - run: echo "- 3 passed" >> "$GITHUB_STEP_SUMMARY"'
+            ].join('\n') + '\n'
+          )
+        );
+        expect(result.jobs[0].summary).toBe('## Tests\n- 3 passed\n');
+        expect(logSpy.mock.calls.flat().join('\n')).toContain('- 3 passed');
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    it('does not expose secrets.* inside composite actions', async () => {
+      const actionDir = path.join(dir, 'comp');
+      fs.mkdirSync(actionDir);
+      fs.writeFileSync(
+        path.join(actionDir, 'action.yml'),
+        [
+          'name: comp',
+          'description: d',
+          'runs:',
+          '  using: composite',
+          '  steps:',
+          '    - shell: bash',
+          '      run: echo "token=${{ secrets.TOKEN }}"'
+        ].join('\n')
+      );
+      fetchActionMock.mockResolvedValueOnce(path.join(actionDir, 'action.yml'));
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const result = await executeWorkflow(
+          writeWorkflow('      - uses: org/comp@v1\n'),
+          { secrets: { TOKEN: 'abc' } }
+        );
+        expect(result.success).toBe(false);
+        expect(result.jobs[0].steps[0].output ?? '').not.toContain('abc');
+        expect(warnSpy.mock.calls.flat().join('\n')).toContain(
+          "Unrecognized named-value: 'secrets'"
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('kills the step processes in the job container when a step times out', async () => {
+      const fake = fakeJobContainerRuntime((_id, opts) =>
+        /script\.sh/.test(opts.command ?? '')
+          ? { success: false, timedOut: true, exitCode: null }
+          : {}
+      ) as ReturnType<typeof fakeJobContainerRuntime>;
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+
+      const result = await executeWorkflow(
+        writeWorkflow('      - run: sleep 100\n'),
+        {
+          containerRuntime: 'docker',
+          containerTimeoutMs: 50
+        }
+      );
+
+      expect(result.success).toBe(false);
+      const calls = fake.exec.mock.calls.map((c) => c[1] as ExecCall);
+      const stepCall = calls.find((c) => /script\.sh/.test(c.command ?? ''));
+      const marker = stepCall?.env?.SECURECI_STEP;
+      expect(marker).toBeTruthy();
+      const kill = calls.find(
+        (c) => c.command?.includes('kill') && c.command.includes(String(marker))
+      );
+      expect(kill).toBeDefined();
+    });
+  });
 });

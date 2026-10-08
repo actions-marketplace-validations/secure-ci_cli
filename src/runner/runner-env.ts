@@ -67,6 +67,8 @@ export interface StepFileResults {
   env: Record<string, string>;
   path: string[];
   state: Record<string, string>;
+  /** Markdown written to `$GITHUB_STEP_SUMMARY`. */
+  summary: string;
 }
 
 /**
@@ -113,7 +115,14 @@ export function readStepFiles(files: StepFiles): StepFileResults {
     outputs: parseKeyValueFile(files.output),
     env: parseKeyValueFile(files.env),
     path: pathLines,
-    state: parseKeyValueFile(files.state)
+    state: parseKeyValueFile(files.state),
+    summary: (() => {
+      try {
+        return fs.readFileSync(files.summary, 'utf-8');
+      } catch {
+        return '';
+      }
+    })()
   };
 }
 
@@ -160,7 +169,10 @@ function parseProperties(raw: string | undefined): Record<string, string> {
 /**
  * Interpret GitHub Actions workflow commands (`::add-mask::`,
  * `::set-output`, `::save-state`, `::warning::`, `::group::`, ...) written
- * to a step's stdout. Unknown `::x::` commands are left in the text.
+ * to a step's stdout, in both the `::cmd::` and legacy `##[cmd]` syntax.
+ * Problem matchers and `::echo::` have no local effect and are hidden;
+ * nothing is interpreted between `::stop-commands::<token>` and
+ * `::<token>::`. Unknown commands are left in the text.
  * https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions
  */
 export function processWorkflowCommands(stdout: string): WorkflowCommandResult {
@@ -172,9 +184,18 @@ export function processWorkflowCommands(stdout: string): WorkflowCommandResult {
     annotations: []
   };
   const kept: string[] = [];
+  let stopToken: string | undefined;
 
   for (const line of stdout.split(/\r?\n/)) {
-    const match = line.match(/^::([a-zA-Z-]+)(?:\s+([^:]*))?::(.*)$/);
+    if (stopToken !== undefined) {
+      if (line === `::${stopToken}::`) stopToken = undefined;
+      else kept.push(line);
+      continue;
+    }
+
+    const match =
+      line.match(/^::([a-zA-Z-]+)(?:\s+([^:]*))?::(.*)$/) ??
+      line.match(/^##\[([a-zA-Z-]+)(?:\s+([^\]]*))?\](.*)$/);
     if (!match) {
       kept.push(line);
       continue;
@@ -201,7 +222,13 @@ export function processWorkflowCommands(stdout: string): WorkflowCommandResult {
       case 'group':
         result.annotations.push({ level: command, message: data });
         break;
+      case 'stop-commands':
+        if (data) stopToken = data;
+        break;
       case 'endgroup':
+      case 'add-matcher':
+      case 'remove-matcher':
+      case 'echo':
         break;
       default:
         kept.push(line);
