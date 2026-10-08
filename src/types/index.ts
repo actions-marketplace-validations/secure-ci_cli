@@ -161,8 +161,15 @@ export interface RunOptions {
   verbose?: boolean;
   /** Container runtime to use for isolating `run:` steps. Default: 'docker'. */
   containerRuntime?: 'auto' | 'docker' | 'podman' | 'containerd' | 'none';
-  /** Image to run steps in when a container runtime is used. */
+  /**
+   * Image for every job without `jobs.<id>.container` (`--container-image`),
+   * overriding the `runs-on` mapping.
+   */
   containerImage?: string;
+  /** `runs-on` label -> image, merged over the built-in mapping. */
+  runnerImages?: Record<string, string>;
+  /** Image for `runs-on` labels with no mapping (config `container-image`). */
+  defaultContainerImage?: string;
   /** Per-step execution timeout in milliseconds when containerized. */
   containerTimeoutMs?: number;
   /** Memory limit (e.g. '512m') applied to the container, if supported. */

@@ -1624,7 +1624,7 @@ jobs:
         workingDir: '/secureci-workspace/sub'
       });
       expect(fake.start.mock.calls[0][0]).toMatchObject({
-        image: 'ubuntu:22.04'
+        image: 'catthehacker/ubuntu:act-latest'
       });
       expect(fake.stop).toHaveBeenCalledTimes(2);
     });
@@ -1663,6 +1663,115 @@ jobs:
       expect(fake.start.mock.calls[1][0]).toMatchObject({
         image: 'python:3.12',
         env: { FROM_CONTAINER: 'spicy' }
+      });
+    });
+
+    describe('image resolution (#32)', () => {
+      const imageWorkflow = `
+name: Images
+on: push
+jobs:
+  latest:
+    runs-on: ubuntu-latest
+    steps: [{ run: echo }]
+  jammy:
+    runs-on: [self-hosted, ubuntu-22.04]
+    steps: [{ run: echo }]
+  custom:
+    runs-on: my-runner
+    steps: [{ run: echo }]
+  mac:
+    runs-on: macos-latest
+    steps: [{ run: echo }]
+  matrix:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04]
+    runs-on: \${{ matrix.os }}
+    steps: [{ run: echo }]
+  pinned:
+    runs-on: ubuntu-latest
+    container: node:20
+    steps: [{ run: echo }]
+`;
+
+      async function imagesFor(options: Record<string, unknown>) {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          await executeWorkflow(writeWorkflow(imageWorkflow), {
+            containerRuntime: 'docker',
+            ...options
+          });
+          const output = [...warnSpy.mock.calls, ...logSpy.mock.calls]
+            .flat()
+            .join('\n');
+          return {
+            images: fake.start.mock.calls.map(
+              (c) => (c[0] as { image: string }).image
+            ),
+            output
+          };
+        } finally {
+          warnSpy.mockRestore();
+          logSpy.mockRestore();
+        }
+      }
+
+      it('maps runs-on labels to runner-like images by default', async () => {
+        const { images, output } = await imagesFor({});
+        expect(images).toEqual([
+          'catthehacker/ubuntu:act-latest',
+          'catthehacker/ubuntu:act-22.04',
+          'catthehacker/ubuntu:act-22.04',
+          'catthehacker/ubuntu:act-22.04',
+          'catthehacker/ubuntu:act-24.04',
+          'node:20'
+        ]);
+        expect(output).toContain('runs-on "my-runner" has no image mapping');
+        expect(output).toMatch(/runs-on "macos-latest".*Linux container/);
+      });
+
+      it('lets runner-images override and extend the built-in mapping', async () => {
+        const { images } = await imagesFor({
+          runnerImages: { 'ubuntu-latest': 'node:22', 'my-runner': 'alpine:3' }
+        });
+        expect(images.slice(0, 3)).toEqual([
+          'node:22',
+          'catthehacker/ubuntu:act-22.04',
+          'alpine:3'
+        ]);
+      });
+
+      it('uses defaultContainerImage only for labels with no mapping', async () => {
+        const { images } = await imagesFor({
+          defaultContainerImage: 'debian:12'
+        });
+        expect(images).toEqual([
+          'catthehacker/ubuntu:act-latest',
+          'catthehacker/ubuntu:act-22.04',
+          'debian:12',
+          'debian:12',
+          'catthehacker/ubuntu:act-24.04',
+          'node:20'
+        ]);
+      });
+
+      it('--container-image wins over runs-on, jobs.<id>.container over both', async () => {
+        const { images } = await imagesFor({
+          containerImage: 'flag:1',
+          runnerImages: { 'ubuntu-latest': 'node:22' }
+        });
+        expect(images).toEqual([
+          'flag:1',
+          'flag:1',
+          'flag:1',
+          'flag:1',
+          'flag:1',
+          'node:20'
+        ]);
       });
     });
 
@@ -1840,7 +1949,7 @@ jobs:
 
       expect(result.success).toBe(false);
       expect(result.jobs[0].steps[0].error).toMatch(
-        /needs `node` in the job container image \(ubuntu:22\.04\)/
+        /needs `node` in the job container image \(catthehacker\/ubuntu:act-latest\)/
       );
     });
 

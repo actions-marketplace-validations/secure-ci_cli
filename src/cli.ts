@@ -15,7 +15,9 @@ import {
   getConfigFilePath,
   getDefaultContainerRuntime,
   isValidConfigKey,
-  parseConfigValue,
+  getConfigValue,
+  setConfigValue,
+  unsetConfigValue,
   resolveNetworkDisabled,
   CONFIG_KEYS
 } from './config';
@@ -97,8 +99,7 @@ program
   )
   .option(
     '--container-image <image>',
-    'Container image for jobs without jobs.<id>.container (default: ubuntu:22.04)',
-    globalConfig['container-image']
+    'Container image for every job without jobs.<id>.container, overriding the runs-on mapping (runner-images in config; jobs with unmapped labels use container-image from config, else catthehacker/ubuntu:act-22.04)'
   )
   .option(
     '--container-timeout <ms>',
@@ -148,6 +149,8 @@ program
         verbose: program.opts().verbose,
         containerRuntime: options.containerRuntime,
         containerImage: options.containerImage,
+        runnerImages: globalConfig['runner-images'],
+        defaultContainerImage: globalConfig['container-image'],
         containerTimeoutMs: options.containerTimeout
           ? Number(options.containerTimeout)
           : undefined,
@@ -304,6 +307,11 @@ configCmd
       const value = config[key];
       logger.info(`${key}=${value === undefined ? '(unset)' : value}`);
     }
+    for (const [label, image] of Object.entries(
+      config['runner-images'] ?? {}
+    )) {
+      logger.info(`runner-images.${label}=${image}`);
+    }
   });
 
 configCmd
@@ -312,11 +320,11 @@ configCmd
   .action((key: string) => {
     if (!isValidConfigKey(key)) {
       logger.error(
-        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}`
+        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}, runner-images.<label>`
       );
       process.exit(1);
     }
-    const value = loadConfig()[key];
+    const value = getConfigValue(loadConfig(), key);
     logger.info(value === undefined ? '(unset)' : String(value));
   });
 
@@ -326,14 +334,13 @@ configCmd
   .action((key: string, value: string) => {
     if (!isValidConfigKey(key)) {
       logger.error(
-        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}`
+        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}, runner-images.<label>`
       );
       process.exit(1);
     }
     try {
-      const parsedValue = parseConfigValue(key, value);
       const config = loadConfig();
-      config[key] = parsedValue as never;
+      const parsedValue = setConfigValue(config, key, value);
       saveConfig(config);
       logger.success(`Set ${key}=${parsedValue} in ${getConfigFilePath()}`);
     } catch (error) {
@@ -348,12 +355,12 @@ configCmd
   .action((key: string) => {
     if (!isValidConfigKey(key)) {
       logger.error(
-        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}`
+        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}, runner-images.<label>`
       );
       process.exit(1);
     }
     const config = loadConfig();
-    delete config[key];
+    unsetConfigValue(config, key);
     saveConfig(config);
     logger.success(`Unset ${key} in ${getConfigFilePath()}`);
   });

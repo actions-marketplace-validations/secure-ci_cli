@@ -74,7 +74,7 @@ secureci run .github/workflows/ci.yml --container-runtime=podman --container-mem
 | Flag                         | Description                                                                                                                                                   |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--container-runtime <name>` | `auto`\|`docker`\|`podman`\|`containerd`\|`none` (default: `docker`, overridable via `~/.secureci/config.yml`; use `none` for the old host-execution default) |
-| `--container-image <image>`  | Image to run steps in (default: `ubuntu:22.04`)                                                                                                               |
+| `--container-image <image>`  | Image for every job without `jobs.<id>.container`, overriding the `runs-on` mapping (see below)                                                               |
 | `--container-timeout <ms>`   | Per-step timeout in milliseconds                                                                                                                              |
 | `--container-memory <limit>` | Memory limit, e.g. `512m`                                                                                                                                     |
 | `--no-network`               | Disable container network access (networking is on by default, like GitHub-hosted runners)                                                                    |
@@ -85,8 +85,13 @@ secureci run .github/workflows/ci.yml --container-runtime=podman --container-mem
 #### How container mode works
 
 - Each job (and each matrix combination) gets **one container**, started when the job begins and removed when it ends, including when a step fails or you press Ctrl-C. Every `run:` step and JavaScript action in the job runs in it via `exec`, so files, installed packages and tools from earlier steps are still there. The current directory is mounted at `/secureci-workspace`.
-- The image is `jobs.<id>.container` when set (string or `{ image, env }` form; `options`, `volumes`, `ports` and `credentials` are ignored with a warning), else `--container-image`. With `--container-runtime none`, `jobs.<id>.container` is ignored and the job runs on the host.
-- JavaScript actions run with the image's own `node`. If the image has no Node.js (the default `ubuntu:22.04` doesn't), they fail with a clear error. Use an image that includes it, e.g. `--container-image node:20` or a runner-like image such as `catthehacker/ubuntu:act-22.04`.
+- The image is chosen in this order:
+  1. `jobs.<id>.container` (string or `{ image, env }` form; `options`, `volumes`, `ports` and `credentials` are ignored with a warning). With `--container-runtime none` it's ignored and the job runs on the host.
+  2. `--container-image`, for every job.
+  3. The job's `runs-on` label, mapped to a runner-like image: `ubuntu-latest` → `catthehacker/ubuntu:act-latest`, `ubuntu-24.04` / `22.04` / `20.04` → `catthehacker/ubuntu:act-24.04` / `act-22.04` / `act-20.04` (the images nektos/act uses, with Node.js, git, curl and common runner tools). Add or override labels with `runner-images` in the config file (below).
+  4. `container-image` from the config file, else `catthehacker/ubuntu:act-22.04`, for labels with no mapping (self-hosted, custom), with a warning. `windows-*` / `macos-*` jobs also run in this Linux image, with a warning.
+- The runner images are large (about 2 GB unpacked) and pulled on first use.
+- JavaScript actions run with the image's own `node`. If an image has no Node.js (e.g. a plain `ubuntu:22.04` via `--container-image`), they fail with a clear error.
 - `services:` containers are not supported yet.
 - `--container-timeout` stops waiting for a step after the given time and fails it. The command itself keeps running inside the container until the job's container is removed.
 
@@ -111,7 +116,19 @@ secureci config unset container-runtime        # revert to the built-in default 
 secureci config path                           # print the config file location
 ```
 
-Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`.
+Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`, and `runner-images.<label>`:
+
+```bash
+secureci config set runner-images.ubuntu-latest node:20-bookworm   # map one runs-on label
+secureci config set runner-images.my-self-hosted-runner my/image:1
+```
+
+```yaml
+# ~/.secureci/config.yml
+runner-images:
+  ubuntu-latest: node:20-bookworm
+  my-self-hosted-runner: my/image:1
+```
 
 ### Pipeline Contracts (`secureci validate --contract`)
 

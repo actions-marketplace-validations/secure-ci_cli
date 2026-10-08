@@ -18,6 +18,8 @@ export interface CliConfig {
   'container-timeout'?: number;
   'container-memory'?: string;
   'allow-network'?: boolean;
+  /** `runs-on` label -> container image, over the built-in mapping. */
+  'runner-images'?: Record<string, string>;
 }
 
 /** Built-in defaults, used when a key is absent from the config file. */
@@ -86,8 +88,54 @@ export const CONFIG_KEYS = [
 
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
 
-export function isValidConfigKey(key: string): key is ConfigKey {
-  return (CONFIG_KEYS as readonly string[]).includes(key);
+/** `runner-images.<label>`: one entry of the runs-on -> image mapping. */
+const RUNNER_IMAGE_KEY = /^runner-images\.(.+)$/;
+
+/** A plain key, or `runner-images.<label>`. */
+export function isValidConfigKey(key: string): boolean {
+  return (
+    (CONFIG_KEYS as readonly string[]).includes(key) ||
+    RUNNER_IMAGE_KEY.test(key)
+  );
+}
+
+/** Read a key (see isValidConfigKey) from a config object. */
+export function getConfigValue(
+  config: CliConfig,
+  key: string
+): CliConfig[ConfigKey] | undefined {
+  const label = key.match(RUNNER_IMAGE_KEY)?.[1];
+  if (label !== undefined) return config['runner-images']?.[label];
+  return config[key as ConfigKey];
+}
+
+/** Parse `rawValue` for `key` and set it on `config`. Throws if invalid. */
+export function setConfigValue(
+  config: CliConfig,
+  key: string,
+  rawValue: string
+): CliConfig[ConfigKey] {
+  const label = key.match(RUNNER_IMAGE_KEY)?.[1];
+  if (label !== undefined) {
+    config['runner-images'] = { ...config['runner-images'], [label]: rawValue };
+    return rawValue;
+  }
+  const value = parseConfigValue(key as ConfigKey, rawValue);
+  (config as Record<string, unknown>)[key] = value;
+  return value;
+}
+
+/** Remove `key` from `config`, dropping an emptied runner-images map. */
+export function unsetConfigValue(config: CliConfig, key: string): void {
+  const label = key.match(RUNNER_IMAGE_KEY)?.[1];
+  if (label === undefined) {
+    delete config[key as ConfigKey];
+    return;
+  }
+  const images = { ...config['runner-images'] };
+  delete images[label];
+  if (Object.keys(images).length > 0) config['runner-images'] = images;
+  else delete config['runner-images'];
 }
 
 /**

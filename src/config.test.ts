@@ -145,4 +145,50 @@ describe('config', () => {
       ).toBe(false);
     });
   });
+
+  describe('runner-images', () => {
+    it('accepts runner-images.<label> keys', async () => {
+      const { isValidConfigKey } = await import('./config');
+      expect(isValidConfigKey('runner-images.ubuntu-latest')).toBe(true);
+      expect(isValidConfigKey('runner-images.')).toBe(false);
+      expect(isValidConfigKey('runner-images')).toBe(false);
+    });
+
+    it('sets, gets and unsets one label without touching the others', async () => {
+      const {
+        loadConfig,
+        saveConfig,
+        setConfigValue,
+        getConfigValue,
+        unsetConfigValue
+      } = await import('./config');
+      saveConfig({ 'runner-images': { 'my-runner': 'alpine:3' } });
+
+      const config = loadConfig();
+      setConfigValue(config, 'runner-images.ubuntu-latest', 'node:22');
+      saveConfig(config);
+      expect(loadConfig()['runner-images']).toEqual({
+        'my-runner': 'alpine:3',
+        'ubuntu-latest': 'node:22'
+      });
+      expect(getConfigValue(loadConfig(), 'runner-images.ubuntu-latest')).toBe(
+        'node:22'
+      );
+
+      const after = loadConfig();
+      unsetConfigValue(after, 'runner-images.my-runner');
+      unsetConfigValue(after, 'runner-images.ubuntu-latest');
+      expect(after['runner-images']).toBeUndefined();
+    });
+
+    it('still handles plain keys', async () => {
+      const { setConfigValue, getConfigValue, unsetConfigValue } =
+        await import('./config');
+      const config = {};
+      setConfigValue(config, 'container-timeout', '500');
+      expect(getConfigValue(config, 'container-timeout')).toBe(500);
+      unsetConfigValue(config, 'container-timeout');
+      expect(config).toEqual({});
+    });
+  });
 });

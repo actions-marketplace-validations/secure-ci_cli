@@ -45,7 +45,19 @@ import {
 } from './runner-env';
 import { resolveShell, shellCommandLine } from './shell';
 
-const DEFAULT_CONTAINER_IMAGE = 'ubuntu:22.04';
+/**
+ * Image for jobs whose `runs-on` has no image mapping. Runner-like (Node.js,
+ * git, curl and common tools), as used by nektos/act.
+ */
+export const DEFAULT_CONTAINER_IMAGE = 'catthehacker/ubuntu:act-22.04';
+
+/** Built-in `runs-on` label -> image mapping, extended by `runner-images`. */
+export const DEFAULT_RUNNER_IMAGES: Record<string, string> = {
+  'ubuntu-latest': 'catthehacker/ubuntu:act-latest',
+  'ubuntu-24.04': 'catthehacker/ubuntu:act-24.04',
+  'ubuntu-22.04': 'catthehacker/ubuntu:act-22.04',
+  'ubuntu-20.04': 'catthehacker/ubuntu:act-20.04'
+};
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -896,7 +908,7 @@ async function startJobContainer(
 
   const image = spec?.image
     ? substituteExpressions(spec.image, ctx)
-    : options.containerImage || DEFAULT_CONTAINER_IMAGE;
+    : options.containerImage || runnerImage(job?.['runs-on'], ctx, options);
   const containerEnv = substituteRecord(
     spec && 'env' in spec ? spec.env : undefined,
     ctx
@@ -936,6 +948,47 @@ async function startJobContainer(
   installContainerCleanup();
   activeContainers.add(runtime.container);
   return true;
+}
+
+/**
+ * The image for a job's `runs-on`: the first label with a mapping in
+ * `runner-images` (or the built-in one), else the default image, with a
+ * warning for labels that have no mapping.
+ */
+function runnerImage(
+  runsOn: Job['runs-on'],
+  ctx: ExpressionContext,
+  options: RunOptions
+): string {
+  const fallback = options.defaultContainerImage || DEFAULT_CONTAINER_IMAGE;
+  const raw: unknown = runsOn;
+  const labels = (
+    Array.isArray(raw)
+      ? raw
+      : raw && typeof raw === 'object'
+        ? [(raw as { labels?: unknown }).labels ?? []].flat()
+        : [raw]
+  )
+    .filter((label): label is string => typeof label === 'string')
+    .map((label) => substituteExpressions(label, ctx));
+  if (labels.length === 0) return fallback;
+
+  const mapping = { ...DEFAULT_RUNNER_IMAGES, ...options.runnerImages };
+  for (const label of labels) {
+    if (mapping[label]) return mapping[label];
+  }
+
+  const shown = labels.join(', ');
+  if (labels.some((label) => /windows|macos/i.test(label))) {
+    logger.warn(
+      `runs-on "${shown}": only Linux containers are supported; running in ${fallback}.`
+    );
+  } else {
+    logger.warn(
+      `runs-on "${shown}" has no image mapping; using ${fallback} (map it with runner-images in ~/.secureci/config.yml).`
+    );
+  }
+  return fallback;
 }
 
 async function stopJobContainer(runtime: JobRuntime): Promise<void> {
@@ -1599,7 +1652,7 @@ async function executeNodeAction(
           : null;
     }
     if (!container.node) {
-      const error = `JavaScript action "${step.uses}" needs \`node\` in the job container image (${container.image}). Use an image that includes Node.js (e.g. --container-image node:20, or catthehacker/ubuntu:act-22.04), or run on the host with --container-runtime none.`;
+      const error = `JavaScript action "${step.uses}" needs \`node\` in the job container image (${container.image}). Use an image that includes Node.js (e.g. --container-image node:20, a runner-images mapping, or ${DEFAULT_CONTAINER_IMAGE}), or run on the host with --container-runtime none.`;
       logger.error(error);
       return { step, success: false, error, duration: Date.now() - startTime };
     }
