@@ -7,7 +7,10 @@ import { clearActionCache, getActionCacheDir } from './runner/action-fetcher';
 import { validateWorkflow, validateAction } from './parser/validator';
 import { parseFile } from './parser/workflow-parser';
 import { parsePipelineContract } from './parser/pipeline-contract-parser';
-import { validatePipelineContract } from './parser/pipeline-contract-validator';
+import {
+  validatePipelineContract,
+  ContractRecurse
+} from './parser/pipeline-contract-validator';
 import { logger, LogLevel } from './utils/logger';
 import { parseKeyValuePairs } from './utils/key-value';
 import {
@@ -196,10 +199,23 @@ program
     '-c, --contract <file>',
     'Also check the workflow against a pipeline contract (required/forbidden actions, minimum versions, ordering)'
   )
-  .action((file: string, options: { contract?: string }) => {
-    requireFile(file);
-    validateFile(file, options.contract);
-  });
+  .addOption(
+    new Option(
+      '--contract-recurse <scope>',
+      'Composite actions / reusable workflows to look inside for --contract: none, local (./...) or all (also downloads remote ones)'
+    )
+      .choices(['none', 'local', 'all'])
+      .default('local')
+  )
+  .action(
+    async (
+      file: string,
+      options: { contract?: string; contractRecurse: ContractRecurse }
+    ) => {
+      requireFile(file);
+      await validateFile(file, options.contract, options.contractRecurse);
+    }
+  );
 
 program
   .command('list')
@@ -208,7 +224,11 @@ program
     listWorkflows();
   });
 
-function validateFile(filePath: string, contractFile?: string): void {
+async function validateFile(
+  filePath: string,
+  contractFile?: string,
+  recurse: ContractRecurse = 'local'
+): Promise<void> {
   try {
     const parsed = parseFile(filePath);
     let result;
@@ -238,7 +258,9 @@ function validateFile(filePath: string, contractFile?: string): void {
         };
       } else {
         const spec = parsePipelineContract(contractFile);
-        const contractResult = validatePipelineContract(parsed, spec);
+        const contractResult = await validatePipelineContract(parsed, spec, {
+          recurse
+        });
         result = {
           valid: result.valid && contractResult.valid,
           errors: [...result.errors, ...contractResult.errors]

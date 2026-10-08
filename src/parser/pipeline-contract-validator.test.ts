@@ -1,4 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+const fetchActionMock = vi.fn();
+const fetchRepoFileMock = vi.fn();
+vi.mock('../runner/action-fetcher', () => ({
+  fetchAction: (...args: unknown[]) => fetchActionMock(...args),
+  fetchRepoFile: (...args: unknown[]) => fetchRepoFileMock(...args)
+}));
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -15,7 +22,7 @@ function workflow(jobs: ParsedWorkflow['file']['jobs']): ParsedWorkflow {
 }
 
 describe('validatePipelineContract', () => {
-  it('passes when required actions are present, in order, with other steps in between (relative)', () => {
+  it('passes when required actions are present, in order, with other steps in between (relative)', async () => {
     const wf = workflow({
       build: {
         'runs-on': 'ubuntu-latest',
@@ -29,7 +36,7 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const result = validatePipelineContract(wf, {
+    const result = await validatePipelineContract(wf, {
       required: [{ uses: 'org/security-scan' }, { uses: 'org/deploy' }]
     });
 
@@ -37,12 +44,12 @@ describe('validatePipelineContract', () => {
     expect(result.errors).toEqual([]);
   });
 
-  it('errors when a required action is missing', () => {
+  it('errors when a required action is missing', async () => {
     const wf = workflow({
       build: { 'runs-on': 'ubuntu-latest', steps: [{ uses: 'org/deploy@v1' }] }
     });
 
-    const result = validatePipelineContract(wf, {
+    const result = await validatePipelineContract(wf, {
       required: [{ uses: 'org/security-scan' }]
     });
 
@@ -56,7 +63,7 @@ describe('validatePipelineContract', () => {
     ]);
   });
 
-  it('errors when required actions are out of order (relative)', () => {
+  it('errors when required actions are out of order (relative)', async () => {
     const wf = workflow({
       build: {
         'runs-on': 'ubuntu-latest',
@@ -64,7 +71,7 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const result = validatePipelineContract(wf, {
+    const result = await validatePipelineContract(wf, {
       required: [{ uses: 'org/security-scan' }, { uses: 'org/deploy' }]
     });
 
@@ -72,7 +79,7 @@ describe('validatePipelineContract', () => {
     expect(result.errors[0].path).toBe('required[1]');
   });
 
-  it('strict ordering fails when another step runs in between', () => {
+  it('strict ordering fails when another step runs in between', async () => {
     const wf = workflow({
       build: {
         'runs-on': 'ubuntu-latest',
@@ -84,7 +91,7 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const result = validatePipelineContract(wf, {
+    const result = await validatePipelineContract(wf, {
       ordering: 'strict',
       required: [{ uses: 'org/security-scan' }, { uses: 'org/deploy' }]
     });
@@ -93,7 +100,7 @@ describe('validatePipelineContract', () => {
     expect(result.errors[0].message).toContain('immediately after');
   });
 
-  it('strict ordering passes when required actions are back-to-back', () => {
+  it('strict ordering passes when required actions are back-to-back', async () => {
     const wf = workflow({
       build: {
         'runs-on': 'ubuntu-latest',
@@ -101,7 +108,7 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const result = validatePipelineContract(wf, {
+    const result = await validatePipelineContract(wf, {
       ordering: 'strict',
       required: [{ uses: 'org/security-scan' }, { uses: 'org/deploy' }]
     });
@@ -109,7 +116,7 @@ describe('validatePipelineContract', () => {
     expect(result.valid).toBe(true);
   });
 
-  it('respects needs: job ordering across jobs when building the sequence', () => {
+  it('respects needs: job ordering across jobs when building the sequence', async () => {
     const wf = workflow({
       deploy: {
         'runs-on': 'ubuntu-latest',
@@ -122,14 +129,14 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const result = validatePipelineContract(wf, {
+    const result = await validatePipelineContract(wf, {
       required: [{ uses: 'org/security-scan' }, { uses: 'org/deploy' }]
     });
 
     expect(result.valid).toBe(true);
   });
 
-  it('errors when a forbidden action is used (any version)', () => {
+  it('errors when a forbidden action is used (any version)', async () => {
     const wf = workflow({
       build: {
         'runs-on': 'ubuntu-latest',
@@ -137,7 +144,7 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const result = validatePipelineContract(wf, {
+    const result = await validatePipelineContract(wf, {
       forbidden: [{ uses: 'org/legacy-deploy' }]
     });
 
@@ -145,7 +152,7 @@ describe('validatePipelineContract', () => {
     expect(result.errors[0].message).toContain('Forbidden action');
   });
 
-  it('forbidden with an exact version only flags that version', () => {
+  it('forbidden with an exact version only flags that version', async () => {
     const wf = workflow({
       build: {
         'runs-on': 'ubuntu-latest',
@@ -153,18 +160,18 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const okResult = validatePipelineContract(wf, {
+    const okResult = await validatePipelineContract(wf, {
       forbidden: [{ uses: 'org/deploy', version: 'v0.9' }]
     });
     expect(okResult.valid).toBe(true);
 
-    const badResult = validatePipelineContract(wf, {
+    const badResult = await validatePipelineContract(wf, {
       forbidden: [{ uses: 'org/deploy', version: 'v1' }]
     });
     expect(badResult.valid).toBe(false);
   });
 
-  it('errors when a required action is below the minimum version', () => {
+  it('errors when a required action is below the minimum version', async () => {
     const wf = workflow({
       build: {
         'runs-on': 'ubuntu-latest',
@@ -172,7 +179,7 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const result = validatePipelineContract(wf, {
+    const result = await validatePipelineContract(wf, {
       required: [{ uses: 'org/security-scan', 'min-version': 'v1.2.0' }]
     });
 
@@ -180,7 +187,7 @@ describe('validatePipelineContract', () => {
     expect(result.errors[0].message).toContain('below the required minimum');
   });
 
-  it('passes when a required action meets the minimum version', () => {
+  it('passes when a required action meets the minimum version', async () => {
     const wf = workflow({
       build: {
         'runs-on': 'ubuntu-latest',
@@ -188,14 +195,14 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const result = validatePipelineContract(wf, {
+    const result = await validatePipelineContract(wf, {
       required: [{ uses: 'org/security-scan', 'min-version': 'v1.2.0' }]
     });
 
     expect(result.valid).toBe(true);
   });
 
-  it('warns (does not fail) when a required action version is not comparable', () => {
+  it('warns (does not fail) when a required action version is not comparable', async () => {
     const wf = workflow({
       build: {
         'runs-on': 'ubuntu-latest',
@@ -203,7 +210,7 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const result = validatePipelineContract(wf, {
+    const result = await validatePipelineContract(wf, {
       required: [{ uses: 'org/security-scan', 'min-version': 'v1.2.0' }]
     });
 
@@ -214,7 +221,7 @@ describe('validatePipelineContract', () => {
   });
 
   describe('ordering of required actions below min-version (#38)', () => {
-    it('still checks ordering for a required action that fails min-version', () => {
+    it('still checks ordering for a required action that fails min-version', async () => {
       const wf = workflow({
         build: {
           'runs-on': 'ubuntu-latest',
@@ -225,7 +232,7 @@ describe('validatePipelineContract', () => {
         }
       });
 
-      const result = validatePipelineContract(wf, {
+      const result = await validatePipelineContract(wf, {
         required: [
           { uses: 'acme/security-scan', 'min-version': 'v1.2.0' },
           { uses: 'acme/deploy' }
@@ -244,7 +251,7 @@ describe('validatePipelineContract', () => {
       ]);
     });
 
-    it('uses the contract index in ordering errors when an earlier entry is missing', () => {
+    it('uses the contract index in ordering errors when an earlier entry is missing', async () => {
       const wf = workflow({
         build: {
           'runs-on': 'ubuntu-latest',
@@ -252,7 +259,7 @@ describe('validatePipelineContract', () => {
         }
       });
 
-      const result = validatePipelineContract(wf, {
+      const result = await validatePipelineContract(wf, {
         required: [
           { uses: 'acme/missing' },
           { uses: 'acme/scan' },
@@ -285,26 +292,27 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    const errorsOf = (result: ReturnType<typeof validatePipelineContract>) =>
-      result.errors.filter((e) => e.severity === 'error');
+    const errorsOf = (
+      result: Awaited<ReturnType<typeof validatePipelineContract>>
+    ) => result.errors.filter((e) => e.severity === 'error');
 
-    it('matches required entries and min-version regardless of owner/repo case', () => {
-      const result = validatePipelineContract(wf, {
+    it('matches required entries and min-version regardless of owner/repo case', async () => {
+      const result = await validatePipelineContract(wf, {
         required: [{ uses: 'org/security-scan', 'min-version': 'v1.2.0' }]
       });
       expect(errorsOf(result)).toEqual([]);
     });
 
-    it('matches forbidden entries regardless of owner/repo case', () => {
-      const result = validatePipelineContract(wf, {
+    it('matches forbidden entries regardless of owner/repo case', async () => {
+      const result = await validatePipelineContract(wf, {
         forbidden: [{ uses: 'org/Legacy-Deploy/sub/Path' }]
       });
       expect(result.valid).toBe(false);
       expect(errorsOf(result)[0].path).toBe('jobs.build.steps[1]');
     });
 
-    it('keeps the path inside the repo, local paths and docker refs case-sensitive', () => {
-      const result = validatePipelineContract(wf, {
+    it('keeps the path inside the repo, local paths and docker refs case-sensitive', async () => {
+      const result = await validatePipelineContract(wf, {
         forbidden: [
           { uses: 'org/legacy-deploy/sub/path' },
           { uses: './.github/actions/local' },
@@ -328,12 +336,12 @@ describe('validatePipelineContract', () => {
       required: [{ uses: 'org/security-scan' }, { uses: 'org/deploy' }]
     };
 
-    it('errors for jobs with no needs: relationship, whatever their YAML order', () => {
+    it('errors for jobs with no needs: relationship, whatever their YAML order', async () => {
       for (const wf of [
         workflow({ scan, deploy }),
         workflow({ deploy, scan })
       ]) {
-        const result = validatePipelineContract(wf, contract);
+        const result = await validatePipelineContract(wf, contract);
         expect(result.valid).toBe(false);
         expect(result.errors).toEqual([
           expect.objectContaining({
@@ -346,19 +354,19 @@ describe('validatePipelineContract', () => {
       }
     });
 
-    it('passes when the later job transitively needs the earlier one', () => {
+    it('passes when the later job transitively needs the earlier one', async () => {
       const wf = workflow({
         deploy: { ...deploy, needs: ['test'] },
         test: { 'runs-on': 'ubuntu-latest', needs: 'scan', steps: [] },
         scan
       });
-      expect(validatePipelineContract(wf, contract).errors).toEqual([]);
+      expect((await validatePipelineContract(wf, contract)).errors).toEqual([]);
     });
 
-    it('strict: passes across jobs only for last step -> first step of a job that needs it', () => {
+    it('strict: passes across jobs only for last step -> first step of a job that needs it', async () => {
       const strict = { ...contract, ordering: 'strict' as const };
       const ok = workflow({ scan, deploy: { ...deploy, needs: 'scan' } });
-      expect(validatePipelineContract(ok, strict).errors).toEqual([]);
+      expect((await validatePipelineContract(ok, strict)).errors).toEqual([]);
 
       const gap = workflow({
         scan,
@@ -368,7 +376,7 @@ describe('validatePipelineContract', () => {
           steps: [{ run: 'echo first' }, ...deploy.steps]
         }
       });
-      expect(validatePipelineContract(gap, strict).valid).toBe(false);
+      expect((await validatePipelineContract(gap, strict)).valid).toBe(false);
     });
   });
 
@@ -406,7 +414,7 @@ describe('validatePipelineContract', () => {
       };
     }
 
-    it('detects a forbidden action wrapped in a local composite action', () => {
+    it('detects a forbidden action wrapped in a local composite action', async () => {
       composite('.github/actions/wrapper', [
         { run: 'echo hi', shell: 'bash' },
         { uses: 'org/legacy-deploy@v1' }
@@ -418,7 +426,7 @@ describe('validatePipelineContract', () => {
         }
       });
 
-      const result = validatePipelineContract(wf, {
+      const result = await validatePipelineContract(wf, {
         forbidden: [{ uses: 'org/legacy-deploy' }]
       });
       expect(result.errors).toEqual([
@@ -429,7 +437,7 @@ describe('validatePipelineContract', () => {
       ]);
     });
 
-    it('detects a forbidden action in a local reusable workflow', () => {
+    it('detects a forbidden action in a local reusable workflow', async () => {
       write('.github/workflows/release.yml', {
         name: 'Release',
         on: 'workflow_call',
@@ -444,7 +452,7 @@ describe('validatePipelineContract', () => {
         release: { uses: './.github/workflows/release.yml' }
       } as ParsedWorkflow['file']['jobs']);
 
-      const result = validatePipelineContract(wf, {
+      const result = await validatePipelineContract(wf, {
         forbidden: [{ uses: 'org/legacy-deploy' }]
       });
       expect(result.errors).toEqual([
@@ -454,7 +462,7 @@ describe('validatePipelineContract', () => {
       ]);
     });
 
-    it('satisfies required actions through a reusable workflow, ordered by needs:', () => {
+    it('satisfies required actions through a reusable workflow, ordered by needs:', async () => {
       write('.github/workflows/release.yml', {
         name: 'Release',
         on: 'workflow_call',
@@ -479,16 +487,20 @@ describe('validatePipelineContract', () => {
         scan,
         release: { uses: './.github/workflows/release.yml', needs: 'scan' }
       } as ParsedWorkflow['file']['jobs']);
-      expect(validatePipelineContract(ordered, contract).errors).toEqual([]);
+      expect(
+        (await validatePipelineContract(ordered, contract)).errors
+      ).toEqual([]);
 
       const parallel = caller({
         scan,
         release: { uses: './.github/workflows/release.yml' }
       } as ParsedWorkflow['file']['jobs']);
-      expect(validatePipelineContract(parallel, contract).valid).toBe(false);
+      expect((await validatePipelineContract(parallel, contract)).valid).toBe(
+        false
+      );
     });
 
-    it('orders steps inside a composite action within the calling job', () => {
+    it('orders steps inside a composite action within the calling job', async () => {
       composite('.github/actions/pipeline', [
         { uses: 'org/security-scan@v1' },
         { uses: 'org/deploy@v1' }
@@ -501,19 +513,23 @@ describe('validatePipelineContract', () => {
       });
 
       expect(
-        validatePipelineContract(wf, {
-          ordering: 'strict',
-          required: [{ uses: 'org/security-scan' }, { uses: 'org/deploy' }]
-        }).errors
+        (
+          await validatePipelineContract(wf, {
+            ordering: 'strict',
+            required: [{ uses: 'org/security-scan' }, { uses: 'org/deploy' }]
+          })
+        ).errors
       ).toEqual([]);
       expect(
-        validatePipelineContract(wf, {
-          required: [{ uses: 'org/deploy' }, { uses: 'org/security-scan' }]
-        }).valid
+        (
+          await validatePipelineContract(wf, {
+            required: [{ uses: 'org/deploy' }, { uses: 'org/security-scan' }]
+          })
+        ).valid
       ).toBe(false);
     });
 
-    it('reports a cycle instead of recursing forever', () => {
+    it('reports a cycle instead of recursing forever', async () => {
       composite('.github/actions/a', [{ uses: './.github/actions/b' }]);
       composite('.github/actions/b', [{ uses: './.github/actions/a' }]);
       const wf = caller({
@@ -523,7 +539,7 @@ describe('validatePipelineContract', () => {
         }
       });
 
-      const result = validatePipelineContract(wf, {});
+      const result = await validatePipelineContract(wf, {});
       expect(result.valid).toBe(false);
       expect(result.errors).toEqual([
         expect.objectContaining({
@@ -533,7 +549,7 @@ describe('validatePipelineContract', () => {
       ]);
     });
 
-    it('stops at a maximum nesting depth', () => {
+    it('stops at a maximum nesting depth', async () => {
       for (let i = 0; i < 12; i++) {
         composite(`.github/actions/n${i}`, [
           { uses: `./.github/actions/n${i + 1}` }
@@ -547,12 +563,12 @@ describe('validatePipelineContract', () => {
         }
       });
 
-      const result = validatePipelineContract(wf, {});
+      const result = await validatePipelineContract(wf, {});
       expect(result.valid).toBe(false);
       expect(result.errors[0].message).toContain('nesting depth');
     });
 
-    it('reports a local action that cannot be parsed instead of throwing', () => {
+    it('reports a local action that cannot be parsed instead of throwing', async () => {
       const file = path.join(root, '.github/actions/broken/action.yml');
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, 'name: [unclosed');
@@ -563,7 +579,7 @@ describe('validatePipelineContract', () => {
         }
       });
 
-      const result = validatePipelineContract(wf, {});
+      const result = await validatePipelineContract(wf, {});
       expect(result.valid).toBe(false);
       expect(result.errors[0]).toMatchObject({
         path: 'jobs.build.steps[0]',
@@ -571,7 +587,7 @@ describe('validatePipelineContract', () => {
       });
     });
 
-    it('warns when a local action cannot be resolved', () => {
+    it('warns when a local action cannot be resolved', async () => {
       const wf = caller({
         build: {
           'runs-on': 'ubuntu-latest',
@@ -579,7 +595,7 @@ describe('validatePipelineContract', () => {
         }
       });
 
-      const result = validatePipelineContract(wf, {});
+      const result = await validatePipelineContract(wf, {});
       expect(result.valid).toBe(true);
       expect(result.errors).toEqual([
         expect.objectContaining({
@@ -588,6 +604,156 @@ describe('validatePipelineContract', () => {
           message: expect.stringContaining('could not be resolved')
         })
       ]);
+    });
+  });
+
+  describe('recursion into remote actions and workflows (#39)', () => {
+    let root: string;
+    let remote: string;
+
+    beforeEach(() => {
+      root = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-contract-'));
+      remote = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-remote-'));
+      fetchActionMock.mockReset();
+      fetchRepoFileMock.mockReset();
+      // Any other remote action is a plain JavaScript action.
+      const jsAction = write(remote, 'js/action.yml', {
+        name: 'js',
+        description: 'd',
+        runs: { using: 'node20', main: 'index.js' }
+      });
+      fetchActionMock.mockResolvedValue(jsAction);
+    });
+    afterEach(() => {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(remote, { recursive: true, force: true });
+    });
+
+    function write(base: string, rel: string, content: unknown): string {
+      const file = path.join(base, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, YAML.stringify(content));
+      return file;
+    }
+
+    function caller(jobs: ParsedWorkflow['file']['jobs']): ParsedWorkflow {
+      const file = { name: 'Caller', on: 'push', jobs };
+      return {
+        type: 'workflow',
+        path: write(root, '.github/workflows/caller.yml', file),
+        file
+      };
+    }
+
+    const forbidden = { forbidden: [{ uses: 'org/legacy-deploy' }] };
+    const wrapperJob = {
+      build: {
+        'runs-on': 'ubuntu-latest',
+        steps: [{ uses: 'org/wrap@v1' }]
+      }
+    };
+
+    it('does not fetch remote refs by default', async () => {
+      const result = await validatePipelineContract(
+        caller(wrapperJob),
+        forbidden
+      );
+      expect(fetchActionMock).not.toHaveBeenCalled();
+      expect(result.errors).toEqual([]);
+    });
+
+    it('with recurse: all, finds a forbidden action in a remote composite action', async () => {
+      fetchActionMock.mockResolvedValueOnce(
+        write(remote, 'action.yml', {
+          name: 'wrap',
+          description: 'd',
+          runs: {
+            using: 'composite',
+            steps: [{ uses: 'org/legacy-deploy@v1' }]
+          }
+        })
+      );
+
+      const result = await validatePipelineContract(
+        caller(wrapperJob),
+        forbidden,
+        { recurse: 'all' }
+      );
+      expect(fetchActionMock).toHaveBeenCalledWith('org/wrap@v1');
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          path: 'jobs.build.steps[0] > org/wrap@v1 > steps[0]',
+          severity: 'error'
+        })
+      ]);
+    });
+
+    it('with recurse: all, follows a remote reusable workflow and its own ./ workflow refs', async () => {
+      write(remote, '.github/workflows/inner.yml', {
+        name: 'inner',
+        on: 'workflow_call',
+        jobs: {
+          ship: {
+            'runs-on': 'ubuntu-latest',
+            steps: [{ uses: 'org/legacy-deploy@v1' }]
+          }
+        }
+      });
+      fetchRepoFileMock.mockResolvedValueOnce(
+        write(remote, '.github/workflows/outer.yml', {
+          name: 'outer',
+          on: 'workflow_call',
+          jobs: { inner: { uses: './.github/workflows/inner.yml' } }
+        })
+      );
+
+      const result = await validatePipelineContract(
+        caller({
+          release: { uses: 'org/shared/.github/workflows/outer.yml@v1' }
+        } as ParsedWorkflow['file']['jobs']),
+        forbidden,
+        { recurse: 'all' }
+      );
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          path: 'jobs.release > org/shared/.github/workflows/outer.yml@v1 > jobs.inner > ./.github/workflows/inner.yml > jobs.ship.steps[0]'
+        })
+      ]);
+    });
+
+    it('warns when a remote ref cannot be fetched', async () => {
+      fetchActionMock.mockResolvedValueOnce(null);
+      const result = await validatePipelineContract(
+        caller(wrapperJob),
+        forbidden,
+        { recurse: 'all' }
+      );
+      expect(result.valid).toBe(true);
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          severity: 'warning',
+          message: expect.stringContaining('could not be fetched')
+        })
+      ]);
+    });
+
+    it('with recurse: none, does not resolve local actions either', async () => {
+      write(root, '.github/actions/wrap/action.yml', {
+        name: 'w',
+        description: 'd',
+        runs: { using: 'composite', steps: [{ uses: 'org/legacy-deploy@v1' }] }
+      });
+      const result = await validatePipelineContract(
+        caller({
+          build: {
+            'runs-on': 'ubuntu-latest',
+            steps: [{ uses: './.github/actions/wrap' }]
+          }
+        }),
+        forbidden,
+        { recurse: 'none' }
+      );
+      expect(result.errors).toEqual([]);
     });
   });
 });
