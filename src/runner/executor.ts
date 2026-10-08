@@ -2127,7 +2127,7 @@ async function executeAction(
 
     const actionPath = isLocalActionRef(step.uses)
       ? resolveLocalAction(step.uses)
-      : await fetchAction(step.uses);
+      : await fetchAction(step.uses, { offline: options.offline });
 
     if (!actionPath) {
       const error = `Could not resolve action "${step.uses}"${

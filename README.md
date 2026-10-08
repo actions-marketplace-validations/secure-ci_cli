@@ -335,7 +335,8 @@ The SecureCI CLI supports fetching and executing remote GitHub Actions:
 - **Local Actions** (`uses: ./path/to/action`): Resolved relative to the workspace (the current directory), using `action.yml` or `action.yaml`.
 - **`docker://` steps** (`uses: docker://alpine:3.20`): Run the image directly, with `with.args` as its arguments and `with.entrypoint` as its entrypoint.
 - **Unresolvable actions fail the step**: A remote action that can't be fetched, a missing local action, or an unsupported `runs.using` fails the step (as on GitHub) instead of being skipped.
-- **Action Caching**: Downloaded actions are cached in `~/.secureci/actions-cache` for faster subsequent runs
+- **Action Caching**: Downloaded repositories are cached in `~/.secureci/actions-cache/<owner>/<repo>/<commit-sha>`. A tag or branch (`@v4`, `@main`) is resolved to its current commit on every run (`git ls-remote`, or the API with a token), so moving refs pick up new commits, and an unchanged commit is never downloaded twice. If a ref can't be resolved (offline, rate-limited), the last commit cached for it is used, with a warning. `--offline` uses only the cache. `secureci cache path` / `secureci cache clear` show and empty it.
+- **Private actions**: With a token, downloads go through the GitHub API, so actions in private and internal repositories work and rate limits are higher. The token is `$GITHUB_TOKEN`, else `$GH_TOKEN`, else `gh auth token`. It's only sent to GitHub (not to a host a download redirects to), never passed to actions, and masked in logs. If GitHub rejects it (e.g. expired), the run continues without it. `GITHUB_SERVER_URL` / `GITHUB_API_URL` point downloads at GitHub Enterprise Server.
 
 ### Example with Remote Actions
 

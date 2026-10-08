@@ -19,7 +19,7 @@ vi.mock('./action-fetcher', async () => {
     );
   return {
     ...actual,
-    fetchAction: (...args: [string]) => fetchActionMock(...args)
+    fetchAction: (...args: unknown[]) => fetchActionMock(...args)
   };
 });
 
@@ -99,8 +99,9 @@ describe('Executor', () => {
         './action-fetcher'
       );
     fetchActionMock.mockReset();
-    fetchActionMock.mockImplementation((uses: string) =>
-      actual.fetchAction(uses)
+    fetchActionMock.mockImplementation(
+      (uses: string, options?: Parameters<typeof actual.fetchAction>[1]) =>
+        actual.fetchAction(uses, options)
     );
   });
 
@@ -2738,7 +2739,10 @@ jobs:
           ].join('\n')
         )
       );
-      expect(fetchActionMock).toHaveBeenCalledWith('actions/checkout@v4');
+      expect(fetchActionMock).toHaveBeenCalledWith(
+        'actions/checkout@v4',
+        expect.anything()
+      );
     });
 
     it('runs the real action when localCheckout is false', async () => {
@@ -2747,7 +2751,10 @@ jobs:
         writeWorkflow('      - uses: actions/checkout@v4\n'),
         { localCheckout: false }
       );
-      expect(fetchActionMock).toHaveBeenCalledWith('actions/checkout@v4');
+      expect(fetchActionMock).toHaveBeenCalledWith(
+        'actions/checkout@v4',
+        expect.anything()
+      );
     });
 
     it('copies the working copy into path:, and removes it at job end', async () => {

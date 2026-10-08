@@ -189,6 +189,8 @@ export interface RunOptions {
    * repository instead of running the action. Default: true.
    */
   localCheckout?: boolean;
+  /** Use only cached remote actions; never download. */
+  offline?: boolean;
 }
 
 export interface StepResult {

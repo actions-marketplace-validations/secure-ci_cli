@@ -3,6 +3,7 @@
 import { Command, Option } from 'commander';
 import { dryRun } from './runner/dry-run';
 import { executeWorkflow } from './runner/executor';
+import { clearActionCache, getActionCacheDir } from './runner/action-fetcher';
 import { validateWorkflow, validateAction } from './parser/validator';
 import { parseFile } from './parser/workflow-parser';
 import { parsePipelineContract } from './parser/pipeline-contract-parser';
@@ -90,6 +91,10 @@ program
   )
   .option('-j, --job <name>', 'Run a specific job')
   .option(
+    '--offline',
+    'Use only cached remote actions (~/.secureci/actions-cache); never download'
+  )
+  .option(
     '--no-local-checkout',
     'Run the real actions/checkout for the current repository instead of using the local working copy'
   )
@@ -154,6 +159,7 @@ program
         eventName: options.eventName,
         job: options.job,
         localCheckout: options.localCheckout,
+        offline: options.offline,
         verbose: program.opts().verbose,
         containerRuntime: options.containerRuntime,
         containerImage: options.containerImage,
@@ -371,6 +377,24 @@ configCmd
     unsetConfigValue(config, key);
     saveConfig(config);
     logger.success(`Unset ${key} in ${getConfigFilePath()}`);
+  });
+
+const cacheCmd = program
+  .command('cache')
+  .description('Manage the cache of downloaded remote actions');
+
+cacheCmd
+  .command('path')
+  .description('Print the action cache directory')
+  .action(() => {
+    logger.info(getActionCacheDir());
+  });
+
+cacheCmd
+  .command('clear')
+  .description('Delete all cached remote actions')
+  .action(() => {
+    clearActionCache();
   });
 
 // With no command, show help and fail, like other vendor CLIs.

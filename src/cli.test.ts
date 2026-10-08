@@ -252,7 +252,7 @@ describe('secureci commands', () => {
   it('names itself secureci and lists its commands in help', () => {
     const result = run(['--help']);
     expect(result.stdout).toContain('Usage: secureci');
-    for (const command of ['run', 'validate', 'list', 'config']) {
+    for (const command of ['run', 'validate', 'list', 'config', 'cache']) {
       expect(result.stdout).toMatch(new RegExp(`\\n\\s+${command}\\b`));
     }
   });
@@ -309,6 +309,18 @@ describe('secureci commands', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Dry run completed successfully');
     expect(result.stdout).not.toContain('hello world');
+  });
+
+  it('prints and clears the action cache with secureci cache', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cache-home-'));
+    const env = { ...process.env, HOME: home };
+    const cacheDir = path.join(home, '.secureci', 'actions-cache');
+    fs.mkdirSync(path.join(cacheDir, 'org', 'act'), { recursive: true });
+
+    expect(run(['cache', 'path'], tempDir, env).stdout).toContain(cacheDir);
+    expect(run(['cache', 'clear'], tempDir, env).status).toBe(0);
+    expect(fs.existsSync(cacheDir)).toBe(false);
+    fs.rmSync(home, { recursive: true, force: true });
   });
 
   it('lists workflows with secureci list', () => {
