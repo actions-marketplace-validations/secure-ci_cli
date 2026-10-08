@@ -6,7 +6,9 @@ import {
   builtinActionFor,
   collectFiles,
   containerFileSystem,
-  hostFileSystem
+  downloadArtifact,
+  hostFileSystem,
+  uploadArtifact
 } from './builtin-actions';
 
 describe('builtin-actions', () => {
@@ -154,6 +156,74 @@ describe('builtin-actions', () => {
         fsys.cleanup();
         fs.rmSync(containerRoot, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('artifact name is confined to the store (no path traversal)', () => {
+    let home: string;
+    let savedHome: string | undefined;
+    beforeEach(() => {
+      home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-arthome-'));
+      savedHome = process.env.HOME;
+      process.env.HOME = home;
+      fs.writeFileSync(path.join(work, 'dist', 'a.txt'), 'payload');
+    });
+    afterEach(() => {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    for (const name of [
+      '../../../escape',
+      '..',
+      'sub/../../escape',
+      '/abs/evil',
+      'a/b',
+      'a\\\\b'
+    ]) {
+      it(`rejects upload-artifact name ${JSON.stringify(name)}`, async () => {
+        const before = fs.existsSync(path.join(home, '.ssh'))
+          ? fs.readdirSync(path.join(home, '.ssh'))
+          : null;
+        const result = await uploadArtifact(
+          hostFileSystem(work),
+          { name, path: 'dist/a.txt' },
+          'run1'
+        );
+        expect(result.success).toBe(false);
+        expect(result.error).toMatch(/[Ii]nvalid artifact name/);
+        // Nothing was written outside the per-run store.
+        const store = path.join(home, '.secureci', 'artifacts', 'run1');
+        const leaked = path.resolve(store, name);
+        expect(
+          leaked.startsWith(store + path.sep) || !fs.existsSync(leaked)
+        ).toBe(true);
+        expect(
+          before
+            ? fs.readdirSync(path.join(home, '.ssh'))
+            : fs.existsSync(path.join(home, '.ssh'))
+        ).toEqual(before ?? false);
+      });
+
+      it(`rejects download-artifact name ${JSON.stringify(name)}`, async () => {
+        const result = await downloadArtifact(
+          hostFileSystem(work),
+          { name, path: 'out' },
+          'run1'
+        );
+        expect(result.success).toBe(false);
+        expect(result.error).toMatch(/[Ii]nvalid artifact name|not found/);
+      });
+    }
+
+    it('still accepts a normal artifact name', async () => {
+      const result = await uploadArtifact(
+        hostFileSystem(work),
+        { name: 'my-bundle.v2', path: 'dist/a.txt' },
+        'run1'
+      );
+      expect(result.success).toBe(true);
     });
   });
 });

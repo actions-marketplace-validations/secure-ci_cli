@@ -303,6 +303,34 @@ function pruneOldArtifacts(): void {
   }
 }
 
+/**
+ * GitHub's invalid artifact-name characters, plus anything that would let a
+ * crafted name escape the per-run store (`/`, `\\`, `..`). The store path
+ * is built from the name, so an unchecked name like `../../../.ssh` would
+ * write onto the host even from a fully containerized job.
+ */
+function safeName(name: string): boolean {
+  try {
+    assertSafeArtifactName(name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function assertSafeArtifactName(name: string): void {
+  if (
+    name === '' ||
+    name === '.' ||
+    name === '..' ||
+    /[\\/"<>|:*?\r\n]/.test(name)
+  ) {
+    throw new Error(
+      `Invalid artifact name: "${name}". Artifact names cannot be empty or contain any of: \\ / " < > | : * ? or line breaks.`
+    );
+  }
+}
+
 /** `actions/upload-artifact`. */
 export async function uploadArtifact(
   fsys: StepFileSystem,
@@ -310,6 +338,11 @@ export async function uploadArtifact(
   runId: string
 ): Promise<BuiltinResult> {
   const name = inputs.name || 'artifact';
+  try {
+    assertSafeArtifactName(name);
+  } catch (error) {
+    return fail(error instanceof Error ? error.message : String(error));
+  }
   if (!inputs.path) return fail('Input required and not supplied: path');
   const { root, files } = await collectFiles(fsys, inputs.path, {
     includeHidden: isTrue(inputs['include-hidden-files'])
@@ -369,13 +402,20 @@ export async function downloadArtifact(
 
   let names: string[];
   if (inputs.name) {
+    try {
+      assertSafeArtifactName(inputs.name);
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : String(error));
+    }
     if (!available.includes(inputs.name)) {
       return fail(`Artifact not found for name: ${inputs.name}`);
     }
     names = [inputs.name];
   } else {
     const pattern = inputs.pattern ? globToRegExp(inputs.pattern) : undefined;
-    names = available.filter((name) => !pattern || pattern.test(name));
+    names = available.filter(
+      (name) => safeName(name) && (!pattern || pattern.test(name))
+    );
   }
 
   // A single named artifact, or merge-multiple, goes straight into path;
