@@ -1,0 +1,110 @@
+name: SecureCI
+description: Validate GitHub Actions workflows and check them against a pipeline contract, with optional SARIF upload to code scanning.
+author: SecureCI
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  files:
+    description: 'Workflow/action files to validate (newline- or space-separated globs). Default: every file in .github/workflows.'
+    required: false
+    default: ''
+  contract:
+    description: 'Path to a pipeline contract to check workflows against (optional).'
+    required: false
+    default: ''
+  contract-recurse:
+    description: 'How far --contract looks into called workflows/actions: none, local or all.'
+    required: false
+    default: 'local'
+  format:
+    description: 'Report format written to the output file and uploaded: sarif or json.'
+    required: false
+    default: 'sarif'
+  output:
+    description: 'Path to write the report to.'
+    required: false
+    default: 'secureci-results.sarif'
+  upload-sarif:
+    description: 'Upload the SARIF report to GitHub code scanning (needs security-events: write; ignored for json).'
+    required: false
+    default: 'true'
+  version:
+    description: 'Version of @secureci/cli to run (npm dist-tag or version).'
+    required: false
+    default: 'latest'
+  github-token:
+    description: 'Token used by the CLI to fetch private actions/workflows for --contract-recurse all.'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run SecureCI
+      id: run
+      shell: bash
+      env:
+        SECURECI_FILES: ${{ inputs.files }}
+        SECURECI_CONTRACT: ${{ inputs.contract }}
+        SECURECI_RECURSE: ${{ inputs.contract-recurse }}
+        SECURECI_FORMAT: ${{ inputs.format }}
+        SECURECI_OUTPUT: ${{ inputs.output }}
+        SECURECI_VERSION: ${{ inputs.version }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+
+        # Collect the target files.
+        files=()
+        if [ -n "${SECURECI_FILES}" ]; then
+          # shellcheck disable=SC2206
+          for pattern in ${SECURECI_FILES}; do
+            for f in $pattern; do [ -e "$f" ] && files+=("$f"); done
+          done
+        else
+          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -e "$f" ] && files+=("$f")
+          done
+        fi
+        if [ ${#files[@]} -eq 0 ]; then
+          echo "::warning::SecureCI found no workflow files to validate."
+          echo "violations=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        args=(validate "${files[@]}" --format "${SECURECI_FORMAT}")
+        if [ -n "${SECURECI_CONTRACT}" ]; then
+          args+=(--contract "${SECURECI_CONTRACT}" --contract-recurse "${SECURECI_RECURSE}")
+        fi
+
+        echo "Running: secureci ${args[*]}"
+        status=0
+        npx --yes "@secureci/cli@${SECURECI_VERSION}" "${args[@]}" \
+          > "${SECURECI_OUTPUT}" || status=$?
+        echo "report=${SECURECI_OUTPUT}" >> "$GITHUB_OUTPUT"
+        echo "status=${status}" >> "$GITHUB_OUTPUT"
+        if [ "$status" -ne 0 ]; then
+          echo "::error::SecureCI validation failed. See the report at ${SECURECI_OUTPUT}."
+        fi
+        # Don't fail the step yet; let the SARIF upload run first.
+        exit 0
+
+    - name: Upload SARIF to code scanning
+      if: ${{ inputs.upload-sarif == 'true' && inputs.format == 'sarif' && hashFiles(inputs.output) != '' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.output }}
+
+    - name: Fail if validation failed
+      if: ${{ steps.run.outputs.status != '0' }}
+      shell: bash
+      run: |
+        echo "SecureCI reported violations; failing the job."
+        exit 1
+
+outputs:
+  report:
+    description: 'Path to the written report file.'
+    value: ${{ steps.run.outputs.report }}

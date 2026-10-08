@@ -11,7 +11,8 @@ import {
   validatePipelineContract,
   ContractRecurse
 } from './parser/pipeline-contract-validator';
-import { formatValidation, ReportFormat } from './report';
+import { formatReport, ReportEntry, ReportFormat } from './report';
+import type { ValidationResult } from './types';
 import { logger, LogLevel } from './utils/logger';
 import { parseKeyValuePairs } from './utils/key-value';
 import {
@@ -213,9 +214,9 @@ program
 program
   .command('validate')
   .description(
-    'Validate a workflow or action file, optionally against a pipeline contract'
+    'Validate one or more workflow or action files, optionally against a pipeline contract'
   )
-  .argument('<file>', 'Path to a workflow or action YAML file')
+  .argument('<file...>', 'Paths to workflow or action YAML files')
   .option(
     '-c, --contract <file>',
     'Also check the workflow against a pipeline contract (required/forbidden actions, minimum versions, ordering)'
@@ -238,16 +239,16 @@ program
   )
   .action(
     async (
-      file: string,
+      files: string[],
       options: {
         contract?: string;
         contractRecurse: ContractRecurse;
         format: ReportFormat;
       }
     ) => {
-      requireFile(file);
-      await validateFile(
-        file,
+      files.forEach(requireFile);
+      await validateFiles(
+        files,
         options.contract,
         options.contractRecurse,
         options.format
@@ -262,8 +263,56 @@ program
     listWorkflows();
   });
 
-async function validateFile(
+async function validateOneFile(
   filePath: string,
+  contractFile: string | undefined,
+  recurse: ContractRecurse,
+  say: (fn: () => void) => void
+): Promise<ValidationResult> {
+  const parsed = parseFile(filePath);
+  let result: ValidationResult;
+
+  if (parsed.type === 'workflow') {
+    result = validateWorkflow(filePath);
+    say(() => logger.info(`Validating workflow: ${filePath}`));
+  } else {
+    result = validateAction(filePath);
+    say(() => logger.info(`Validating action: ${filePath}`));
+  }
+
+  if (contractFile) {
+    say(() =>
+      logger.info(`Validating against pipeline contract: ${contractFile}`)
+    );
+    if (parsed.type !== 'workflow') {
+      result = {
+        valid: false,
+        errors: [
+          ...result.errors,
+          {
+            path: 'root',
+            message:
+              'Pipeline contracts validate job/step sequences and only apply to workflow files, not actions',
+            severity: 'error' as const
+          }
+        ]
+      };
+    } else {
+      const spec = parsePipelineContract(contractFile);
+      const contractResult = await validatePipelineContract(parsed, spec, {
+        recurse
+      });
+      result = {
+        valid: result.valid && contractResult.valid,
+        errors: [...result.errors, ...contractResult.errors]
+      };
+    }
+  }
+  return result;
+}
+
+async function validateFiles(
+  files: string[],
   contractFile?: string,
   recurse: ContractRecurse = 'local',
   format: ReportFormat = 'text'
@@ -274,97 +323,61 @@ async function validateFile(
   const say = (fn: () => void) => {
     if (!quiet) fn();
   };
-  try {
-    const parsed = parseFile(filePath);
-    let result;
 
-    if (parsed.type === 'workflow') {
-      result = validateWorkflow(filePath);
-      say(() => logger.info('Validating workflow...'));
-    } else {
-      result = validateAction(filePath);
-      say(() => logger.info('Validating action...'));
-    }
-
-    if (contractFile) {
-      say(() =>
-        logger.info(`Validating against pipeline contract: ${contractFile}`)
+  const entries: ReportEntry[] = [];
+  for (const filePath of files) {
+    try {
+      const result = await validateOneFile(
+        filePath,
+        contractFile,
+        recurse,
+        say
       );
-      if (parsed.type !== 'workflow') {
-        result = {
+      entries.push({ file: filePath, result });
+    } catch (error) {
+      entries.push({
+        file: filePath,
+        result: {
           valid: false,
           errors: [
-            ...result.errors,
             {
               path: 'root',
-              message:
-                'Pipeline contracts validate job/step sequences and only apply to workflow files, not actions',
-              severity: 'error' as const
+              message: error instanceof Error ? error.message : 'Unknown error',
+              severity: 'error'
             }
           ]
-        };
-      } else {
-        const spec = parsePipelineContract(contractFile);
-        const contractResult = await validatePipelineContract(parsed, spec, {
-          recurse
-        });
-        result = {
-          valid: result.valid && contractResult.valid,
-          errors: [...result.errors, ...contractResult.errors]
-        };
-      }
+        }
+      });
     }
+  }
 
-    if (quiet) {
-      // eslint-disable-next-line no-console
-      console.log(formatValidation(filePath, result, format));
-      if (!result.valid) process.exit(1);
-      return;
-    }
+  const allValid = entries.every((e) => e.result.valid);
 
+  if (quiet) {
+    // eslint-disable-next-line no-console
+    console.log(formatReport(entries, format));
+    if (!allValid) process.exit(1);
+    return;
+  }
+
+  for (const { file, result } of entries) {
     if (result.valid) {
-      logger.success('Validation passed!');
-      result.errors.forEach((error) => {
+      logger.success(`Validation passed: ${file}`);
+      result.errors.forEach((error) =>
         logger.warn(
           `  [${error.severity.toUpperCase()}] ${error.path}: ${error.message}`
-        );
-      });
-    } else {
-      logger.error('Validation failed:');
-      result.errors.forEach((error) => {
-        logger.error(
-          `  [${error.severity.toUpperCase()}] ${error.path}: ${error.message}`
-        );
-      });
-      process.exit(1);
-    }
-  } catch (error) {
-    if (quiet) {
-      // eslint-disable-next-line no-console
-      console.log(
-        formatValidation(
-          filePath,
-          {
-            valid: false,
-            errors: [
-              {
-                path: 'root',
-                message:
-                  error instanceof Error ? error.message : 'Unknown error',
-                severity: 'error'
-              }
-            ]
-          },
-          format
         )
       );
-      process.exit(1);
+    } else {
+      logger.error(`Validation failed: ${file}`);
+      result.errors.forEach((error) =>
+        logger.error(
+          `  [${error.severity.toUpperCase()}] ${error.path}: ${error.message}`
+        )
+      );
     }
-    logger.error(
-      `Validation error: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
-    process.exit(1);
   }
+  if (!allValid) process.exit(1);
 }
 
 function listWorkflows(): void {

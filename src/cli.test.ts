@@ -88,7 +88,7 @@ describe('secureci validate --contract', () => {
     const result = run(['validate', workflow, '--contract', contract]);
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('Validation passed!');
+    expect(result.stdout).toContain('Validation passed');
   });
 
   it('fails with a clear message when a required action is missing', () => {

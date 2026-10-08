@@ -25,38 +25,54 @@ interface SarifResult {
   }>;
 }
 
-/**
- * Render a validation result for `--format`. `json` is a compact object;
- * `sarif` is a SARIF 2.1.0 log suitable for GitHub code scanning (upload
- * with `github/codeql-action/upload-sarif`).
- */
-export function formatValidation(
-  file: string,
-  result: ValidationResult,
-  format: Exclude<ReportFormat, 'text'>
-): string {
-  if (format === 'json') {
-    return JSON.stringify(
-      {
-        file,
-        valid: result.valid,
-        errors: result.errors.map((e) => ({
-          path: e.path,
-          message: e.message,
-          severity: e.severity
-        }))
-      },
-      null,
-      2
-    );
-  }
+/** One validated file and its result. */
+export interface ReportEntry {
+  file: string;
+  result: ValidationResult;
+}
 
-  const results: SarifResult[] = result.errors.map((error) => ({
+function jsonForFile(entry: ReportEntry) {
+  return {
+    file: entry.file,
+    valid: entry.result.valid,
+    errors: entry.result.errors.map((e) => ({
+      path: e.path,
+      message: e.message,
+      severity: e.severity
+    }))
+  };
+}
+
+function sarifResults(entry: ReportEntry): SarifResult[] {
+  return entry.result.errors.map((error) => ({
     ruleId: ruleIdFor(error),
     level: error.severity === 'warning' ? 'warning' : 'error',
     message: { text: `${error.path}: ${error.message}` },
-    locations: [{ physicalLocation: { artifactLocation: { uri: file } } }]
+    locations: [{ physicalLocation: { artifactLocation: { uri: entry.file } } }]
   }));
+}
+
+/**
+ * Render one or more validated files for `--format`. `json` is a compact
+ * object (a single file keeps the flat `{ file, valid, errors }` shape; many
+ * files become `{ valid, files: [...] }`). `sarif` is one SARIF 2.1.0 run
+ * carrying every file's findings, suitable for GitHub code scanning (upload
+ * with `github/codeql-action/upload-sarif`).
+ */
+export function formatReport(
+  entries: ReportEntry[],
+  format: Exclude<ReportFormat, 'text'>
+): string {
+  if (format === 'json') {
+    const body =
+      entries.length === 1
+        ? jsonForFile(entries[0])
+        : {
+            valid: entries.every((e) => e.result.valid),
+            files: entries.map(jsonForFile)
+          };
+    return JSON.stringify(body, null, 2);
+  }
 
   return JSON.stringify(
     {
@@ -68,17 +84,23 @@ export function formatValidation(
             driver: {
               name: 'secureci',
               informationUri: 'https://www.secure-ci.dev',
-              rules: Object.entries(RULES).map(([id, name]) => ({
-                id,
-                name
-              }))
+              rules: Object.entries(RULES).map(([id, name]) => ({ id, name }))
             }
           },
-          results
+          results: entries.flatMap(sarifResults)
         }
       ]
     },
     null,
     2
   );
+}
+
+/** Render a single validated file (see formatReport). */
+export function formatValidation(
+  file: string,
+  result: ValidationResult,
+  format: Exclude<ReportFormat, 'text'>
+): string {
+  return formatReport([{ file, result }], format);
 }

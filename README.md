@@ -197,6 +197,35 @@ secureci validate .github/workflows/ci.yml --contract contract.yml --format sari
 - **`json`**: `{ file, valid, errors: [{ path, message, severity }] }`.
 - **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
 
+## Use in CI (GitHub Action)
+
+Run the same checks on pull requests with the bundled composite action. It validates your workflows (optionally against a contract) and, by default, uploads a SARIF report so findings show up inline on the PR via GitHub code scanning.
+
+```yaml
+# .github/workflows/secureci.yml
+name: SecureCI
+on: [pull_request]
+permissions:
+  contents: read
+  security-events: write # for the SARIF upload
+jobs:
+  secureci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: secure-ci/cli@v1
+        with:
+          # all inputs are optional
+          contract: contracts/platform-standard.yml
+          # files: .github/workflows/*.yml   # default: every file in .github/workflows
+          # format: sarif                    # or json
+          # upload-sarif: true               # set false to skip code-scanning upload
+```
+
+The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `version` (which `@secureci/cli` to run), and `github-token`.
+
+> The action runs `npx @secureci/cli`, so it works once the package is published to npm.
+
 ## Workflow Features
 
 ### Conditional Execution (`if:`)
