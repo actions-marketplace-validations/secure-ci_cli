@@ -269,7 +269,7 @@ describe('secureci commands', () => {
         'run',
         '.github/workflows/ci.yml',
         '--container-runtime',
-        'none',
+        'host',
         '--input',
         'who=world'
       ],
@@ -284,7 +284,7 @@ describe('secureci commands', () => {
       'run',
       'secret.yml',
       '--container-runtime',
-      'none',
+      'host',
       '--secret',
       'MY_TOKEN'
     ];

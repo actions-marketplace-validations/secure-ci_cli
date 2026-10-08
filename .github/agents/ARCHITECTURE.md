@@ -281,7 +281,7 @@ interface ContainerRuntime {
   execute(options: ContainerExecOptions): Promise<ContainerExecResult>;
 }
 function resolveContainerRuntime(
-  preference: 'auto' | 'docker' | 'podman' | 'none'
+  preference: 'auto' | 'docker' | 'podman' | 'containerd' | 'host'
 ): Promise<ContainerRuntime | null>;
 ```
 
@@ -392,7 +392,7 @@ interface RunOptions {
   inputs?: Record<string, string>;
   secrets?: Record<string, string>; // Automatically masked in log output
   job?: string; // Run a single job by name
-  containerRuntime?: 'auto' | 'docker' | 'podman' | 'none'; // Default: 'none'
+  containerRuntime?: 'auto' | 'docker' | 'podman' | 'containerd' | 'host'; // CLI default: 'docker'; 'host' = no container (opt-in)
   containerImage?: string;
   containerTimeoutMs?: number;
   containerMemoryLimit?: string;

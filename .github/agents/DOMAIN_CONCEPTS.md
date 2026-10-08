@@ -242,7 +242,7 @@ Any value passed via `--secret KEY=value` is registered with the CLI's `Logger` 
 
 `run:` steps can optionally be executed inside a Docker or Podman container instead of directly on the host, via `src/runner/container-runtime.ts`.
 
-- **Opt-in**: Defaults to `none` (host execution) for backward compatibility; enable with `--container-runtime=auto|docker|podman`
+- **Default on**: `--container-runtime` defaults to `docker` (`auto|docker|podman|containerd|host`). If the runtime is unavailable the run stops; running steps on the host is an explicit opt-in (`--container-runtime host`)
 - **`auto`**: Tries Docker first, then Podman
 - **Isolation options**: `--container-image`, `--container-memory`, `--container-timeout`, and network access disabled by default (`--allow-network` to opt in)
 - **Fallback**: If the requested/detected runtime is unavailable, the SecureCI CLI logs a warning and falls back to host execution

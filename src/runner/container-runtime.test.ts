@@ -70,8 +70,8 @@ describe('container-runtime', () => {
   });
 
   describe('resolveContainerRuntime', () => {
-    it('returns null for preference "none"', async () => {
-      const runtime = await resolveContainerRuntime('none');
+    it('returns null for preference "host"', async () => {
+      const runtime = await resolveContainerRuntime('host');
       expect(runtime).toBeNull();
       expect(execMock).not.toHaveBeenCalled();
     });

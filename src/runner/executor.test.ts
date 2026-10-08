@@ -289,38 +289,51 @@ jobs:
       fs.unlinkSync(containerWorkflowPath);
     });
 
-    it('should fall back to host execution when no container runtime is available', async () => {
-      const tempDir = tempTestDir;
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-      }
-
-      const fallbackWorkflowPath = path.join(
-        tempDir,
-        'container-fallback-workflow.yml'
-      );
+    it('fails before running anything when the container runtime is unavailable', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-noruntime-'));
+      const marker = path.join(dir, 'ran');
+      const file = path.join(dir, 'wf.yml');
       fs.writeFileSync(
-        fallbackWorkflowPath,
-        `
-name: Container Fallback Workflow
-on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "hi"
-`
+        file,
+        `name: No Runtime\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: touch ${marker}\n`
       );
-
       resolveContainerRuntimeMock.mockResolvedValue(null);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-      const result = await executeWorkflow(fallbackWorkflowPath, {
-        containerRuntime: 'auto'
-      });
+      try {
+        for (const containerRuntime of ['auto', 'docker'] as const) {
+          const result = await executeWorkflow(file, { containerRuntime });
+          expect(result.success).toBe(false);
+          expect(result.jobs).toEqual([]);
+        }
+        expect(fs.existsSync(marker)).toBe(false);
+        const errors = errorSpy.mock.calls.flat().join('\n');
+        expect(errors).toContain('No container runtime available');
+        expect(errors).toContain('--container-runtime host');
+      } finally {
+        errorSpy.mockRestore();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
 
-      expect(result.success).toBe(true);
-
-      fs.unlinkSync(fallbackWorkflowPath);
+    it('runs on the host only when asked to with containerRuntime none', async () => {
+      const dir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'secureci-host-optin-')
+      );
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        'name: Host\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n'
+      );
+      try {
+        const result = await executeWorkflow(file, {
+          containerRuntime: 'host'
+        });
+        expect(result.success).toBe(true);
+        expect(resolveContainerRuntimeMock).not.toHaveBeenCalled();
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('should execute specific job when job option is provided', async () => {
@@ -1954,7 +1967,7 @@ jobs:
 `);
 
       const result = await executeWorkflow(workflowPath, {
-        containerRuntime: 'none'
+        containerRuntime: 'host'
       });
 
       expect(result.success).toBe(true);
@@ -2931,7 +2944,7 @@ jobs:
             '      - uses: docker://alpine:3'
           ].join('\n') + '\n'
         ),
-        { containerRuntime: 'none' }
+        { containerRuntime: 'host' }
       );
       const matching = warnSpy.mock.calls
         .flat()
@@ -2944,15 +2957,6 @@ jobs:
       fetchActionMock.mockReset();
     });
 
-    it('also warns when it falls back to the host because no runtime is available', async () => {
-      fetchActionMock.mockResolvedValue(null);
-      await executeWorkflow(writeWorkflow('      - uses: org/one@v1\n'), {
-        containerRuntime: 'docker'
-      });
-      expect(warnings()).toContain('without container isolation');
-      fetchActionMock.mockReset();
-    });
-
     it('does not warn in a container, or without remote actions', async () => {
       const fake = fakeJobContainerRuntime();
       resolveContainerRuntimeMock.mockResolvedValue(fake);
@@ -2962,7 +2966,7 @@ jobs:
       });
       resolveContainerRuntimeMock.mockResolvedValue(null);
       await executeWorkflow(writeWorkflow('      - run: echo hi\n'), {
-        containerRuntime: 'none'
+        containerRuntime: 'host'
       });
       expect(warnings()).not.toContain('without container isolation');
       fetchActionMock.mockReset();
@@ -3557,7 +3561,7 @@ jobs:
       resolveContainerRuntimeMock.mockResolvedValue(fake);
 
       const result = await executeWorkflow(write(), {
-        containerRuntime: 'none',
+        containerRuntime: 'host',
         inputs: { pg: '16' }
       });
 
@@ -3621,7 +3625,7 @@ jobs:
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
         const result = await executeWorkflow(write(), {
-          containerRuntime: 'none',
+          containerRuntime: 'host',
           inputs: { pg: '16' }
         });
         expect(result.success).toBe(false);

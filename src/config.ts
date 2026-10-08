@@ -33,7 +33,7 @@ const CONTAINER_RUNTIME_VALUES: ContainerRuntimePreference[] = [
   'docker',
   'podman',
   'containerd',
-  'none'
+  'host'
 ];
 
 function getHomeDir(): string {
@@ -75,7 +75,16 @@ export function saveConfig(config: CliConfig): void {
 export function getDefaultContainerRuntime(
   config: CliConfig = loadConfig()
 ): ContainerRuntimePreference {
-  return config['container-runtime'] ?? DEFAULT_CONFIG['container-runtime'];
+  const value = config['container-runtime'];
+  if (value === undefined) return DEFAULT_CONFIG['container-runtime'];
+  if (!CONTAINER_RUNTIME_VALUES.includes(value)) {
+    const hint =
+      String(value) === 'none' ? ' ("none" was renamed to "host")' : '';
+    throw new Error(
+      `Invalid container-runtime "${value}" in ${getConfigFilePath()}${hint}. Must be one of: ${CONTAINER_RUNTIME_VALUES.join(', ')}`
+    );
+  }
+  return value;
 }
 
 export const CONFIG_KEYS = [

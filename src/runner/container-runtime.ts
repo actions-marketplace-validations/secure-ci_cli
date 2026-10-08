@@ -23,7 +23,7 @@ const execAsync = promisify(exec);
 
 export type ContainerRuntimeName = 'docker' | 'podman' | 'containerd';
 export type ContainerRuntimePreference =
-  'auto' | 'docker' | 'podman' | 'containerd' | 'none';
+  'auto' | 'docker' | 'podman' | 'containerd' | 'host';
 
 /** The CLI binary invoked for each runtime. `containerd` has no Docker-CLI-
  * compatible binary of its own, so `nerdctl` is used as its front-end. */
@@ -531,16 +531,16 @@ const AUTO_DETECT_ORDER: ContainerRuntimeName[] = [
 
 /**
  * Resolve a usable container runtime according to preference:
- * - 'none' → no isolation (caller should fall back to host execution).
+ * - 'host' → no container: the caller runs steps on the host (opt-in only).
  * - 'docker' | 'podman' | 'containerd' → that engine specifically, or null
  *   if unavailable.
  * - 'auto' → first available of docker, podman, then containerd; null if
- *   none is installed/running (caller falls back to host execution).
+ *   none is installed/running (the caller then refuses to run).
  */
 export async function resolveContainerRuntime(
   preference: ContainerRuntimePreference = 'auto'
 ): Promise<ContainerRuntime | null> {
-  if (preference === 'none') return null;
+  if (preference === 'host') return null;
 
   if (preference !== 'auto') {
     const runtime = runtimeInstances[preference];

@@ -74,14 +74,14 @@ secureci run .github/workflows/ci.yml --container-runtime=podman --container-mem
 
 ### Container Isolation Flags
 
-| Flag                         | Description                                                                                                                                                   |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--container-runtime <name>` | `auto`\|`docker`\|`podman`\|`containerd`\|`none` (default: `docker`, overridable via `~/.secureci/config.yml`; use `none` for the old host-execution default) |
-| `--container-image <image>`  | Image for every job without `jobs.<id>.container`, overriding the `runs-on` mapping (see below)                                                               |
-| `--container-timeout <ms>`   | Per-step timeout in milliseconds                                                                                                                              |
-| `--container-memory <limit>` | Memory limit, e.g. `512m`                                                                                                                                     |
-| `--no-network`               | Disable container network access (networking is on by default, like GitHub-hosted runners)                                                                    |
-| `--allow-network`            | Allow container network access; only needed to override `allow-network: false` in the config file                                                             |
+| Flag                         | Description                                                                                                                                                                                                                                                       |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--container-runtime <name>` | `auto`\|`docker`\|`podman`\|`containerd`\|`host` (default: `docker`, overridable via `~/.secureci/config.yml`). If the runtime isn't available, the run stops before any step runs. `host` runs steps directly on this machine, without a container (opt-in only) |
+| `--container-image <image>`  | Image for every job without `jobs.<id>.container`, overriding the `runs-on` mapping (see below)                                                                                                                                                                   |
+| `--container-timeout <ms>`   | Per-step timeout in milliseconds                                                                                                                                                                                                                                  |
+| `--container-memory <limit>` | Memory limit, e.g. `512m`                                                                                                                                                                                                                                         |
+| `--no-network`               | Disable container network access (networking is on by default, like GitHub-hosted runners)                                                                                                                                                                        |
+| `--allow-network`            | Allow container network access; only needed to override `allow-network: false` in the config file                                                                                                                                                                 |
 
 `containerd` is driven via its Docker-CLI-compatible front-end, [`nerdctl`](https://github.com/containerd/nerdctl).
 
@@ -89,7 +89,7 @@ secureci run .github/workflows/ci.yml --container-runtime=podman --container-mem
 
 - Each job (and each matrix combination) gets **one container**, started when the job begins and removed when it ends, including when a step fails or you press Ctrl-C. Every `run:` step and JavaScript action in the job runs in it via `exec`, so files, installed packages and tools from earlier steps are still there. The current directory is mounted at `/secureci-workspace`.
 - The image is chosen in this order:
-  1. `jobs.<id>.container` (string or `{ image, env }` form; `options`, `volumes`, `ports` and `credentials` are ignored with a warning). With `--container-runtime none` it's ignored and the job runs on the host.
+  1. `jobs.<id>.container` (string or `{ image, env }` form; `options`, `volumes`, `ports` and `credentials` are ignored with a warning). With `--container-runtime host` it's ignored and the job runs on the host.
   2. `--container-image`, for every job.
   3. The job's `runs-on` label, mapped to a runner-like image: `ubuntu-latest` → `catthehacker/ubuntu:act-latest`, `ubuntu-24.04` / `22.04` / `20.04` → `catthehacker/ubuntu:act-24.04` / `act-22.04` / `act-20.04` (the images nektos/act uses, with Node.js, git, curl and common runner tools). Add or override labels with `runner-images` in the config file (below).
   4. `container-image` from the config file, else `catthehacker/ubuntu:act-22.04`, for labels with no mapping (self-hosted, custom), with a warning. `windows-*` / `macos-*` jobs also run in this Linux image, with a warning.
@@ -101,7 +101,7 @@ secureci run .github/workflows/ci.yml --container-runtime=podman --container-mem
 ### Security: what runs where
 
 > [!WARNING]
-> With `--container-runtime none` (or when no container runtime is available and the CLI falls back to the host), `run:` steps and **remote JavaScript and composite actions run directly on your machine with your user's privileges**. Any third-party action can read your files and use your network. The CLI prints a warning listing the remote actions before such a job runs. Use a container runtime to sandbox them.
+> The CLI never falls back to running steps on your machine: if the container runtime isn't available, it reports that and exits without running anything. Only with `--container-runtime host` (an explicit opt-in, also settable in the config file) do `run:` steps and **remote JavaScript and composite actions run directly on your machine with your user's privileges**. Any third-party action can read your files and use your network. The CLI prints a warning listing the remote actions before such a job runs. Use a container runtime to sandbox them.
 
 - On the host, steps and actions don't inherit your shell's environment: only `PATH`, `HOME`, locale, temp-dir, proxy/CA and container-client variables are passed, plus the runner's `GITHUB_*` / `RUNNER_*` variables and the workflow's own `env:`. Pass anything else explicitly with `--env NAME` (value from your shell) or `--env NAME=value`, and secrets with `--secret NAME`.
 - In container mode, env values never appear on the container client's command line (see Secret Masking below).
@@ -241,7 +241,7 @@ jobs:
 Sidecar containers such as databases and caches start before the job's steps and are removed when the job ends (also on failure or Ctrl-C):
 
 - **Container mode:** the job gets its own network. Each service joins it under its service id, so steps reach it by hostname (`postgres:5432`), as on GitHub.
-- **Host mode** (`--container-runtime none`): services still run in containers (a container runtime is required). Steps reach them through their published `ports` on `localhost`.
+- **Host mode** (`--container-runtime host`): services still run in containers (a container runtime is required). Steps reach them through their published `ports` on `localhost`.
 - `image`, `env`, `ports`, `volumes` and `options` (e.g. `--health-cmd ...`) are supported. Steps start once every service with a health check reports healthy; an unhealthy service fails the job. `credentials` are ignored (log in with `docker login`).
 - `${{ job.services.<id>.ports['5432'] }}` is the host port a container port is published on; `job.services.<id>.id` and `.network` are also set.
 

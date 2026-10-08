@@ -42,6 +42,17 @@ function readVersion(): string {
 const program = new Command();
 const globalConfig = loadConfig();
 
+// An invalid container-runtime in the config file only stops `run`, so
+// `secureci config set` can still fix it.
+let configError: string | undefined;
+let defaultContainerRuntime: ReturnType<typeof getDefaultContainerRuntime>;
+try {
+  defaultContainerRuntime = getDefaultContainerRuntime(globalConfig);
+} catch (error) {
+  configError = error instanceof Error ? error.message : String(error);
+  defaultContainerRuntime = 'docker';
+}
+
 program
   .name('secureci')
   .description(
@@ -104,10 +115,10 @@ program
   .addOption(
     new Option(
       '--container-runtime <name>',
-      `Run each job in a container (default: "${getDefaultContainerRuntime(globalConfig)}", from ~/.secureci/config.yml or built-in default; "none" runs on the host)`
+      `Run each job in a container (default: "${defaultContainerRuntime}", from ~/.secureci/config.yml or built-in default; "host" runs steps directly on this machine, without a container)`
     )
-      .choices(['auto', 'docker', 'podman', 'containerd', 'none'])
-      .default(getDefaultContainerRuntime(globalConfig))
+      .choices(['auto', 'docker', 'podman', 'containerd', 'host'])
+      .default(defaultContainerRuntime)
   )
   .option(
     '--container-image <image>',
@@ -131,6 +142,10 @@ program
     'Allow container network access (the default; overrides allow-network: false in config)'
   )
   .action(async (file: string, options) => {
+    if (configError) {
+      logger.error(configError);
+      process.exit(1);
+    }
     requireFile(file);
 
     if (options.dryRun) {

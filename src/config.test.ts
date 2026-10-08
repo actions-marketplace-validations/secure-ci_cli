@@ -67,6 +67,22 @@ describe('config', () => {
     ).toBe('containerd');
   });
 
+  it('getDefaultContainerRuntime rejects an invalid value, with a hint for the old "none"', async () => {
+    const { getDefaultContainerRuntime } = await import('./config');
+    const legacy = { 'container-runtime': 'none' } as unknown as Parameters<
+      typeof getDefaultContainerRuntime
+    >[0];
+    expect(() => getDefaultContainerRuntime(legacy)).toThrow(
+      /"none" .*renamed to "host"/
+    );
+    const bogus = { 'container-runtime': 'lxc' } as unknown as Parameters<
+      typeof getDefaultContainerRuntime
+    >[0];
+    expect(() => getDefaultContainerRuntime(bogus)).toThrow(
+      'Invalid container-runtime "lxc"'
+    );
+  });
+
   it('isValidConfigKey accepts kebab-case keys and rejects unknown/camelCase ones', async () => {
     const { isValidConfigKey } = await import('./config');
     expect(isValidConfigKey('container-runtime')).toBe(true);

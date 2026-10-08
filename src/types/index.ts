@@ -176,7 +176,7 @@ export interface RunOptions {
   job?: string;
   verbose?: boolean;
   /** Container runtime to use for isolating `run:` steps. Default: 'docker'. */
-  containerRuntime?: 'auto' | 'docker' | 'podman' | 'containerd' | 'none';
+  containerRuntime?: 'auto' | 'docker' | 'podman' | 'containerd' | 'host';
   /**
    * Image for every job without `jobs.<id>.container` (`--container-image`),
    * overriding the `runs-on` mapping.

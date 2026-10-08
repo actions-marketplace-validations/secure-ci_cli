@@ -509,6 +509,15 @@ export async function executeWorkflow(
     ...options,
     runId: options.runId || process.env.GITHUB_RUN_ID || String(Date.now())
   };
+  // Steps never fall back to running on the host: without the requested
+  // container runtime, stop before anything runs. The host is opt-in
+  // (--container-runtime host).
+  const preference = options.containerRuntime ?? 'host';
+  if (preference !== 'host' && !(await resolveContainerRuntime(preference))) {
+    logger.error(noRuntimeMessage(preference));
+    return { success: false, jobs: [], duration: Date.now() - startTime };
+  }
+
   const runDir = createRunDir();
 
   try {
@@ -1039,11 +1048,20 @@ function installContainerCleanup(): void {
   }
 }
 
+/** Why a run can't start without its container runtime, and what to do. */
+function noRuntimeMessage(preference: string): string {
+  const which =
+    preference === 'auto'
+      ? 'docker, podman or containerd (nerdctl)'
+      : `"${preference}"`;
+  return `No container runtime available: ${which} is not installed or not running. Start it, pick another with --container-runtime, or run steps directly on this machine, with your user's privileges, with --container-runtime host.`;
+}
+
 /**
  * Start the job's container when container isolation is on, using
- * `jobs.<id>.container` if set, else `--container-image`. Returns false
- * only when a runtime is available but the container can't be started (the
- * job then fails); with no runtime available, steps run on the host.
+ * `jobs.<id>.container` if set, else the image for its `runs-on`. Returns
+ * false (the job then fails) when the runtime is unavailable or the
+ * container can't be started; steps never fall back to the host.
  */
 async function startJobContainer(
   job: Job | undefined,
@@ -1052,16 +1070,16 @@ async function startJobContainer(
   runtime: JobRuntime,
   runDir: string
 ): Promise<boolean> {
-  const preference = options.containerRuntime ?? 'none';
+  const preference = options.containerRuntime ?? 'host';
   const spec =
     typeof job?.container === 'string'
       ? { image: job.container }
       : job?.container;
 
-  if (preference === 'none') {
+  if (preference === 'host') {
     if (spec) {
       logger.warn(
-        `Ignoring jobs.<id>.container (${spec.image}): container runtime is "none", running on the host.`
+        `Ignoring jobs.<id>.container (${spec.image}): container runtime is "host", running on the host.`
       );
     }
     return true;
@@ -1069,10 +1087,8 @@ async function startJobContainer(
 
   const containerRuntime = await resolveContainerRuntime(preference);
   if (!containerRuntime) {
-    logger.warn(
-      `No "${preference}" container runtime available; falling back to host execution.`
-    );
-    return true;
+    logger.error(noRuntimeMessage(preference));
+    return false;
   }
 
   if (
@@ -1205,9 +1221,9 @@ async function startJobServices(
   const specs = Object.entries(job.services ?? {});
   if (specs.length === 0) return true;
 
-  const preference = options.containerRuntime ?? 'none';
+  const preference = options.containerRuntime ?? 'host';
   const jobRuntime =
-    preference === 'none' ? null : await resolveContainerRuntime(preference);
+    preference === 'host' ? null : await resolveContainerRuntime(preference);
   const containerRuntime =
     jobRuntime ?? (await resolveContainerRuntime('auto'));
   if (!containerRuntime) {
@@ -1996,7 +2012,7 @@ async function executeNodeAction(
           : null;
     }
     if (!container.node) {
-      const error = `JavaScript action "${step.uses}" needs \`node\` in the job container image (${container.image}). Use an image that includes Node.js (e.g. --container-image node:20, a runner-images mapping, or ${DEFAULT_CONTAINER_IMAGE}), or run on the host with --container-runtime none.`;
+      const error = `JavaScript action "${step.uses}" needs \`node\` in the job container image (${container.image}). Use an image that includes Node.js (e.g. --container-image node:20, a runner-images mapping, or ${DEFAULT_CONTAINER_IMAGE}), or run on the host with --container-runtime host.`;
       logger.error(error);
       return { step, success: false, error, duration: Date.now() - startTime };
     }
