@@ -348,19 +348,35 @@ This project follows TDD (Test-Driven Development):
 
 ```
 src/
-├── cli.ts                    # CLI entry point
+├── cli.ts                    # CLI entry point (commander)
+├── config.ts                 # ~/.secureci/config.yml
+├── index.ts                  # Library exports
 ├── parser/
-│   ├── workflow-parser.ts    # Parse workflow YAML
-│   ├── action-parser.ts      # Parse action YAML
-│   └── validator.ts          # Validate syntax
+│   ├── workflow-parser.ts    # Parse workflow and action YAML
+│   ├── validator.ts          # Validate syntax
+│   ├── pipeline-contract-parser.ts     # Parse --contract files
+│   └── pipeline-contract-validator.ts  # Check a workflow against a contract
 ├── runner/
 │   ├── dry-run.ts            # Dry run mode
-│   ├── executor.ts           # Execute jobs/steps, if:/needs:, outputs
+│   ├── executor.ts           # Run a workflow: jobs in needs: order, reusable workflows
+│   ├── job-plan.ts           # Matrix expansion, needs: ordering
+│   ├── github-context.ts     # github context, event payload, workflow inputs
+│   ├── job-runtime.ts        # Per-job state, step files, post steps
+│   ├── job-container.ts      # Job container, runs-on images, services, cleanup
+│   ├── steps.ts              # run: steps, on the host or in the job container
+│   ├── actions.ts            # uses: steps: composite, JavaScript, Docker, pre/post
+│   ├── checkout.ts           # actions/checkout from the local working copy
+│   ├── builtin-actions.ts    # Local upload/download-artifact and cache
 │   ├── expression.ts         # ${{ ... }} expression evaluation
-│   ├── container-runtime.ts  # Docker/Podman container isolation
-│   └── action-fetcher.ts     # Fetch remote actions from GitHub
+│   ├── hash-files.ts         # hashFiles() and glob matching
+│   ├── runner-env.ts         # GITHUB_*/RUNNER_* env, file and workflow commands
+│   ├── shell.ts              # shell: handling, argument splitting
+│   ├── container-runtime.ts  # Docker/Podman/containerd CLI driver
+│   └── action-fetcher.ts     # Fetch and cache remote actions by commit
 ├── utils/
-│   └── logger.ts             # Logging utility with secret masking
+│   ├── logger.ts             # Logging utility with secret masking
+│   ├── key-value.ts          # --input/--secret/--env parsing
+│   └── repository.ts         # Repository root for ./ references
 └── types/
     └── index.ts              # TypeScript types
 ```

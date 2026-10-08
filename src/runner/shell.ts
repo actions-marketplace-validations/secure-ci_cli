@@ -58,3 +58,13 @@ export function shellCommandLine(template: string, scriptPath: string): string {
   const quoted = `'${scriptPath.replace(/'/g, "'\\''")}'`;
   return template.replace('{0}', quoted);
 }
+
+/**
+ * Split an argument string (`with.args`, `services.<id>.options`) into
+ * argv, honouring simple quoting.
+ */
+export function splitArgs(args: string): string[] {
+  return (args.match(/"[^"]*"|'[^']*'|\S+/g) || []).map((arg) =>
+    /^(["']).*\1$/.test(arg) ? arg.slice(1, -1) : arg
+  );
+}

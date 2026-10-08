@@ -9,7 +9,7 @@ import {
   ValidationResult,
   WorkflowFile
 } from '../types';
-import { topologicalJobOrder } from '../runner/executor';
+import { topologicalJobOrder } from '../runner/job-plan';
 import { parseFile } from './workflow-parser';
 import { repositoryRoot } from '../utils/repository';
 import { fetchAction, fetchRepoFile } from '../runner/action-fetcher';

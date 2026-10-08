@@ -58,16 +58,23 @@ secureci-cli/
 │   │   └── validator.test.ts
 │   │
 │   ├── runner/                   # Execution layer
-│   │   ├── dry-run.ts            # Dry-run mode implementation
-│   │   ├── dry-run.test.ts
-│   │   ├── executor.ts           # Execute jobs/steps; if:, needs:, outputs
-│   │   ├── executor.test.ts
-│   │   ├── expression.ts         # ${{ ... }} expression parsing/evaluation
-│   │   ├── expression.test.ts
-│   │   ├── container-runtime.ts  # Docker/Podman CLI-based isolation
-│   │   ├── container-runtime.test.ts
-│   │   ├── action-fetcher.ts     # Fetch remote actions from GitHub
-│   │   └── action-fetcher.test.ts
+│   │   ├── dry-run.ts            # Dry run mode
+│   │   ├── executor.ts           # Run a workflow: jobs in needs: order, reusable workflows
+│   │   ├── job-plan.ts           # Matrix expansion, needs: ordering
+│   │   ├── github-context.ts     # github context, event payload, workflow inputs
+│   │   ├── job-runtime.ts        # Per-job state, step files, post steps
+│   │   ├── job-container.ts      # Job container, runs-on images, services, cleanup
+│   │   ├── steps.ts              # run: steps, on the host or in the job container
+│   │   ├── actions.ts            # uses: steps: composite, JavaScript, Docker, pre/post
+│   │   ├── checkout.ts           # actions/checkout from the local working copy
+│   │   ├── builtin-actions.ts    # Local upload/download-artifact and cache
+│   │   ├── expression.ts         # ${{ ... }} expression evaluation
+│   │   ├── hash-files.ts         # hashFiles() and glob matching
+│   │   ├── runner-env.ts         # GITHUB_*/RUNNER_* env, file and workflow commands
+│   │   ├── shell.ts              # shell: handling, argument splitting
+│   │   ├── container-runtime.ts  # Docker/Podman/containerd CLI driver
+│   │   ├── action-fetcher.ts     # Fetch and cache remote actions by commit
+│   │   └── *.test.ts             # Tests next to each module
 │   │
 │   ├── utils/                    # Utility layer
 │   │   ├── logger.ts             # Logging utility with chalk + secret masking
@@ -219,9 +226,28 @@ interface ValidationResult {
 
 **Use Case**: Sanity checking workflows before execution.
 
-#### Executor (`runner/executor.ts`)
+#### Executor (`runner/executor.ts` and the modules it uses)
 
 **Purpose**: Execute workflows and actions locally.
+
+The execution layer is split by concern; `executor.ts` is the entry point
+and re-exports the public API:
+
+- `executor.ts`: run a workflow file (jobs in `needs:` order, matrix
+  combinations, reusable-workflow calls, workflow outputs)
+- `job-plan.ts`: matrix expansion and `needs:` ordering (pure)
+- `github-context.ts`: `github` context, event payload, declared inputs
+- `job-runtime.ts`: per-job state (`JobRuntime`), step files, post steps
+- `job-container.ts`: job container, `runs-on` image mapping, services,
+  container cleanup
+- `steps.ts`: `run:` steps (host or job container)
+- `actions.ts`: `uses:` steps (composite, JavaScript incl. `pre`/`post`,
+  Docker, built-ins)
+- `checkout.ts`, `builtin-actions.ts`: local stand-ins for
+  `actions/checkout`, artifacts and cache
+
+`steps.ts` and `actions.ts` import each other (composite actions run
+steps); every other dependency points one way.
 
 **Responsibilities**:
 
@@ -574,7 +600,7 @@ async function fetchAction(ref: string): Promise<Action> {
 
 1. Update `ActionRuns` type in `types/index.ts`
 2. Add handling in `action-fetcher.ts`
-3. Add execution logic in `executor.ts`
+3. Add execution logic in `actions.ts`
 4. Add tests with fixtures
 
 #### 4. New Workflow Feature

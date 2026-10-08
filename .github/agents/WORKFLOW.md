@@ -109,7 +109,7 @@ Example: Adding Docker action support
 
 1. **Update action types** in `src/types/index.ts`
 2. **Update action fetcher** in `src/runner/action-fetcher.ts`
-3. **Update executor** in `src/runner/executor.ts`
+3. **Update action execution** in `src/runner/actions.ts`
 4. **Add tests** with Docker action fixtures
 5. **Update documentation** in DOMAIN_CONCEPTS.md
 
