@@ -343,8 +343,9 @@ async function fetchRepository(
 
   const timeoutMs = options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
   let token = options.token === undefined ? githubToken() : options.token;
-  let { sha, unauthorized } = await resolveSha(ref, token, timeoutMs);
-  if (unauthorized) {
+  const resolved = await resolveSha(ref, token, timeoutMs);
+  let sha = resolved.sha;
+  if (resolved.unauthorized) {
     // An expired or revoked token shouldn't break public actions.
     logger.warn(
       'GitHub rejected the token (401); continuing without it for this run'
