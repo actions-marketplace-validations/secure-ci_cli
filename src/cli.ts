@@ -89,11 +89,11 @@ program
     'Set an input for the inputs context. Repeatable'
   )
   .option(
-    '-s, --secret <key[=value]...>',
+    '-s, --secret <key=value|NAME...>',
     'Set a secret for the secrets context. A bare NAME reads $NAME from your shell, keeping the value off the command line. Repeatable'
   )
   .option(
-    '--env <key[=value]...>',
+    '--env <key=value|NAME...>',
     'Set an env var for every step, below workflow/job/step env:. A bare NAME passes $NAME from your shell (steps get nothing else from it). Repeatable'
   )
   .option(

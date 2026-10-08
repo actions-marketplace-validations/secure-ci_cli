@@ -301,6 +301,50 @@ describe('secureci commands', () => {
     );
   });
 
+  it('keeps every value of repeated --input/--secret/--env/--var flags', () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'repeat.yml'),
+      [
+        'name: Repeat',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: test "${{ secrets.S1 }}${{ secrets.S2 }}${{ secrets.S3 }}|$E1$E2$E3|${{ inputs.i1 }}${{ inputs.i2 }}|${{ vars.v1 }}${{ vars.v2 }}" = "abc|xyz|12|34" && echo all values arrived'
+      ].join('\n')
+    );
+    const result = run(
+      [
+        'run',
+        'repeat.yml',
+        '--container-runtime',
+        'host',
+        '--secret',
+        'S1=a',
+        '--secret',
+        'S2=b',
+        'S3',
+        '--env',
+        'E1=x',
+        '--env',
+        'E2=y',
+        'E3',
+        '--input',
+        'i1=1',
+        '--input',
+        'i2=2',
+        '--var',
+        'v1=3',
+        '--var',
+        'v2=4'
+      ],
+      tempDir,
+      { ...process.env, S3: 'c', E3: 'z' }
+    );
+    expect(result.stdout + result.stderr).toContain('all values arrived');
+  });
+
   it('dry-runs a workflow with secureci run --dry-run', () => {
     const result = run(
       ['run', '.github/workflows/ci.yml', '--dry-run'],
