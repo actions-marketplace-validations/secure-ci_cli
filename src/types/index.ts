@@ -142,6 +142,14 @@ export interface PipelineContractSpec {
   ordering?: 'relative' | 'strict';
   required?: PipelineContractEntry[];
   forbidden?: PipelineContractEntry[];
+  /** Supply-chain pinning: require remote actions pinned to a commit SHA. */
+  pins?: {
+    required?: boolean;
+    /** Owners or owner/repo exempt from the SHA requirement. */
+    allow?: string[];
+  };
+  /** If set, every remote action's owner must be in this list. */
+  allowedOwners?: string[];
 }
 
 export interface PipelineContractEntry {

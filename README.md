@@ -175,6 +175,20 @@ If the caller's workflow calls `org/deploy` before `org/security-scan` (or uses 
 - Ordering follows what GitHub guarantees: steps of a job run in order (a composite action's steps in place of its `uses:` step), and a job runs after every job it needs, directly or transitively (a reusable-workflow call's jobs run after the call's own `needs:`). Two required actions in jobs with **no `needs:` relationship** may run in parallel, so neither counts as "after" the other: that's an ordering error, whatever the jobs' order in the YAML.
 - `ordering: relative` (default): required actions must appear in that relative order, with any other steps allowed in between. `ordering: strict`: required actions must run back-to-back, with no other step in between; across jobs, only the last step of a job followed by the first step of a job that directly needs it counts.
 - A missing required action, a required action below `min-version`, an ordering violation, or any forbidden-action match is an **error** (validation fails). A required action whose version can't be compared (e.g. pinned to a branch or SHA) is a **warning**. Ordering is checked for every required action that is present, including one below `min-version` (its first occurrence is used), and errors name the contract's own `required[N]` entry.
+- **Supply-chain pinning.** A contract can require that every remote action is pinned to a full commit SHA and restrict which owners may be used — enforced across the same flattened sequence, so a tag or an unlisted owner can't hide inside a composite action or reusable workflow:
+
+  ```yaml
+  pins:
+    required: true # every remote action must be pinned to a 40-char commit SHA
+    allow:
+      - actions # trust these owners (or owner/repo) by tag
+  allowed-owners: # if set, every remote action's owner must be listed
+    - actions
+    - my-org
+  ```
+
+  Local (`./`) and `docker://` references are exempt from SHA pinning. An unpinned action or a disallowed owner is an **error**, reported at the step's call path.
+
 - `--contract` runs the normal syntax validation too, and currently applies to workflow files only (not standalone actions, since the contract is about a job/step sequence). Passing `--contract` against an action file fails with a clear error.
 
 **Known limitations (v1 scope):**

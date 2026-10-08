@@ -816,4 +816,102 @@ describe('validatePipelineContract', () => {
       expect(result.valid).toBe(false);
     });
   });
+
+  describe('supply-chain pinning rules (#9)', () => {
+    const wf = workflow({
+      build: {
+        'runs-on': 'ubuntu-latest',
+        steps: [
+          { uses: 'actions/checkout@v4' },
+          { uses: 'org/scan@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+          { uses: 'evil/tool@main' },
+          { uses: './.github/actions/local' },
+          { uses: 'docker://alpine:3.20' },
+          { run: 'echo hi' }
+        ]
+      }
+    });
+
+    it('pins.required flags remote actions not pinned to a commit SHA', async () => {
+      const result = await validatePipelineContract(wf, {
+        pins: { required: true }
+      });
+      const msgs = result.errors
+        .filter((e) => e.severity === 'error')
+        .map((e) => e.message);
+      // checkout@v4 and evil/tool@main are unpinned; org/scan@<sha> is fine.
+      expect(msgs).toHaveLength(2);
+      expect(msgs.join('\n')).toContain('actions/checkout@v4');
+      expect(msgs.join('\n')).toContain('evil/tool@main');
+      expect(msgs.join('\n')).toContain('commit SHA');
+      // local and docker refs are not subject to SHA pinning.
+      expect(msgs.join('\n')).not.toContain('local');
+      expect(msgs.join('\n')).not.toContain('docker');
+    });
+
+    it('pins.allow exempts listed owners/repos (case-insensitive)', async () => {
+      const result = await validatePipelineContract(wf, {
+        pins: { required: true, allow: ['Actions'] }
+      });
+      const msgs = result.errors
+        .filter((e) => e.severity === 'error')
+        .map((e) => e.message);
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]).toContain('evil/tool@main');
+    });
+
+    it('allowed-owners restricts which owners may be used at all', async () => {
+      const result = await validatePipelineContract(wf, {
+        allowedOwners: ['actions', 'org']
+      });
+      const errs = result.errors.filter((e) => e.severity === 'error');
+      expect(errs).toHaveLength(1);
+      expect(errs[0].message).toContain('evil');
+      expect(errs[0].message).toContain('not allowed');
+      expect(errs[0].path).toBe('jobs.build.steps[2]');
+    });
+
+    it('applies pinning inside a composite action via the flattened sequence', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-pin-'));
+      try {
+        fs.mkdirSync(path.join(root, '.github/actions/wrap'), {
+          recursive: true
+        });
+        fs.writeFileSync(
+          path.join(root, '.github/actions/wrap/action.yml'),
+          YAML.stringify({
+            name: 'wrap',
+            description: 'd',
+            runs: {
+              using: 'composite',
+              steps: [{ uses: 'sneaky/action@v1' }]
+            }
+          })
+        );
+        const file = path.join(root, '.github/workflows/caller.yml');
+        const wfObj = {
+          name: 'C',
+          on: 'push',
+          jobs: {
+            build: {
+              'runs-on': 'ubuntu-latest',
+              steps: [{ uses: './.github/actions/wrap' }]
+            }
+          }
+        };
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, YAML.stringify(wfObj));
+        const result = await validatePipelineContract(
+          { type: 'workflow', path: file, file: wfObj },
+          { pins: { required: true } }
+        );
+        const errs = result.errors.filter((e) => e.severity === 'error');
+        expect(errs).toHaveLength(1);
+        expect(errs[0].message).toContain('sneaky/action@v1');
+        expect(errs[0].path).toContain('> ./.github/actions/wrap >');
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+  });
 });

@@ -62,8 +62,34 @@ export function parsePipelineContract(filePath: string): PipelineContractSpec {
   if (spec.forbidden !== undefined) {
     result.forbidden = parseEntryList(spec.forbidden, 'forbidden');
   }
+  if (spec.pins !== undefined) {
+    if (typeof spec.pins !== 'object' || spec.pins === null) {
+      throw new Error('Contract "pins" must be a mapping');
+    }
+    const pins = spec.pins as Record<string, unknown>;
+    result.pins = {};
+    if (pins.required !== undefined) {
+      result.pins.required = pins.required === true;
+    }
+    if (pins.allow !== undefined) {
+      result.pins.allow = parseStringList(pins.allow, 'pins.allow');
+    }
+  }
+  if (spec['allowed-owners'] !== undefined) {
+    result.allowedOwners = parseStringList(
+      spec['allowed-owners'],
+      'allowed-owners'
+    );
+  }
 
   return result;
+}
+
+function parseStringList(value: unknown, section: string): string[] {
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
+    throw new Error(`Contract "${section}" must be a list of strings`);
+  }
+  return value as string[];
 }
 
 function parseEntryList(

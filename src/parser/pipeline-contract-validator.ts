@@ -202,6 +202,45 @@ export async function validatePipelineContract(
     }
   }
 
+  // Supply-chain rules over the same flattened sequence (recursion
+  // included), so a wrapper can't hide an unpinned or disallowed action.
+  const FULL_SHA = /^[0-9a-f]{40}$/i;
+  const isRemote = (u: UsageEntry): boolean =>
+    !u.name.startsWith('.') && !u.name.startsWith('docker://');
+  if (spec.pins?.required) {
+    const allow = new Set(
+      (spec.pins.allow ?? []).map((a) => normalizeActionName(a))
+    );
+    for (const usage of sequence) {
+      if (!isRemote(usage)) continue;
+      const owner = usage.name.split('/')[0];
+      if (allow.has(usage.name) || allow.has(owner)) continue;
+      if (!usage.version || !FULL_SHA.test(usage.version)) {
+        errors.push({
+          path: usage.path,
+          message: `Action "${usage.name}${usage.version ? '@' + usage.version : ''}" must be pinned to a full commit SHA`,
+          severity: 'error'
+        });
+      }
+    }
+  }
+  if (spec.allowedOwners && spec.allowedOwners.length > 0) {
+    const allowed = new Set(
+      spec.allowedOwners.map((o) => o.split('/')[0].toLowerCase())
+    );
+    for (const usage of sequence) {
+      if (!isRemote(usage)) continue;
+      const owner = usage.name.split('/')[0];
+      if (!allowed.has(owner)) {
+        errors.push({
+          path: usage.path,
+          message: `Action owner "${owner}" is not allowed (allowed owners: ${[...allowed].join(', ')})`,
+          severity: 'error'
+        });
+      }
+    }
+  }
+
   return {
     valid: errors.every((e) => e.severity !== 'error'),
     errors
