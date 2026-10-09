@@ -54,7 +54,11 @@ secureci run .github/workflows/ci.yml --input key=value
 secureci validate .github/workflows/ci.yml
 
 # Generate a ready-to-commit PR-checks workflow
-secureci init
+secureci init workflow
+
+# Lock the actions you use and catch supply-chain drift (commit secureci.lock)
+secureci inventory            # bootstraps secureci.lock, then drift-checks
+secureci inventory --check    # fail on drift (use in CI)
 ```
 
 ## Where it shines
@@ -108,8 +112,8 @@ secureci validate .github/workflows/deploy.yml \
 # Emit SARIF for GitHub code scanning
 secureci validate .github/workflows/*.yml --format sarif > results.sarif
 
-# List the actions a workflow uses and fail if any drifted from the lockfile
-secureci inventory --lockfile secureci.lock
+# Fail if any action drifted from the committed secureci.lock
+secureci inventory --check
 
 # Podman, a memory cap, and no network for the job containers
 secureci run .github/workflows/ci.yml \

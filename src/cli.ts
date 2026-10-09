@@ -42,6 +42,9 @@ import {
 import * as fs from 'fs';
 import * as path from 'path';
 
+/** Committed at the repo root, like package-lock.json / yarn.lock. */
+const LOCKFILE_NAME = 'secureci.lock';
+
 function readVersion(): string {
   try {
     const pkg = JSON.parse(
@@ -274,7 +277,7 @@ program
 program
   .command('inventory')
   .description(
-    'List the actions and reusable workflows a workflow uses (resolved into called workflows/actions), with their commit SHAs; track drift with a lockfile'
+    'List the actions and reusable workflows a workflow uses (resolved into called workflows/actions), with their commit SHAs; track supply-chain drift with a committed secureci.lock'
   )
   .argument(
     '[file...]',
@@ -285,13 +288,19 @@ program
     'Do not resolve tags to commit SHAs over the network (already-pinned refs still resolve)'
   )
   .option(
-    '--lockfile <path>',
-    'Compare resolved commit SHAs against this lockfile and report drift'
+    '--dry-run',
+    `Print the resolved inventory as JSON without writing or checking ${LOCKFILE_NAME}`
   )
   .option(
     '--update-lock',
-    'Write/update the lockfile instead of failing on drift'
+    `Write/update ./${LOCKFILE_NAME} with the current commit SHAs (commit it to your repo)`
   )
+  .option('--update-lockfile', `Alias of --update-lock`)
+  .option(
+    '--check',
+    `Compare the current commit SHAs against ./${LOCKFILE_NAME} and fail on drift`
+  )
+  .option('--compare', `Alias of --check`)
   .action(async (files: string[], options) => {
     await runInventory(files, options);
   });
@@ -303,10 +312,21 @@ program
     listWorkflows();
   });
 
-program
+const initCommand = program
   .command('init')
   .description(
-    'Generate a GitHub Actions workflow that runs SecureCI on pull requests'
+    'Scaffold SecureCI files (run a subcommand, e.g. `init workflow`)'
+  )
+  .action(() => {
+    // Bare `secureci init` is ambiguous about what it creates, so show help
+    // (and its subcommands) instead of generating anything.
+    initCommand.help();
+  });
+
+initCommand
+  .command('workflow')
+  .description(
+    'Generate a GitHub Actions workflow (.github/workflows/secureci.yml) that runs SecureCI on pull requests'
   )
   .option(
     '-c, --contract <file>',
@@ -346,10 +366,19 @@ async function runInventory(
   files: string[],
   options: {
     offline?: boolean;
-    lockfile?: string;
+    dryRun?: boolean;
     updateLock?: boolean;
+    updateLockfile?: boolean;
+    check?: boolean;
+    compare?: boolean;
   }
 ): Promise<void> {
+  const update = options.updateLock || options.updateLockfile;
+  const check = options.check || options.compare;
+  if (update && check) {
+    logger.error('Use either --update-lock or --check, not both.');
+    process.exit(1);
+  }
   const targets = files.length > 0 ? files : defaultWorkflowFiles();
   if (targets.length === 0) {
     logger.error('No workflow files given and none found in .github/workflows');
@@ -392,24 +421,38 @@ async function runInventory(
     if (action.resolvedSha) current[action.uses] = action.resolvedSha;
   }
 
-  if (!options.lockfile) {
+  // --dry-run: print the resolved inventory as JSON, touching nothing.
+  if (options.dryRun) {
     // eslint-disable-next-line no-console
     console.log(JSON.stringify({ actions }, null, 2));
     return;
   }
 
-  const lock: Lockfile = fs.existsSync(options.lockfile)
-    ? (JSON.parse(fs.readFileSync(options.lockfile, 'utf-8')) as Lockfile)
-    : { version: 1, actions: {} };
+  const lockPath = path.join(process.cwd(), LOCKFILE_NAME);
+  const lockExists = fs.existsSync(lockPath);
 
-  if (options.updateLock) {
+  const writeLock = () => {
     const updated: Lockfile = { version: 1, actions: current };
-    fs.writeFileSync(options.lockfile, JSON.stringify(updated, null, 2) + '\n');
+    fs.writeFileSync(lockPath, JSON.stringify(updated, null, 2) + '\n');
     logger.success(
-      `Wrote ${Object.keys(current).length} action(s) to ${options.lockfile}`
+      `Wrote ${Object.keys(current).length} action(s) to ${LOCKFILE_NAME}. Commit it to track supply-chain drift.`
     );
+  };
+
+  // `--update-lock`, or bare `inventory` when no lockfile exists yet: write it.
+  if (update || (!check && !lockExists)) {
+    writeLock();
     return;
   }
+
+  // Otherwise compare (explicit `--check`, or bare `inventory` with a lockfile).
+  if (!lockExists) {
+    logger.error(
+      `No ${LOCKFILE_NAME} found. Create one with: secureci inventory --update-lock`
+    );
+    process.exit(1);
+  }
+  const lock = JSON.parse(fs.readFileSync(lockPath, 'utf-8')) as Lockfile;
 
   const diff = diffLock(current, lock);
   for (const d of diff.drifted) {
@@ -417,21 +460,25 @@ async function runInventory(
       `Drift: ${d.uses} now resolves to ${d.to.slice(0, 12)} (was ${d.from.slice(0, 12)})`
     );
   }
-  diff.added.forEach((u) => logger.warn(`New action not in lockfile: ${u}`));
+  diff.added.forEach((u) =>
+    logger.warn(`New action not in ${LOCKFILE_NAME}: ${u}`)
+  );
   diff.removed.forEach((u) =>
-    logger.info(`In lockfile but no longer used: ${u}`)
+    logger.info(`In ${LOCKFILE_NAME} but no longer used: ${u}`)
   );
   if (diff.drifted.length > 0) {
     logger.error(
-      'Action commits drifted from the lockfile. Review the change, then run with --update-lock to accept it.'
+      `Action commits drifted from ${LOCKFILE_NAME}. Review the change, then run with --update-lock to accept it.`
     );
     process.exit(1);
   }
   if (diff.added.length > 0) {
-    logger.warn('New actions are not yet in the lockfile (run --update-lock).');
+    logger.warn(
+      `New actions are not yet in ${LOCKFILE_NAME} (run --update-lock).`
+    );
     process.exit(1);
   }
-  logger.success('No action drift against the lockfile.');
+  logger.success(`No action drift against ${LOCKFILE_NAME}.`);
 }
 
 async function validateOneFile(

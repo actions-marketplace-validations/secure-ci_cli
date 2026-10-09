@@ -18,7 +18,7 @@ introduction and install steps, see the [README](README.md).
 - [Machine-readable output (`--format`)](#machine-readable-output---format)
 - [Action inventory and drift (`secureci inventory`)](#action-inventory-and-drift-secureci-inventory)
 - [Use in CI (GitHub Action)](#use-in-ci-github-action)
-  - [Generate the workflow (`secureci init`)](#generate-the-workflow-secureci-init)
+  - [Generate the workflow (`secureci init workflow`)](#generate-the-workflow-secureci-init-workflow)
 - [Workflow features](#workflow-features)
   - [Conditional execution (`if:`)](#conditional-execution-if)
   - [Job dependencies (`needs:`)](#job-dependencies-needs)
@@ -55,11 +55,13 @@ secureci validate .github/workflows/deploy.yml --contract contracts/standard.yml
 secureci validate .github/workflows/ci.yml --format json
 
 # Inventory the actions a workflow uses, and track drift
-secureci inventory
-secureci inventory --lockfile secureci.lock --update-lock
+secureci inventory                 # bootstrap secureci.lock, or drift-check if it exists
+secureci inventory --dry-run       # just print the resolved inventory as JSON
+secureci inventory --update-lock   # (re)write ./secureci.lock
+secureci inventory --check         # compare against ./secureci.lock, fail on drift
 
 # Generate a PR-checks workflow, list workflows, manage config/cache
-secureci init
+secureci init workflow
 secureci list
 secureci config list
 secureci cache path
@@ -233,23 +235,30 @@ secureci validate .github/workflows/ci.yml --contract contract.yml --format sari
 `secureci inventory` lists every action and reusable workflow a workflow uses — resolved recursively into local composite actions and reusable workflows, so wrapped references show up too — and resolves each remote action's tag or branch to the commit SHA it currently points at.
 
 ```bash
-secureci inventory                                  # all workflows in .github/workflows
-secureci inventory .github/workflows/ci.yml         # one file; prints JSON
-secureci inventory --offline                        # don't resolve over the network
+secureci inventory --dry-run                        # all workflows in .github/workflows, as JSON
+secureci inventory .github/workflows/ci.yml --dry-run # one file, as JSON
+secureci inventory --dry-run --offline              # don't resolve over the network
 ```
 
 Each entry carries `uses`, `owner`, `repo`, `ref`, whether it's `pinned` to a full commit SHA, the `resolvedSha`, and the call `paths` where it appears. Tags and branches are resolved with `git ls-remote` (or the API when a token is available); `--offline` resolves only already-pinned refs.
 
-### Drift against a lockfile
+### Drift against `secureci.lock`
 
-Record what each reference resolves to today, then catch it moving later (the [tj-actions/changed-files incident](https://www.stepsecurity.io/blog/harden-runner-detection-tj-actions-changed-files-action-with-commit-compromise) is the cautionary tale):
+> **Highly recommended:** commit `secureci.lock` to your repo (like `package-lock.json`) and run `secureci inventory --check` in CI. A moved tag — the way the [tj-actions/changed-files incident](https://www.stepsecurity.io/blog/harden-runner-detection-tj-actions-changed-files-action-with-commit-compromise) spread — then becomes a failing check instead of a silent compromise.
+
+`secureci.lock` records what each action reference resolves to today, so you can catch it moving later. It always lives at the repo root (no path to configure).
 
 ```bash
-secureci inventory --lockfile secureci.lock --update-lock   # write/update the lock
-secureci inventory --lockfile secureci.lock                 # fail if anything drifted
+secureci inventory                 # bootstrap secureci.lock if missing, else drift-check
+secureci inventory --update-lock   # (re)write secureci.lock (alias: --update-lockfile)
+secureci inventory --check         # compare against secureci.lock, fail on drift (alias: --compare)
 ```
 
-A check fails (non-zero) when a `uses:` reference now resolves to a different commit than the lockfile recorded (a moved tag), or when a new action isn't in the lock yet. Review the change, then re-run with `--update-lock` to accept it. The lockfile is plain JSON (`{ version, actions: { "owner/repo@ref": "<sha>" } }`), safe to commit.
+- **Bare `secureci inventory`** writes `secureci.lock` the first time (when none exists), and drift-checks against it on later runs.
+- **`--check` / `--compare`** always compares and fails (non-zero) when a `uses:` reference now resolves to a different commit than recorded (a moved tag) or a new action isn't in the lock yet. Use it in CI.
+- **`--update-lock` / `--update-lockfile`** accepts the current state by rewriting the lock. Review the diff, then commit it.
+
+The lockfile is plain JSON (`{ version, actions: { "owner/repo@ref": "<sha>" } }`), safe to commit and diff.
 
 ## Use in CI (GitHub Action)
 
@@ -280,15 +289,15 @@ The job fails if any workflow is invalid or violates the contract. Inputs: `file
 
 > The action runs `npx @secureci/cli`, so it works once the package is published to npm.
 
-### Generate the workflow (`secureci init`)
+### Generate the workflow (`secureci init workflow`)
 
-`secureci init` writes the workflow above to `.github/workflows/secureci.yml` so you don't have to copy it by hand:
+`secureci init workflow` writes the workflow above to `.github/workflows/secureci.yml` so you don't have to copy it by hand. (Bare `secureci init` just prints help and its subcommands.)
 
 ```bash
-secureci init                                   # SARIF upload on (default)
-secureci init --contract contracts/standard.yml # also check a pipeline contract
-secureci init --no-upload                        # keep contents: read only, no code-scanning upload
-secureci init --output .github/workflows/ci-security.yml
+secureci init workflow                                   # SARIF upload on (default)
+secureci init workflow --contract contracts/standard.yml # also check a pipeline contract
+secureci init workflow --no-upload                        # keep contents: read only, no code-scanning upload
+secureci init workflow --output .github/workflows/ci-security.yml
 ```
 
 It refuses to overwrite an existing file unless you pass `--force`, and the file it writes passes `secureci validate`.

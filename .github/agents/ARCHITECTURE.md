@@ -27,7 +27,7 @@ src/
 ├── config.ts              # ~/.secureci/config.yml defaults
 ├── report.ts              # --format text/json/sarif rendering
 ├── inventory.ts           # Action inventory + lockfile drift
-├── init.ts                # `secureci init` workflow generator
+├── init.ts                # `secureci init workflow` generator
 ├── index.ts               # Library exports
 ├── parser/
 │   ├── workflow-parser.ts            # Parse workflow AND action YAML (parseFile)

@@ -429,8 +429,11 @@ describe('secureci commands', () => {
       ].join('\n')
     );
 
+    // --dry-run prints the resolved inventory as JSON and writes nothing.
     // --offline: only already-pinned refs resolve (no network).
-    const inv = JSON.parse(run(['inventory', wf, '--offline'], dir).stdout);
+    const inv = JSON.parse(
+      run(['inventory', wf, '--offline', '--dry-run'], dir).stdout
+    );
     expect(inv.actions.map((a: { uses: string }) => a.uses)).toEqual([
       'org/deploy@2222222222222222222222222222222222222222',
       'org/scan@1111111111111111111111111111111111111111'
@@ -438,29 +441,40 @@ describe('secureci commands', () => {
     expect(inv.actions[0].resolvedSha).toBe(
       '2222222222222222222222222222222222222222'
     );
-
-    // Write a lockfile, then a clean check passes.
     const lock = path.join(dir, 'secureci.lock');
-    expect(
-      run(
-        ['inventory', wf, '--offline', '--lockfile', lock, '--update-lock'],
-        dir
-      ).status
-    ).toBe(0);
+    expect(fs.existsSync(lock)).toBe(false);
+
+    // --check with no lockfile yet fails and tells you how to create one.
+    const noLock = run(['inventory', wf, '--offline', '--check'], dir);
+    expect(noLock.status).not.toBe(0);
+    expect(noLock.stdout + noLock.stderr).toContain('No secureci.lock found');
+
+    // Bare `inventory` with no lockfile bootstraps ./secureci.lock at the repo
+    // root (no path needed); a following bare run drift-checks and passes.
+    expect(run(['inventory', wf, '--offline'], dir).status).toBe(0);
     expect(fs.existsSync(lock)).toBe(true);
-    expect(
-      run(['inventory', wf, '--offline', '--lockfile', lock], dir).status
-    ).toBe(0);
+    expect(run(['inventory', wf, '--offline'], dir).status).toBe(0);
+    expect(run(['inventory', wf, '--offline', '--check'], dir).status).toBe(0);
 
     // Simulate a moving tag: the recorded commit no longer matches what
-    // the ref resolves to. The lockfile check reports drift and fails.
+    // the ref resolves to. --compare (alias of --check) reports drift and fails.
     const lockData = JSON.parse(fs.readFileSync(lock, 'utf-8'));
     const key = Object.keys(lockData.actions)[0];
     lockData.actions[key] = '9'.repeat(40);
     fs.writeFileSync(lock, JSON.stringify(lockData));
-    const drift = run(['inventory', wf, '--offline', '--lockfile', lock], dir);
+    const drift = run(['inventory', wf, '--offline', '--compare'], dir);
     expect(drift.status).not.toBe(0);
     expect(drift.stdout + drift.stderr).toContain('Drift:');
+
+    // --update-lock and --check together is an error.
+    const both = run(
+      ['inventory', wf, '--offline', '--update-lock', '--check'],
+      dir
+    );
+    expect(both.status).not.toBe(0);
+    expect(both.stdout + both.stderr).toMatch(
+      /either --update-lock or --check/
+    );
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -490,11 +504,17 @@ describe('secureci commands', () => {
     expect(result.stdout).toContain('ci.yml: Hello CI');
   });
 
-  it('generates a valid workflow with secureci init and refuses to clobber it', () => {
+  it('generates a valid workflow with secureci init workflow and refuses to clobber it', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-init-'));
     const out = path.join(dir, '.github', 'workflows', 'secureci.yml');
 
-    const first = run(['init'], dir);
+    // Bare `init` is ambiguous, so it shows help (listing the workflow
+    // subcommand) and writes nothing.
+    const bare = run(['init'], dir);
+    expect(bare.stdout + bare.stderr).toContain('workflow');
+    expect(fs.existsSync(out)).toBe(false);
+
+    const first = run(['init', 'workflow'], dir);
     expect(first.status).toBe(0);
     expect(fs.existsSync(out)).toBe(true);
     expect(fs.readFileSync(out, 'utf-8')).toContain('uses: secure-ci/cli@v1');
@@ -503,12 +523,12 @@ describe('secureci commands', () => {
     expect(run(['validate', out], dir).status).toBe(0);
 
     // A second run won't overwrite without --force.
-    const second = run(['init'], dir);
+    const second = run(['init', 'workflow'], dir);
     expect(second.status).not.toBe(0);
     expect(second.stderr).toContain('already exists');
 
     // --no-upload keeps contents: read only and the file still validates.
-    const forced = run(['init', '--no-upload', '--force'], dir);
+    const forced = run(['init', 'workflow', '--no-upload', '--force'], dir);
     expect(forced.status).toBe(0);
     const content = fs.readFileSync(out, 'utf-8');
     expect(content).not.toContain('security-events');
