@@ -16,6 +16,7 @@ import {
   ContractRecurse
 } from './parser/pipeline-contract-validator';
 import { formatReport, ReportEntry, ReportFormat } from './report';
+import { renderInitWorkflow } from './init';
 import {
   buildInventory,
   diffLock,
@@ -298,6 +299,36 @@ program
     listWorkflows();
   });
 
+program
+  .command('init')
+  .description(
+    'Generate a GitHub Actions workflow that runs SecureCI on pull requests'
+  )
+  .option(
+    '-c, --contract <file>',
+    'Check workflows against this pipeline contract in the generated workflow'
+  )
+  .option(
+    '--no-upload',
+    'Do not upload SARIF to code scanning (keeps contents: read only)'
+  )
+  .option(
+    '-o, --output <path>',
+    'Where to write the workflow',
+    '.github/workflows/secureci.yml'
+  )
+  .option('-f, --force', 'Overwrite the output file if it already exists')
+  .action(
+    (options: {
+      contract?: string;
+      upload: boolean;
+      output: string;
+      force?: boolean;
+    }) => {
+      runInit(options);
+    }
+  );
+
 function defaultWorkflowFiles(): string[] {
   const dir = path.join(process.cwd(), '.github', 'workflows');
   if (!fs.existsSync(dir)) return [];
@@ -514,6 +545,37 @@ async function validateFiles(
     }
   }
   if (!allValid) process.exit(1);
+}
+
+function runInit(options: {
+  contract?: string;
+  upload: boolean;
+  output: string;
+  force?: boolean;
+}): void {
+  const output = path.resolve(process.cwd(), options.output);
+  if (fs.existsSync(output) && !options.force) {
+    logger.error(
+      `${options.output} already exists; pass --force to overwrite it.`
+    );
+    process.exit(1);
+  }
+
+  const content = renderInitWorkflow({
+    contract: options.contract,
+    upload: options.upload
+  });
+
+  fs.mkdirSync(path.dirname(output), { recursive: true });
+  fs.writeFileSync(output, content);
+
+  logger.success(`Wrote ${options.output}`);
+  if (options.upload) {
+    logger.info(
+      'The workflow uploads SARIF to code scanning (needs security-events: write).'
+    );
+  }
+  logger.info('Commit it and open a pull request to see SecureCI run.');
 }
 
 function listWorkflows(): void {

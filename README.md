@@ -263,6 +263,19 @@ The job fails if any workflow is invalid or violates the contract. Inputs: `file
 
 > The action runs `npx @secureci/cli`, so it works once the package is published to npm.
 
+### Generate the workflow (`secureci init`)
+
+`secureci init` writes the workflow above to `.github/workflows/secureci.yml` so you don't have to copy it by hand:
+
+```bash
+secureci init                                   # SARIF upload on (default)
+secureci init --contract contracts/standard.yml # also check a pipeline contract
+secureci init --no-upload                        # keep contents: read only, no code-scanning upload
+secureci init --output .github/workflows/ci-security.yml
+```
+
+It refuses to overwrite an existing file unless you pass `--force`, and the file it writes passes `secureci validate`.
+
 ## Workflow Features
 
 ### Conditional Execution (`if:`)

@@ -252,7 +252,14 @@ describe('secureci commands', () => {
   it('names itself secureci and lists its commands in help', () => {
     const result = run(['--help']);
     expect(result.stdout).toContain('Usage: secureci');
-    for (const command of ['run', 'validate', 'list', 'config', 'cache']) {
+    for (const command of [
+      'run',
+      'validate',
+      'list',
+      'init',
+      'config',
+      'cache'
+    ]) {
       expect(result.stdout).toMatch(new RegExp(`\\n\\s+${command}\\b`));
     }
   });
@@ -476,5 +483,33 @@ describe('secureci commands', () => {
     const result = run(['list'], tempDir);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('ci.yml: Hello CI');
+  });
+
+  it('generates a valid workflow with secureci init and refuses to clobber it', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-init-'));
+    const out = path.join(dir, '.github', 'workflows', 'secureci.yml');
+
+    const first = run(['init'], dir);
+    expect(first.status).toBe(0);
+    expect(fs.existsSync(out)).toBe(true);
+    expect(fs.readFileSync(out, 'utf-8')).toContain('uses: secure-ci/cli@v1');
+
+    // The generated workflow passes our own validator.
+    expect(run(['validate', out], dir).status).toBe(0);
+
+    // A second run won't overwrite without --force.
+    const second = run(['init'], dir);
+    expect(second.status).not.toBe(0);
+    expect(second.stderr).toContain('already exists');
+
+    // --no-upload keeps contents: read only and the file still validates.
+    const forced = run(['init', '--no-upload', '--force'], dir);
+    expect(forced.status).toBe(0);
+    const content = fs.readFileSync(out, 'utf-8');
+    expect(content).not.toContain('security-events');
+    expect(content).toContain('upload-sarif: false');
+    expect(run(['validate', out], dir).status).toBe(0);
+
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
