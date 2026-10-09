@@ -1,6 +1,6 @@
-# Domain Concepts for the SecureCI CLI
+# Domain Concepts for SecureCI
 
-This document explains GitHub Actions concepts relevant to understanding the SecureCI CLI.
+This document explains GitHub Actions concepts relevant to understanding SecureCI.
 
 ## Workflows
 
@@ -67,7 +67,7 @@ Node.js-based actions that run JavaScript code.
 - Can use Node.js APIs and npm packages
 - Faster than Docker actions
 
-**Support in the SecureCI CLI:** Full support for all Node.js versions.
+**Support in SecureCI:** Full support for all Node.js versions.
 
 #### 3. Docker Actions
 
@@ -80,7 +80,7 @@ Actions that run in Docker containers.
 - Provides isolated environment
 - Slower startup time
 
-**Support in the SecureCI CLI:** Supported — the CLI builds the action's Dockerfile (or pulls a `docker://` image) and runs it in its own container. This is distinct from the CLI's `--container-runtime` flag, which isolates `run:` steps and JavaScript actions in the job container regardless of action type (see [Container Isolation](#container-isolation) below).
+**Support in SecureCI:** Supported — the CLI builds the action's Dockerfile (or pulls a `docker://` image) and runs it in its own container. This is distinct from the CLI's `--container-runtime` flag, which isolates `run:` steps and JavaScript actions in the job container regardless of action type (see [Container Isolation](#container-isolation) below).
 
 ## Remote Actions
 
@@ -102,7 +102,7 @@ owner/repo/path@ref
 
 ### Action Caching
 
-The SecureCI CLI caches downloaded actions for performance:
+SecureCI caches downloaded actions for performance:
 
 - **Cache location:** `~/.secureci/actions-cache/`
 - **Cache key:** `owner/repo@ref`
@@ -111,7 +111,7 @@ The SecureCI CLI caches downloaded actions for performance:
 
 ### Action Discovery
 
-When the SecureCI CLI encounters a `uses` step:
+When SecureCI encounters a `uses` step:
 
 1. Parse the action reference
 2. Check local cache
@@ -169,7 +169,7 @@ Jobs are collections of steps that run on the same runner.
 **Key properties:**
 
 - `runs-on`: Specifies runner environment (e.g., `ubuntu-latest`)
-- `needs`: Specifies job dependencies — the SecureCI CLI orders jobs via topological sort (Kahn's algorithm) so dependent jobs always run after the jobs they depend on
+- `needs`: Specifies job dependencies — SecureCI orders jobs via topological sort (Kahn's algorithm) so dependent jobs always run after the jobs they depend on
 - `if`: Conditional execution (`${{ ... }}` expression; see below). A job whose `if:` evaluates falsy is skipped entirely
 - `steps`: Array of steps to execute
 
@@ -195,7 +195,7 @@ Steps are individual tasks within a job.
        node-version: '20'
    ```
 
-**Additional step properties supported by the SecureCI CLI:**
+**Additional step properties supported by SecureCI:**
 
 - `id`: Names the step so its outputs can be referenced as `steps.<id>.outputs.<name>`
 - `if`: Conditional execution; a falsy step is skipped (marked `outcome: 'skipped'`)
@@ -225,7 +225,7 @@ steps:
 
 ## Step Outputs (`$GITHUB_OUTPUT`)
 
-A step can write `name=value` pairs (or multiline `name<<EOF ... EOF` blocks) to the file path in the `$GITHUB_OUTPUT` environment variable. The SecureCI CLI injects a temporary file for this on every step and parses it afterward into `StepResult.outputs`, making the values available to later steps/jobs via `${{ steps.<id>.outputs.<name> }}`.
+A step can write `name=value` pairs (or multiline `name<<EOF ... EOF` blocks) to the file path in the `$GITHUB_OUTPUT` environment variable. SecureCI injects a temporary file for this on every step and parses it afterward into `StepResult.outputs`, making the values available to later steps/jobs via `${{ steps.<id>.outputs.<name> }}`.
 
 ```yaml
 - id: version
@@ -249,7 +249,7 @@ Any value passed via `--secret KEY=value` is registered with the CLI's `Logger` 
 
 ## Execution Model
 
-The SecureCI CLI executes workflows locally:
+SecureCI executes workflows locally:
 
 1. Parse workflow YAML
 2. Validate structure
@@ -265,7 +265,7 @@ The SecureCI CLI executes workflows locally:
 
 ## Key Differences from GitHub Actions
 
-When running locally with the SecureCI CLI:
+When running locally with SecureCI:
 
 - **Runner images:** Jobs run in a container image mapped from `runs-on` (not the exact GitHub-hosted runner image); `windows-*`/`macos-*` fall back to a Linux image with a warning
 - **No GitHub context:** Limited access to GitHub API

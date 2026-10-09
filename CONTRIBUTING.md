@@ -1,4 +1,4 @@
-# Contributing to the SecureCI CLI
+# Contributing to SecureCI
 
 Thanks for helping improve `@secureci/cli`! This guide covers **how to
 contribute** — the process, conventions and checks. It is written for both

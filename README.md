@@ -1,4 +1,4 @@
-# SecureCI CLI
+# SecureCI
 
 [![CI](https://github.com/secure-ci/cli/actions/workflows/ci.yaml/badge.svg)](https://github.com/secure-ci/cli/actions/workflows/ci.yaml)
 
@@ -184,7 +184,7 @@ refactor while keeping tests green.
 
 Every pull request and push to `main` runs
 [`ci.yaml`](.github/workflows/ci.yaml): lint, `prettier --check`, tests with the
-coverage thresholds in `vitest.config.mts`, build, and the SecureCI CLI
+coverage thresholds in `vitest.config.mts`, build, and SecureCI
 validating its own workflow.
 
 Opt-in suites:

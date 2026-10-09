@@ -1,6 +1,6 @@
-# AI Agent Guidance for the SecureCI CLI
+# AI Agent Guidance for SecureCI
 
-**The SecureCI CLI** (`@secureci/cli`, command `secureci`) validates GitHub Actions workflows, checks them against pipeline standards, and runs them locally without pushing to remote.
+**SecureCI** (`@secureci/cli`, command `secureci`) validates GitHub Actions workflows, checks them against pipeline standards, and runs them locally without pushing to remote.
 
 ## Quick Start
 

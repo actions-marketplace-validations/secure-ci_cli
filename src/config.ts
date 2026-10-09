@@ -4,7 +4,7 @@ import * as YAML from 'yaml';
 import type { ContainerRuntimePreference } from './runner/container-runtime';
 
 /**
- * Global SecureCI CLI configuration, stored as YAML at `~/.secureci/config.yml`.
+ * Global SecureCI configuration, stored as YAML at `~/.secureci/config.yml`.
  * Can be edited by hand or managed via `secureci config get|set|unset|list`.
  * Values here are used as defaults, overridden by explicit CLI flags.
  *

@@ -1,6 +1,6 @@
-# Development Workflow for the SecureCI CLI
+# Development Workflow for SecureCI
 
-This document covers the development workflow and common tasks for working on the SecureCI CLI.
+This document covers the development workflow and common tasks for working on SecureCI.
 
 ## Before You Start
 
@@ -263,7 +263,7 @@ node --inspect-brk dist/cli.js run workflow.yml --dry-run
 
 ## Contributing Philosophy
 
-When working on the SecureCI CLI, keep these principles in mind:
+When working on SecureCI, keep these principles in mind:
 
 ### Minimal Dependencies
 

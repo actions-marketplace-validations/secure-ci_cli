@@ -85,7 +85,7 @@ describe('Executor', () => {
   const tempTestDir = path.join(os.tmpdir(), 'secureci-test');
 
   // Keep tests hermetic when the suite itself runs in GitHub Actions (or in
-  // the SecureCI CLI): the github context prefers $GITHUB_* / $RUNNER_* from the host.
+  // SecureCI): the github context prefers $GITHUB_* / $RUNNER_* from the host.
   let savedRunnerEnv: Record<string, string | undefined> = {};
   beforeEach(() => {
     savedRunnerEnv = {};

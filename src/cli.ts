@@ -73,7 +73,7 @@ try {
 program
   .name('secureci')
   .description(
-    'SecureCI CLI: validate, check and run GitHub Actions workflows locally'
+    'SecureCI: validate, check and run GitHub Actions workflows locally'
   )
   .version(readVersion(), '-V, --version', 'Print the version')
   .helpOption('-h, --help', 'Show help')

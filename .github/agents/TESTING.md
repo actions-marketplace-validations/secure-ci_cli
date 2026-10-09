@@ -1,10 +1,10 @@
-# Testing Guidelines for the SecureCI CLI
+# Testing Guidelines for SecureCI
 
-This document provides comprehensive testing guidelines for AI agents and developers working on the SecureCI CLI.
+This document provides comprehensive testing guidelines for AI agents and developers working on SecureCI.
 
 ## Testing Philosophy
 
-The SecureCI CLI follows **Test-Driven Development (TDD)**:
+SecureCI follows **Test-Driven Development (TDD)**:
 
 1. Write tests first (Red)
 2. Implement features to pass tests (Green)
@@ -72,7 +72,7 @@ describe('ModuleName', () => {
 });
 ```
 
-### Example from the SecureCI CLI
+### Example from SecureCI
 
 ```typescript
 import { validateWorkflow } from './validator';

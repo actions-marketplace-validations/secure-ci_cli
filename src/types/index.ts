@@ -4,7 +4,7 @@
 // https://json.schemastore.org/github-action.json
 //
 // Note: These types focus on the subset of features needed for local execution.
-// Full schema compliance would include additional properties not relevant for the SecureCI CLI's use case.
+// Full schema compliance would include additional properties not relevant for SecureCI's use case.
 
 export interface WorkflowFile {
   name: string;

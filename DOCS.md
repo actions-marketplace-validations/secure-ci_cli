@@ -1,4 +1,4 @@
-# SecureCI CLI — reference
+# SecureCI — reference
 
 Full reference for `@secureci/cli` (the `secureci` command). For a short
 introduction and install steps, see the [README](README.md).
@@ -133,7 +133,7 @@ secureci run wf.yml --var ENVIRONMENT=staging
 
 ## Global configuration
 
-The SecureCI CLI reads defaults from `~/.secureci/config.yml` (created on first `secureci config set`, or editable by hand). Config keys match the CLI flag names (kebab-case, minus the leading `--`). CLI flags always take precedence over the config file.
+SecureCI reads defaults from `~/.secureci/config.yml` (created on first `secureci config set`, or editable by hand). Config keys match the CLI flag names (kebab-case, minus the leading `--`). CLI flags always take precedence over the config file.
 
 ```bash
 secureci config set container-runtime podman   # persist a default
@@ -159,7 +159,7 @@ runner-images:
 
 ## Pipeline contracts (`validate --contract`)
 
-In organizations with a central repo of reusable workflows/actions, a platform team can define a minimum pipeline standard — required actions, forbidden actions, and (optionally) the order required actions must run in — and have the SecureCI CLI check a caller's workflow against it.
+In organizations with a central repo of reusable workflows/actions, a platform team can define a minimum pipeline standard — required actions, forbidden actions, and (optionally) the order required actions must run in — and have SecureCI check a caller's workflow against it.
 
 ```yaml
 # contracts/platform-standard.yml
@@ -436,7 +436,7 @@ In container mode, env values (secrets included) never appear in the container c
 
 ## Remote action support
 
-The SecureCI CLI supports fetching and executing remote GitHub Actions:
+SecureCI supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps.
 - **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with the CLI's own Node.js binary, in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` of remote actions runs at job start, before any step, gated by `pre-if` (local actions, which usually come from the checkout, run it right before `main`); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.

@@ -44,7 +44,7 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Validate this repo's workflows with the SecureCI CLI (dogfooding)
+      - name: Validate this repo's workflows with SecureCI (dogfooding)
         run: |
           node dist/cli.js validate .github/workflows/ci.yaml
           node dist/cli.js run .github/workflows/ci.yaml --dry-run

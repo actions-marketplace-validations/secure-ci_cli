@@ -1,4 +1,4 @@
-# Code Style for the SecureCI CLI
+# Code Style for SecureCI
 
 Conventions specific to this codebase. General TypeScript/JavaScript idioms you
 already know (destructuring, spread, async/await, early returns, etc.) are not

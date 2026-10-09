@@ -1,4 +1,4 @@
-# Architecture Guide for the SecureCI CLI
+# Architecture Guide for SecureCI
 
 How the codebase is organized, for agents and developers. For user-facing
 behavior and every flag, see [DOCS.md](../../DOCS.md).
