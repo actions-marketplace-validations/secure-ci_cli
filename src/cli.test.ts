@@ -399,6 +399,60 @@ describe('secureci commands', () => {
     );
   });
 
+  it('inventory lists resolved actions and tracks drift via a lockfile', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-inv-cli-'));
+    fs.mkdirSync(path.join(dir, '.github', 'workflows'), { recursive: true });
+    const wf = path.join(dir, '.github', 'workflows', 'ci.yml');
+    fs.writeFileSync(
+      wf,
+      [
+        'name: CI',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - uses: org/scan@1111111111111111111111111111111111111111',
+        '      - uses: org/deploy@2222222222222222222222222222222222222222'
+      ].join('\n')
+    );
+
+    // --offline: only already-pinned refs resolve (no network).
+    const inv = JSON.parse(run(['inventory', wf, '--offline'], dir).stdout);
+    expect(inv.actions.map((a: { uses: string }) => a.uses)).toEqual([
+      'org/deploy@2222222222222222222222222222222222222222',
+      'org/scan@1111111111111111111111111111111111111111'
+    ]);
+    expect(inv.actions[0].resolvedSha).toBe(
+      '2222222222222222222222222222222222222222'
+    );
+
+    // Write a lockfile, then a clean check passes.
+    const lock = path.join(dir, 'secureci.lock');
+    expect(
+      run(
+        ['inventory', wf, '--offline', '--lockfile', lock, '--update-lock'],
+        dir
+      ).status
+    ).toBe(0);
+    expect(fs.existsSync(lock)).toBe(true);
+    expect(
+      run(['inventory', wf, '--offline', '--lockfile', lock], dir).status
+    ).toBe(0);
+
+    // Simulate a moving tag: the recorded commit no longer matches what
+    // the ref resolves to. The lockfile check reports drift and fails.
+    const lockData = JSON.parse(fs.readFileSync(lock, 'utf-8'));
+    const key = Object.keys(lockData.actions)[0];
+    lockData.actions[key] = '9'.repeat(40);
+    fs.writeFileSync(lock, JSON.stringify(lockData));
+    const drift = run(['inventory', wf, '--offline', '--lockfile', lock], dir);
+    expect(drift.status).not.toBe(0);
+    expect(drift.stdout + drift.stderr).toContain('Drift:');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('shows effective values, marking built-in defaults, in config list', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cfg-home-'));
     const env = { ...process.env, HOME: home };

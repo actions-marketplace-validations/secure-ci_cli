@@ -3,6 +3,7 @@ import {
   fetchAction,
   fetchRepoFile,
   lsRemoteSha,
+  resolveActionSha,
   clearActionCache
 } from './action-fetcher';
 import * as fs from 'fs';
@@ -226,6 +227,30 @@ describe('Action Fetcher', () => {
 
     const repoCache = () =>
       path.join(tempHome, '.secureci', 'actions-cache', 'org', 'act');
+
+    it('resolveActionSha returns a full-SHA ref unchanged, without a request', async () => {
+      handler = (_req, res) => {
+        res.writeHead(500);
+        res.end();
+      };
+      expect(await resolveActionSha(`org/act@${SHA1}`, { token: 'tok' })).toBe(
+        SHA1
+      );
+      expect(requests).toEqual([]);
+    });
+
+    it('resolveActionSha resolves a tag to a commit via the API token', async () => {
+      handler = github({ v1: SHA1 }, {});
+      expect(await resolveActionSha('org/act@v1', { token: 'tok' })).toBe(SHA1);
+      expect(requests[0].url).toBe('/api/repos/org/act/commits/v1');
+      expect(requests[0].auth).toBe('Bearer tok');
+    });
+
+    it('resolveActionSha returns undefined for a non-action reference', async () => {
+      expect(await resolveActionSha('not-an-action', { token: null })).toBe(
+        undefined
+      );
+    });
 
     it('resolves a ref to a SHA with the token, and caches the repo by SHA', async () => {
       handler = github({ v1: SHA1 }, { [SHA1]: tarball() });

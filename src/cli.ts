@@ -3,7 +3,11 @@
 import { Command, Option } from 'commander';
 import { dryRun } from './runner/dry-run';
 import { executeWorkflow } from './runner/executor';
-import { clearActionCache, getActionCacheDir } from './runner/action-fetcher';
+import {
+  clearActionCache,
+  getActionCacheDir,
+  resolveActionSha
+} from './runner/action-fetcher';
 import { validateWorkflow, validateAction } from './parser/validator';
 import { parseFile } from './parser/workflow-parser';
 import { parsePipelineContract } from './parser/pipeline-contract-parser';
@@ -12,6 +16,12 @@ import {
   ContractRecurse
 } from './parser/pipeline-contract-validator';
 import { formatReport, ReportEntry, ReportFormat } from './report';
+import {
+  buildInventory,
+  diffLock,
+  InventoryAction,
+  Lockfile
+} from './inventory';
 import type { ValidationResult } from './types';
 import { logger, LogLevel } from './utils/logger';
 import { parseKeyValuePairs } from './utils/key-value';
@@ -257,11 +267,137 @@ program
   );
 
 program
+  .command('inventory')
+  .description(
+    'List the actions and reusable workflows a workflow uses (resolved into called workflows/actions), with their commit SHAs; track drift with a lockfile'
+  )
+  .argument(
+    '[file...]',
+    'Workflow files (default: every file in .github/workflows)'
+  )
+  .option(
+    '--offline',
+    'Do not resolve tags to commit SHAs over the network (already-pinned refs still resolve)'
+  )
+  .option(
+    '--lockfile <path>',
+    'Compare resolved commit SHAs against this lockfile and report drift'
+  )
+  .option(
+    '--update-lock',
+    'Write/update the lockfile instead of failing on drift'
+  )
+  .action(async (files: string[], options) => {
+    await runInventory(files, options);
+  });
+
+program
   .command('list')
   .description('List workflows in .github/workflows/')
   .action(() => {
     listWorkflows();
   });
+
+function defaultWorkflowFiles(): string[] {
+  const dir = path.join(process.cwd(), '.github', 'workflows');
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+    .map((f) => path.join('.github', 'workflows', f));
+}
+
+async function runInventory(
+  files: string[],
+  options: {
+    offline?: boolean;
+    lockfile?: string;
+    updateLock?: boolean;
+  }
+): Promise<void> {
+  const targets = files.length > 0 ? files : defaultWorkflowFiles();
+  if (targets.length === 0) {
+    logger.error('No workflow files given and none found in .github/workflows');
+    process.exit(1);
+  }
+  targets.forEach(requireFile);
+
+  const resolver = options.offline
+    ? undefined
+    : (uses: string) => resolveActionSha(uses);
+
+  // Merge every file's remote actions by `uses`.
+  const byUses = new Map<string, InventoryAction>();
+  for (const file of targets) {
+    try {
+      const parsed = parseFile(file);
+      if (parsed.type !== 'workflow') continue;
+      const inv = await buildInventory(
+        { type: 'workflow', path: file, file: parsed.file },
+        resolver
+      );
+      for (const action of inv.actions) {
+        const existing = byUses.get(action.uses);
+        if (existing) existing.paths.push(...action.paths);
+        else byUses.set(action.uses, { ...action });
+      }
+    } catch (error) {
+      logger.error(
+        `Could not read ${file}: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+      process.exit(1);
+    }
+  }
+
+  const actions = [...byUses.values()].sort((a, b) =>
+    a.uses.localeCompare(b.uses)
+  );
+  const current: Record<string, string> = {};
+  for (const action of actions) {
+    if (action.resolvedSha) current[action.uses] = action.resolvedSha;
+  }
+
+  if (!options.lockfile) {
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify({ actions }, null, 2));
+    return;
+  }
+
+  const lock: Lockfile = fs.existsSync(options.lockfile)
+    ? (JSON.parse(fs.readFileSync(options.lockfile, 'utf-8')) as Lockfile)
+    : { version: 1, actions: {} };
+
+  if (options.updateLock) {
+    const updated: Lockfile = { version: 1, actions: current };
+    fs.writeFileSync(options.lockfile, JSON.stringify(updated, null, 2) + '\n');
+    logger.success(
+      `Wrote ${Object.keys(current).length} action(s) to ${options.lockfile}`
+    );
+    return;
+  }
+
+  const diff = diffLock(current, lock);
+  for (const d of diff.drifted) {
+    logger.error(
+      `Drift: ${d.uses} now resolves to ${d.to.slice(0, 12)} (was ${d.from.slice(0, 12)})`
+    );
+  }
+  diff.added.forEach((u) => logger.warn(`New action not in lockfile: ${u}`));
+  diff.removed.forEach((u) =>
+    logger.info(`In lockfile but no longer used: ${u}`)
+  );
+  if (diff.drifted.length > 0) {
+    logger.error(
+      'Action commits drifted from the lockfile. Review the change, then run with --update-lock to accept it.'
+    );
+    process.exit(1);
+  }
+  if (diff.added.length > 0) {
+    logger.warn('New actions are not yet in the lockfile (run --update-lock).');
+    process.exit(1);
+  }
+  logger.success('No action drift against the lockfile.');
+}
 
 async function validateOneFile(
   filePath: string,

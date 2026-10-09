@@ -211,6 +211,29 @@ secureci validate .github/workflows/ci.yml --contract contract.yml --format sari
 - **`json`**: `{ file, valid, errors: [{ path, message, severity }] }`.
 - **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
 
+## Action Inventory and Drift (`secureci inventory`)
+
+`secureci inventory` lists every action and reusable workflow a workflow uses — resolved recursively into local composite actions and reusable workflows, so wrapped references show up too — and resolves each remote action's tag or branch to the commit SHA it currently points at.
+
+```bash
+secureci inventory                                  # all workflows in .github/workflows
+secureci inventory .github/workflows/ci.yml         # one file; prints JSON
+secureci inventory --offline                        # don't resolve over the network
+```
+
+Each entry carries `uses`, `owner`, `repo`, `ref`, whether it's `pinned` to a full commit SHA, the `resolvedSha`, and the call `paths` where it appears. Tags and branches are resolved with `git ls-remote` (or the API when a token is available); `--offline` resolves only already-pinned refs.
+
+### Drift against a lockfile
+
+Record what each reference resolves to today, then catch it moving later (the [tj-actions/changed-files incident](https://www.stepsecurity.io/blog/harden-runner-detection-tj-actions-changed-files-action-with-commit-compromise) is the cautionary tale):
+
+```bash
+secureci inventory --lockfile secureci.lock --update-lock   # write/update the lock
+secureci inventory --lockfile secureci.lock                 # fail if anything drifted
+```
+
+A check fails (non-zero) when a `uses:` reference now resolves to a different commit than the lockfile recorded (a moved tag), or when a new action isn't in the lock yet. Review the change, then re-run with `--update-lock` to accept it. The lockfile is plain JSON (`{ version, actions: { "owner/repo@ref": "<sha>" } }`), safe to commit.
+
 ## Use in CI (GitHub Action)
 
 Run the same checks on pull requests with the bundled composite action. It validates your workflows (optionally against a contract) and, by default, uploads a SARIF report so findings show up inline on the PR via GitHub code scanning.

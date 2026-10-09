@@ -472,3 +472,26 @@ export function clearActionCache(): void {
     logger.info('Action cache cleared');
   }
 }
+
+/**
+ * Resolve a `uses:` action reference to its current commit SHA, for the
+ * inventory and lockfile. Returns undefined if the ref can't be resolved
+ * (not an action reference, offline, or the lookup failed). Uses a token
+ * when one is available (githubToken), else anonymous `git ls-remote`.
+ */
+export async function resolveActionSha(
+  uses: string,
+  options: { token?: string | null; timeoutMs?: number } = {}
+): Promise<string | undefined> {
+  const ref = parseActionReference(uses);
+  if (!ref) return undefined;
+  const timeoutMs = options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
+  const token = options.token === undefined ? githubToken() : options.token;
+  const first = await resolveSha(ref, token, timeoutMs);
+  if (first.sha) return first.sha;
+  // A rejected token shouldn't block resolution: retry anonymously.
+  if (first.unauthorized) {
+    return (await resolveSha(ref, null, timeoutMs)).sha;
+  }
+  return undefined;
+}
