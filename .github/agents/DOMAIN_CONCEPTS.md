@@ -80,7 +80,7 @@ Actions that run in Docker containers.
 - Provides isolated environment
 - Slower startup time
 
-**Support in the SecureCI CLI:** Currently shows a warning (future enhancement planned). Note: this is distinct from the CLI's `--container-runtime` flag, which isolates `run:` steps in a container regardless of action type (see [Container Isolation](#container-isolation) below).
+**Support in the SecureCI CLI:** Supported — the CLI builds the action's Dockerfile (or pulls a `docker://` image) and runs it in its own container. This is distinct from the CLI's `--container-runtime` flag, which isolates `run:` steps and JavaScript actions in the job container regardless of action type (see [Container Isolation](#container-isolation) below).
 
 ## Remote Actions
 
@@ -240,13 +240,12 @@ Any value passed via `--secret KEY=value` is registered with the CLI's `Logger` 
 
 ## Container Isolation
 
-`run:` steps can optionally be executed inside a Docker or Podman container instead of directly on the host, via `src/runner/container-runtime.ts`.
+`run:` steps and JavaScript actions run inside one container per job by default, via `src/runner/container-runtime.ts`, rather than directly on the host.
 
-- **Default on**: `--container-runtime` defaults to `docker` (`auto|docker|podman|containerd|host`). If the runtime is unavailable the run stops; running steps on the host is an explicit opt-in (`--container-runtime host`)
-- **`auto`**: Tries Docker first, then Podman
-- **Isolation options**: `--container-image`, `--container-memory`, `--container-timeout`, and network access disabled by default (`--allow-network` to opt in)
-- **Fallback**: If the requested/detected runtime is unavailable, the SecureCI CLI logs a warning and falls back to host execution
-- **Output exchange**: The working directory and a `$GITHUB_OUTPUT` exchange directory are bind-mounted into the container so outputs and conditionals work identically to host execution
+- **Default on**: `--container-runtime` defaults to `docker` (`auto|docker|podman|containerd|host`). If the runtime is unavailable the run **stops** — there is no silent host fallback; running on the host is the explicit `--container-runtime host` opt-in.
+- **`auto`**: Tries Docker, then Podman, then containerd (via nerdctl).
+- **Isolation options**: `--container-image`, `--container-memory`, `--container-timeout`, and `--no-network` (networking is on by default, like GitHub-hosted runners).
+- **Output exchange**: The working directory and a `$GITHUB_OUTPUT` exchange directory are bind-mounted into the container so outputs and conditionals work identically to host execution.
 
 ## Execution Model
 
@@ -268,12 +267,11 @@ The SecureCI CLI executes workflows locally:
 
 When running locally with the SecureCI CLI:
 
-- **No runner images:** Runs on your local machine (or an opt-in Docker/Podman container for `run:` steps)
+- **Runner images:** Jobs run in a container image mapped from `runs-on` (not the exact GitHub-hosted runner image); `windows-*`/`macos-*` fall back to a Linux image with a warning
 - **No GitHub context:** Limited access to GitHub API
 - **Sequential job execution:** Jobs run one at a time, ordered by `needs:` (not in parallel)
 - **Local caching:** Actions cached locally instead of GitHub servers
 - **Limited secrets:** Secrets passed via CLI (not GitHub Secrets), masked in log output
-- **Docker action type unsupported:** `runs.using: docker` actions show a warning; this is separate from the `--container-runtime` step-isolation feature
 
 ## Resources
 
