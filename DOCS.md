@@ -37,10 +37,16 @@ introduction and install steps, see the [README](README.md).
 
 ## Commands at a glance
 
+`run` **executes** the workflow (one container per job by default). To check a
+workflow without running anything, use [`validate`](#machine-readable-output---format)
+(static syntax/contract/expression checks) or `run --dry-run` (simulate, showing
+what would run). `run` prints a one-line reminder of these alternatives when it
+starts.
+
 ```bash
 # Run / dry-run a workflow
-secureci run .github/workflows/ci.yml
-secureci run .github/workflows/ci.yml --dry-run
+secureci run .github/workflows/ci.yml           # executes for real
+secureci run .github/workflows/ci.yml --dry-run # simulate, no execution
 secureci run .github/workflows/ci.yml --job build
 
 # Validate (optionally against a pipeline contract), human or machine output

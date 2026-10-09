@@ -284,6 +284,9 @@ describe('secureci commands', () => {
     );
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('hello world');
+    // Signposts that this really executed, and names the alternatives.
+    expect(result.stdout + result.stderr).toMatch(/not a dry run/i);
+    expect(result.stdout + result.stderr).toContain('secureci validate');
   });
 
   it('reads a bare --secret NAME from the environment', () => {
@@ -360,6 +363,8 @@ describe('secureci commands', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Dry run completed successfully');
     expect(result.stdout).not.toContain('hello world');
+    // No "really executing" banner on the dry-run path.
+    expect(result.stdout + result.stderr).not.toMatch(/not a dry run/i);
   });
 
   it('prints and clears the action cache with secureci cache', () => {

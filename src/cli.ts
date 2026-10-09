@@ -174,6 +174,10 @@ program
       return;
     }
 
+    logger.info(
+      "Running the workflow for real (not a dry run). Use --dry-run to simulate without executing, or 'secureci validate' to only check for errors."
+    );
+
     try {
       const inputs = parseKeyValuePairs(options.input, '--input');
       const secrets = parseKeyValuePairs(options.secret, '--secret', {
