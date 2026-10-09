@@ -32,9 +32,15 @@
     "secureci"
   ],
   "author": {
-    "name": "Jabran Rafique",
-    "email": "hello@jabran.me"
+    "name": "SecureCI",
+    "email": "hello@secure-ci.dev"
   },
+  "contributors": [
+    {
+      "name": "Jabran Rafique",
+      "email": "hello@jabran.me"
+    }
+  ],
   "license": "MIT",
   "homepage": "https://www.secure-ci.dev",
   "repository": {
