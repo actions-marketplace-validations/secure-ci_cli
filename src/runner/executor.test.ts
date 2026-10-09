@@ -2194,7 +2194,9 @@ jobs:
   wf:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "dir=$(basename "$PWD") bash=\${BASH_VERSION:+yes}"
+      - run: |
+          rc=0; { false | true; } || rc=$?
+          echo "dir=$(basename "$PWD") pipefail=$rc"
   job:
     runs-on: ubuntu-latest
     defaults:
@@ -2202,7 +2204,9 @@ jobs:
         working-directory: .secureci-test-wd/job
         shell: sh
     steps:
-      - run: echo "dir=$(basename "$PWD") bash=\${BASH_VERSION:+yes}"
+      - run: |
+          rc=0; { false | true; } || rc=$?
+          echo "dir=$(basename "$PWD") pipefail=$rc"
       - run: echo "dir=$(basename "$PWD")"
         working-directory: .secureci-test-wd
 `);
@@ -2210,9 +2214,15 @@ jobs:
       try {
         const result = await executeWorkflow(workflowPath);
 
+        // The default shell is bash with `-eo pipefail`, so `false | true`
+        // returns 1 (pipefail=1). The job overrides the shell to `sh -e`
+        // (no pipefail), so the same pipeline returns 0 (pipefail=0). This
+        // distinguishes the shells regardless of whether /bin/sh is dash or
+        // bash on the host (checking $BASH_VERSION would not: bash in POSIX
+        // sh mode still sets it).
         expect(result.success).toBe(true);
-        expect(result.jobs[0].steps[0].output).toContain('dir=wf bash=yes');
-        expect(result.jobs[1].steps[0].output).toContain('dir=job bash=\n');
+        expect(result.jobs[0].steps[0].output).toContain('dir=wf pipefail=1');
+        expect(result.jobs[1].steps[0].output).toContain('dir=job pipefail=0');
         expect(result.jobs[1].steps[1].output).toContain(
           'dir=.secureci-test-wd'
         );
