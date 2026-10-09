@@ -21,6 +21,7 @@ import { resolveShell, shellCommandLine } from './shell';
 import {
   JobRuntime,
   JobContainerHandle,
+  stepDisplayName,
   createContainerStepFiles,
   killStepProcesses,
   effectiveTimeout,
@@ -46,8 +47,12 @@ export async function executeStep(
   const startTime = Date.now();
 
   try {
-    if (step.name) {
-      logger.info(`Running: ${step.name}`);
+    const displayName = stepDisplayName(step, ctx);
+    // Don't echo a bare run: command before the step runs — it may contain
+    // a value the step is about to register with ::add-mask::. Named and
+    // uses steps have a safe label.
+    if (step.name || step.uses) {
+      logger.info(`Running: ${displayName}`);
     }
 
     // Handle 'uses' actions - fetch and execute remote actions
@@ -102,7 +107,8 @@ export async function executeStep(
           options,
           command,
           startTime,
-          mergedEnv
+          mergedEnv,
+          displayName
         );
       }
 
@@ -144,7 +150,7 @@ export async function executeStep(
           logger.warn(stderr.trim());
         }
 
-        logger.success(`Step completed: ${step.name || 'unnamed'}`);
+        logger.success(`Step completed: ${displayName}`);
 
         return {
           step,
@@ -210,7 +216,8 @@ export async function executeInJobContainer(
   options: RunOptions,
   command: string,
   startTime: number,
-  mergedEnv: Record<string, string>
+  mergedEnv: Record<string, string>,
+  displayName = stepDisplayName(step)
 ): Promise<StepResult> {
   const { files, containerDir } = createContainerStepFiles(container);
 
@@ -280,7 +287,7 @@ export async function executeInJobContainer(
     }
 
     logger.success(
-      `Step completed: ${step.name || 'unnamed'} (container: ${container.runtime.name})`
+      `Step completed: ${displayName} (container: ${container.runtime.name})`
     );
 
     return {

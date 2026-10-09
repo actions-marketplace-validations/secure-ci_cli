@@ -29,7 +29,8 @@ import {
   JobRuntime,
   ParentAction,
   actionDirInContainer,
-  stepActionEnv
+  stepActionEnv,
+  stepDisplayName
 } from './job-runtime';
 import { isLocalCheckout, localCheckout } from './checkout';
 import { executeStep } from './steps';
@@ -478,7 +479,7 @@ export async function executeAction(
             runCompositeStep = evaluateCondition(compositeStep.if, stepCtx);
           } catch (error) {
             const message = ifEvaluationError(
-              `step '${compositeStep.name || compositeStep.id || 'unnamed'}' of ${step.uses}`,
+              `step '${stepDisplayName(compositeStep, stepCtx)}' of ${step.uses}`,
               error
             );
             logger.error(message);
@@ -491,7 +492,7 @@ export async function executeAction(
           }
           if (!runCompositeStep) {
             logger.info(
-              `Skipping composite step: ${compositeStep.name || compositeStep.id || 'unnamed'} (condition not met)`
+              `Skipping composite step: ${stepDisplayName(compositeStep, stepCtx)} (condition not met)`
             );
             if (compositeStep.id) {
               actionCtx.steps[compositeStep.id] = {
@@ -526,7 +527,7 @@ export async function executeAction(
             return {
               step,
               success: false,
-              error: `Composite action step failed: ${compositeStep.name || 'unnamed'}`,
+              error: `Composite action step failed: ${stepDisplayName(compositeStep, stepCtx)}`,
               duration: Date.now() - startTime
             };
           }

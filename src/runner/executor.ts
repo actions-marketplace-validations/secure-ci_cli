@@ -41,6 +41,7 @@ import {
   runnerContext,
   createJobRuntime,
   stepActionEnv,
+  stepDisplayName,
   runPostSteps
 } from './job-runtime';
 import {
@@ -440,7 +441,7 @@ export async function executeWorkflow(
               } catch (error) {
                 // An if: that can't be evaluated fails the step.
                 const message = ifEvaluationError(
-                  `step '${step.name || step.id || step.uses || 'unnamed'}'`,
+                  `step '${stepDisplayName(step, stepCtx)}'`,
                   error
                 );
                 logger.error(message);
@@ -462,7 +463,7 @@ export async function executeWorkflow(
               }
               if (!runStep) {
                 logger.info(
-                  `Skipping step: ${step.name || step.id || 'unnamed'} (condition not met)`
+                  `Skipping step: ${stepDisplayName(step, stepCtx)} (condition not met)`
                 );
                 const skippedResult: StepResult = {
                   step,
@@ -499,7 +500,7 @@ export async function executeWorkflow(
                   : stepMs !== undefined
                     ? {
                         ms: stepMs,
-                        message: `The action '${step.name || step.id || step.uses || 'run'}' has timed out after ${stepMinutes} minutes.`
+                        message: `The action '${stepDisplayName(step, stepCtx)}' has timed out after ${stepMinutes} minutes.`
                       }
                     : undefined;
               const stepResult = await executeStep(
@@ -534,7 +535,7 @@ export async function executeWorkflow(
 
               if (!stepResult.success && !step['continue-on-error']) {
                 jobCtx.jobFailed = true;
-                logger.error(`Step failed: ${step.name || 'unnamed'}`);
+                logger.error(`Step failed: ${stepDisplayName(step, stepCtx)}`);
               }
             }
 

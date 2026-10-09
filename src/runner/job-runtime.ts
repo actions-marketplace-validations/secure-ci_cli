@@ -8,6 +8,7 @@ import { execSync } from 'child_process';
 import {
   evaluateCondition,
   ifEvaluationError,
+  substituteExpressions,
   ExpressionContext,
   GithubContext
 } from './expression';
@@ -215,7 +216,9 @@ export async function runPostSteps(
       continue;
     }
     if (!run) {
-      logger.info(`Skipping step: ${post.step.name} (condition not met)`);
+      logger.info(
+        `Skipping step: ${post.step.name ?? 'post'} (condition not met)`
+      );
       continue;
     }
     logger.info(`Running: ${post.step.name}`);
@@ -394,4 +397,22 @@ export function effectiveTimeout(
     };
   }
   return { message: '' };
+}
+
+/**
+ * The label shown for a step, like GitHub: its `name` with `${{ }}`
+ * expressions resolved, else its `uses:` reference, else the first
+ * non-empty line of its `run:` script, else "step".
+ */
+export function stepDisplayName(step: Step, ctx?: ExpressionContext): string {
+  if (step.name) return ctx ? substituteExpressions(step.name, ctx) : step.name;
+  if (step.uses) return step.uses;
+  if (step.run) {
+    const line = step.run
+      .split('\n')
+      .map((l) => l.trim())
+      .find(Boolean);
+    if (line) return ctx ? substituteExpressions(line, ctx) : line;
+  }
+  return 'step';
 }
