@@ -654,7 +654,7 @@ function listWorkflows(): void {
       if (parsed.type === 'workflow') {
         logger.info(`  - ${file}: ${parsed.file.name}`);
       }
-    } catch (error) {
+    } catch {
       logger.warn(`  - ${file}: (failed to parse)`);
     }
   });
