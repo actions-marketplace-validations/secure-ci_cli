@@ -49,18 +49,17 @@ jobs:
           node dist/cli.js validate .github/workflows/ci.yaml
           node dist/cli.js run .github/workflows/ci.yaml --dry-run
 
-  publish-prerelease:
-    name: Publish Pre-release
+  publish:
+    name: Publish to npm
     needs: test
-    # Disabled until the first @secureci/cli release is published (see #37).
-    if: false
-    permissions:
-      contents: write
-      id-token: write
-    # if: |
-    # github.event_name == 'pull_request' &&
-    # contains(github.event.head_commit.message, '[publish]')
+    # Release on merge to main: publishes the version in package.json only if
+    # it isn't already on npm. To cut a release, bump "version" in your PR
+    # before merging. Other merges are no-ops (no version change = no publish),
+    # so there is no bump-commit pushed back to main and no trigger loop.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the git tag and GitHub release
 
     steps:
       - name: Checkout code
@@ -69,7 +68,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          # Matches the test job and local dev (volta.node in package.json).
+          node-version-file: package.json
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
           cache-dependency-path: package-lock.json
@@ -80,84 +80,32 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Configure Git
+      - name: Read package version
+        id: pkg
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already published
+        id: check
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Bump version (prerelease)
-        run: npm version prerelease --preid=beta --no-git-tag-version
-
-      - name: Publish to npm (beta)
-        run: npm publish --tag beta --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  publish-release:
-    name: Publish Release
-    needs: test
-    # Disabled until the first @secureci/cli release is published (see #37).
-    if: false
-    permissions:
-      contents: write
-      id-token: write
-    # if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-          cache: 'npm'
-          cache-dependency-path: package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Configure Git
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Bump version (patch)
-        run: npm version patch --no-git-tag-version
-
-      - name: Get version
-        id: package-version
-        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Create git tag
-        run: |
-          git add package.json package-lock.json
-          git commit -m "chore: bump version to ${{ steps.package-version.outputs.version }}"
-          git tag -a "v${{ steps.package-version.outputs.version }}" -m "Release v${{ steps.package-version.outputs.version }}"
-          git push origin main --tags
+          if npm view "@secureci/cli@${{ steps.pkg.outputs.version }}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "@secureci/cli@${{ steps.pkg.outputs.version }} is already on npm; nothing to release."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Publish to npm
+        if: steps.check.outputs.published == 'false'
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Create GitHub Release
-        uses: actions/create-release@v1
+      - name: Create GitHub release
+        if: steps.check.outputs.published == 'false'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v${{ steps.package-version.outputs.version }}
-          release_name: Release v${{ steps.package-version.outputs.version }}
-          body: |
-            Release of @secureci/cli v${{ steps.package-version.outputs.version }}
-
-            See [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
-          draft: false
-          prerelease: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.pkg.outputs.version }}" \
+            --target "${{ github.sha }}" \
+            --title "v${{ steps.pkg.outputs.version }}" \
+            --generate-notes
