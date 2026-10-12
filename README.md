@@ -162,8 +162,26 @@ The exact scope of each is documented in
   redacted in all output, and in container mode never appear on the client
   command line (passed via a `0600` env file). Prefer `--secret NAME` so the
   value stays out of your shell history too.
-- **Tokens are handled carefully** — only sent to GitHub, never passed to
-  actions, masked in logs.
+- **Tokens are handled carefully** — sent only to the GitHub host in
+  `GITHUB_SERVER_URL` / `GITHUB_API_URL` (github.com by default), never passed
+  to actions, and masked in logs.
+
+### What the package accesses, and why
+
+Installing and running `secureci` involves these capabilities. Each is needed for
+the feature named, and none runs at install time.
+
+| Capability               | Where                                                                  | Why                                                                                                                                                                                       |
+| ------------------------ | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shell / process spawning | `run:` steps, JavaScript actions, `docker`/`podman`/`nerdctl`          | Runs workflow steps in a container (or on your host with `--container-runtime host`). `commander` also loads `child_process`, used only for executable subcommands this CLI does not use. |
+| Network                  | `github.com`, `api.github.com` (or the GHES host you set)              | Downloads actions and workflows, and resolves tags to commit SHAs.                                                                                                                        |
+| Environment variables    | `HOME`, `PATH`, `GITHUB_*`, `GITHUB_TOKEN`, `GH_TOKEN`                 | Builds the runner environment and authenticates GitHub downloads.                                                                                                                         |
+| Filesystem               | `~/.secureci/`, the working directory, temp dirs                       | Caches actions, stores artifacts and config, and reads your workflow files.                                                                                                               |
+| Hard-coded URLs          | GitHub documentation and JSON Schema URLs in messages and editor hints | Informational only; the CLI does not fetch them.                                                                                                                                          |
+
+No install scripts run for consumers. The published tarball contains only
+`dist/`, `README.md`, and `LICENSE`. See [SECURITY.md](SECURITY.md) for how to
+report a vulnerability.
 
 Full details: [DOCS.md → Security: what runs where](DOCS.md#security-what-runs-where)
 and [Secret masking](DOCS.md#secret-masking).

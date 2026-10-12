@@ -1,6 +1,6 @@
 {
   "name": "@secureci/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "SecureCI: validate, check against pipeline standards, and run GitHub Actions workflows locally",
   "main": "dist/index.js",
   "bin": {
@@ -58,7 +58,6 @@
   },
   "prettier": "@jabraf/prettier",
   "dependencies": {
-    "chalk": "^4.1.2",
     "commander": "^11.1.0",
     "yaml": "^2.3.4"
   },

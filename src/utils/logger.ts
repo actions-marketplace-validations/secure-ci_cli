@@ -1,4 +1,4 @@
-import chalk from 'chalk';
+import { colors } from './ansi';
 
 export enum LogLevel {
   DEBUG = 0,
@@ -49,7 +49,7 @@ class Logger {
   debug(message: string, ...args: unknown[]): void {
     if (this.level <= LogLevel.DEBUG) {
       console.log(
-        chalk.gray(`[DEBUG] ${this.mask(message)}`),
+        colors.gray(`[DEBUG] ${this.mask(message)}`),
         ...args.map((a) => this.maskArg(a))
       );
     }
@@ -58,7 +58,7 @@ class Logger {
   info(message: string, ...args: unknown[]): void {
     if (this.level <= LogLevel.INFO) {
       console.log(
-        chalk.blue(`[INFO] ${this.mask(message)}`),
+        colors.blue(`[INFO] ${this.mask(message)}`),
         ...args.map((a) => this.maskArg(a))
       );
     }
@@ -67,7 +67,7 @@ class Logger {
   success(message: string, ...args: unknown[]): void {
     if (this.level <= LogLevel.INFO) {
       console.log(
-        chalk.green(`✓ ${this.mask(message)}`),
+        colors.green(`✓ ${this.mask(message)}`),
         ...args.map((a) => this.maskArg(a))
       );
     }
@@ -76,7 +76,7 @@ class Logger {
   warn(message: string, ...args: unknown[]): void {
     if (this.level <= LogLevel.WARN) {
       console.warn(
-        chalk.yellow(`[WARN] ${this.mask(message)}`),
+        colors.yellow(`[WARN] ${this.mask(message)}`),
         ...args.map((a) => this.maskArg(a))
       );
     }
@@ -85,19 +85,19 @@ class Logger {
   error(message: string, ...args: unknown[]): void {
     if (this.level <= LogLevel.ERROR) {
       console.error(
-        chalk.red(`[ERROR] ${this.mask(message)}`),
+        colors.red(`[ERROR] ${this.mask(message)}`),
         ...args.map((a) => this.maskArg(a))
       );
     }
   }
 
   step(message: string): void {
-    console.log(chalk.cyan(`\n→ ${this.mask(message)}`));
+    console.log(colors.cyan(`\n→ ${this.mask(message)}`));
   }
 
   result(message: string, success: boolean): void {
     const icon = success ? '✓' : '✗';
-    const color = success ? chalk.green : chalk.red;
+    const color = success ? colors.green : colors.red;
     console.log(color(`${icon} ${this.mask(message)}`));
   }
 }
