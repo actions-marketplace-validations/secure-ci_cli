@@ -199,4 +199,15 @@ humans and agents live in [AGENTS.md](AGENTS.md) and
 
 ## License
 
-MIT
+The code is licensed under the [MIT License](LICENSE).
+
+## Name and trademark
+
+The **code** is open source under MIT; the **SecureCI name and logo** are not.
+"SecureCI", the `secureci` command branding, and the `@secureci` npm scope are
+trademarks of SecureCI. You may use the name to describe your use of this
+software (for example, "works with SecureCI"), but you may not use it to name or
+brand a fork, a derivative product or service, or a hosted offering, and you may
+not imply endorsement by SecureCI. Forks must use a different name and must not
+publish under the `@secureci` scope. These rights are reserved and are not granted by the
+MIT License.
