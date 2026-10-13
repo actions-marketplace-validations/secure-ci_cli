@@ -40,6 +40,9 @@ describe('formatValidation (single file)', () => {
     const log = JSON.parse(formatValidation('wf.yml', bad, 'sarif'));
     expect(log.version).toBe('2.1.0');
     expect(log.runs[0].tool.driver.name).toBe('secureci');
+    expect(log.runs[0].tool.driver.informationUri).toBe(
+      'https://secure-ci.dev'
+    );
     expect(log.runs[0].results).toHaveLength(2);
     expect(log.runs[0].results[0]).toMatchObject({
       level: 'error',

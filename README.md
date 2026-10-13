@@ -7,7 +7,7 @@ Test and vet your GitHub Actions **before you push**.
 `@secureci/cli` (the `secureci` command) runs your workflows locally, validates
 them, and checks them against your organization's pipeline standards — without
 committing, pushing, or waiting on a CI runner. It is the free, open-source part
-of [SecureCI](https://www.secure-ci.dev).
+of [SecureCI](https://secure-ci.dev).
 
 > 📖 This README is the quick tour. Every flag, context and edge case lives in
 > the **[full reference → DOCS.md](DOCS.md)**.

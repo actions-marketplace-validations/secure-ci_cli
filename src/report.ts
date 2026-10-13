@@ -83,7 +83,7 @@ export function formatReport(
           tool: {
             driver: {
               name: 'secureci',
-              informationUri: 'https://www.secure-ci.dev',
+              informationUri: 'https://secure-ci.dev',
               rules: Object.entries(RULES).map(([id, name]) => ({ id, name }))
             }
           },

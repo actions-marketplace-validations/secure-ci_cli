@@ -42,7 +42,7 @@
     }
   ],
   "license": "MIT",
-  "homepage": "https://www.secure-ci.dev",
+  "homepage": "https://secure-ci.dev",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/secure-ci/cli.git"
