@@ -94,6 +94,22 @@ jobs:
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # `gh release create` reuses an existing tag and ignores --target, so a
+      # stale v<version> tag would attach this release to the wrong commit.
+      # Fail before publishing rather than ship a release whose tag (the ref
+      # `secureci init workflow` emits) points at other code.
+      - name: Check the release tag is free
+        if: steps.check.outputs.published == 'false'
+        env:
+          TAG: v${{ steps.pkg.outputs.version }}
+        run: |
+          # The peeled (^{}) line sorts last, so an annotated tag resolves to its commit.
+          existing=$(git ls-remote origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}" | sort -k2 | tail -n1 | cut -f1)
+          if [ -n "$existing" ] && [ "$existing" != "${{ github.sha }}" ]; then
+            echo "::error::Tag ${TAG} already exists at ${existing}, not ${{ github.sha }}. Delete the stale tag or bump the version."
+            exit 1
+          fi
+
       - name: Publish to npm
         if: steps.check.outputs.published == 'false'
         run: npm publish --access public

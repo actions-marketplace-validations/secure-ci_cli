@@ -38,8 +38,8 @@ npm install -g @secureci/cli
 npx @secureci/cli --help
 ```
 
-Node.js 20+ is required. (Until the package is published to npm, build from
-source: `npm install && npm run build`.)
+Node.js 20+ is required. To build from source instead:
+`npm install && npm run build`.
 
 ## First run
 

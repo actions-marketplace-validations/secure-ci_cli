@@ -517,7 +517,13 @@ describe('secureci commands', () => {
     const first = run(['init', 'workflow'], dir);
     expect(first.status).toBe(0);
     expect(fs.existsSync(out)).toBe(true);
-    expect(fs.readFileSync(out, 'utf-8')).toContain('uses: secure-ci/cli@v1');
+    // The action ref is this CLI's own release tag (package.json version).
+    const { version } = JSON.parse(
+      fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')
+    );
+    expect(fs.readFileSync(out, 'utf-8')).toContain(
+      `uses: secure-ci/cli@v${version}\n`
+    );
 
     // The generated workflow passes our own validator.
     expect(run(['validate', out], dir).status).toBe(0);

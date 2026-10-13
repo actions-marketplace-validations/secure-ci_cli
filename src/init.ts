@@ -1,5 +1,10 @@
 /** Options for the workflow that `secureci init` generates. */
 export interface InitWorkflowOptions {
+  /**
+   * Version of the CLI generating the workflow (package.json `version`). The
+   * action is pinned to its release tag, `secure-ci/cli@v<version>`.
+   */
+  version: string;
   /** Path to a pipeline contract to check workflows against (optional). */
   contract?: string;
   /**
@@ -11,7 +16,8 @@ export interface InitWorkflowOptions {
 
 /**
  * Render a ready-to-commit `.github/workflows/secureci.yml` that runs SecureCI
- * on every pull request via the published `secure-ci/cli` action.
+ * on every pull request via the published `secure-ci/cli` action, pinned to
+ * the release tag matching this CLI's version.
  *
  * The output is deterministic for a given set of options, so it can be
  * regenerated and diffed. With uploads on (the default) the workflow asks for
@@ -42,7 +48,7 @@ export function renderInitWorkflow(options: InitWorkflowOptions): string {
     '    runs-on: ubuntu-latest',
     '    steps:',
     '      - uses: actions/checkout@v4',
-    '      - uses: secure-ci/cli@v1'
+    `      - uses: secure-ci/cli@v${options.version}`
   );
 
   const withLines: string[] = [];

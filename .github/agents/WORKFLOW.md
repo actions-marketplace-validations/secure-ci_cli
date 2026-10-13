@@ -335,10 +335,14 @@ If you're stuck:
 
 (For maintainers)
 
-1. Update version in `package.json`
-2. Update CHANGELOG
-3. Run full test suite
-4. Build: `npm run build`
-5. Commit and tag: `git tag v1.2.3`
-6. Push: `git push --tags`
-7. Publish: `npm publish`
+Releases are automated by the `publish` job in `.github/workflows/ci.yaml`:
+
+1. Bump `version` in `package.json` (and `package-lock.json`) in your PR
+2. Merge to `main`
+3. CI publishes `@secureci/cli@<version>` to npm if that version isn't there
+   yet, then creates the `v<version>` tag and GitHub release on the merge commit
+
+Don't tag or `npm publish` by hand. The job fails if `v<version>` already
+exists on a different commit, so pick a version that has no tag yet.
+`secureci init workflow` emits `secure-ci/cli@v<version>`, so each release
+tag must exist for the workflows it generates to resolve.

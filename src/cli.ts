@@ -613,6 +613,7 @@ function runInit(options: {
   }
 
   const content = renderInitWorkflow({
+    version: readVersion(),
     contract: options.contract,
     upload: options.upload
   });
