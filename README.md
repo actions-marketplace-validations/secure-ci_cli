@@ -74,6 +74,11 @@ secureci inventory --check    # fail on drift (use in CI)
   check.
 - **Machine-readable output** — `--format json|sarif` drops straight into CI and
   GitHub code scanning.
+- **Audit evidence** — the contract, `secureci.lock` and reports are plain files
+  you can commit and keep. See
+  [using output as audit evidence](DOCS.md#using-output-as-audit-evidence) and
+  the [compliance mapping](https://secure-ci.dev/compliance) (PCI DSS, DORA,
+  NIS2, ISO 27001, SOC 2 and more).
 
 See the [reference](DOCS.md) for the complete command list and flags.
 

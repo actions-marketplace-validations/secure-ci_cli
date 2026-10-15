@@ -1,4 +1,4 @@
-name: SecureCI
+name: SecureCI GHA
 description: Validate GitHub Actions workflows and check them against a pipeline contract, with optional SARIF upload to code scanning.
 author: SecureCI
 branding:
@@ -30,6 +30,10 @@ inputs:
     description: 'Upload the SARIF report to GitHub code scanning (needs security-events: write; ignored for json).'
     required: false
     default: 'true'
+  inventory:
+    description: 'Set to "check" to also fail when an action tag has moved since secureci.lock was written (runs `secureci inventory --check`; commit secureci.lock first). Default: off.'
+    required: false
+    default: ''
   version:
     description: 'Version of @secureci/cli to run (npm dist-tag or version).'
     required: false
@@ -52,9 +56,18 @@ runs:
         SECURECI_FORMAT: ${{ inputs.format }}
         SECURECI_OUTPUT: ${{ inputs.output }}
         SECURECI_VERSION: ${{ inputs.version }}
+        SECURECI_INVENTORY: ${{ inputs.inventory }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
+
+        case "${SECURECI_INVENTORY}" in
+          ''|check) ;;
+          *)
+            echo "::error::Unknown inventory input '${SECURECI_INVENTORY}'. Use 'check' or leave it empty."
+            exit 1
+            ;;
+        esac
 
         # Collect the target files.
         files=()
@@ -88,6 +101,16 @@ runs:
         if [ "$status" -ne 0 ]; then
           echo "::error::SecureCI validation failed. See the report at ${SECURECI_OUTPUT}."
         fi
+
+        inventory_status=0
+        if [ "${SECURECI_INVENTORY}" = "check" ]; then
+          echo "Running: secureci inventory --check"
+          npx --yes "@secureci/cli@${SECURECI_VERSION}" inventory --check || inventory_status=$?
+          if [ "$inventory_status" -ne 0 ]; then
+            echo "::error::SecureCI found action drift against secureci.lock (or no lockfile). See the log above."
+          fi
+        fi
+        echo "inventory-status=${inventory_status}" >> "$GITHUB_OUTPUT"
         # Don't fail the step yet; let the SARIF upload run first.
         exit 0
 
@@ -97,11 +120,11 @@ runs:
       with:
         sarif_file: ${{ inputs.output }}
 
-    - name: Fail if validation failed
-      if: ${{ steps.run.outputs.status != '0' }}
+    - name: Fail if any check failed
+      if: ${{ steps.run.outputs.status != '0' || steps.run.outputs.inventory-status != '0' }}
       shell: bash
       run: |
-        echo "SecureCI reported violations; failing the job."
+        echo "SecureCI reported violations or action drift; failing the job."
         exit 1
 
 outputs:

@@ -19,6 +19,7 @@ introduction and install steps, see the [README](README.md).
 - [Action inventory and drift (`secureci inventory`)](#action-inventory-and-drift-secureci-inventory)
 - [Use in CI (GitHub Action)](#use-in-ci-github-action)
   - [Generate the workflow (`secureci init workflow`)](#generate-the-workflow-secureci-init-workflow)
+- [Using output as audit evidence](#using-output-as-audit-evidence)
 - [Workflow features](#workflow-features)
   - [Conditional execution (`if:`)](#conditional-execution-if)
   - [Job dependencies (`needs:`)](#job-dependencies-needs)
@@ -283,9 +284,10 @@ jobs:
           # files: .github/workflows/*.yml   # default: every file in .github/workflows
           # format: sarif                    # or json
           # upload-sarif: true               # set false to skip code-scanning upload
+          # inventory: check                 # also fail when an action tag moved (needs a committed secureci.lock)
 ```
 
-The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `version` (which `@secureci/cli` to run), and `github-token`.
+The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `inventory` (`check` to also run `secureci inventory --check`), `version` (which `@secureci/cli` to run), and `github-token`.
 
 Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v0.1.1`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; set the `version` input to pin which CLI release it runs (default `latest`).
 
@@ -301,6 +303,35 @@ secureci init workflow --output .github/workflows/ci-security.yml
 ```
 
 It refuses to overwrite an existing file unless you pass `--force`, and the file it writes passes `secureci validate`.
+
+## Using output as audit evidence
+
+Auditors and assessors increasingly treat the CI pipeline as part of the software supply chain. What SecureCI writes is plain text you can commit, diff and keep, which makes it usable as evidence that a control is in place:
+
+| Artifact                                          | Where it comes from                                                   | What it shows                                                                |
+| ------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Pipeline contract (e.g. `contracts/standard.yml`) | You write it; commit it                                               | Your pipeline standard, written down and versioned                           |
+| `secureci.lock`                                   | `secureci inventory`                                                  | An inventory of every third-party action and the commit each tag resolved to |
+| `secureci.lock` history                           | `git log -p secureci.lock`                                            | When each action was added or changed, and in which commit                   |
+| SARIF / JSON report                               | `secureci validate --format sarif\|json`                              | The result of the contract check for a given commit                          |
+| Required check on pull requests                   | The [GitHub Action](#use-in-ci-github-action) with `inventory: check` | Non-conforming or drifted workflows cannot merge                             |
+
+To keep a report per run, turn on the action's drift check and upload the report as a build artifact:
+
+```yaml
+- uses: secure-ci/cli@v0.2.0 # first release with `inventory`; writes secureci-results.sarif
+  with:
+    contract: contracts/standard.yml
+    inventory: check # fail on drift against the committed secureci.lock
+- uses: actions/upload-artifact@v4
+  if: always()
+  with:
+    name: secureci-evidence
+    path: secureci-results.sarif
+    retention-days: 90 # match your audit retention policy
+```
+
+These artifacts **support** controls; they don't make you compliant on their own. Which controls they help with in PCI DSS, DORA, NIS2, the UK Software Security Code of Practice, ISO/IEC 27001 and SOC 2 is mapped, with what you still need beyond SecureCI, at [secure-ci.dev/compliance](https://secure-ci.dev/compliance).
 
 ## Workflow features
 
