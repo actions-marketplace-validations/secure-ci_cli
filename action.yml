@@ -83,7 +83,10 @@ runs:
         fi
         if [ ${#files[@]} -eq 0 ]; then
           echo "::warning::SecureCI found no workflow files to validate."
-          echo "violations=0" >> "$GITHUB_OUTPUT"
+          # Report success explicitly: the final step treats an unset status
+          # as a failure.
+          echo "status=0" >> "$GITHUB_OUTPUT"
+          echo "inventory-status=0" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 

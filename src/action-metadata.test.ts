@@ -77,7 +77,9 @@ describe('action.yml run step', () => {
     };
     execFileSync('bash', ['-c', script], { cwd: dir, env });
     return {
-      calls: fs.readFileSync(env.STUB_LOG, 'utf8').trim().split('\n'),
+      calls: fs.existsSync(env.STUB_LOG)
+        ? fs.readFileSync(env.STUB_LOG, 'utf8').trim().split('\n')
+        : [],
       outputs: fs.readFileSync(env.GITHUB_OUTPUT, 'utf8')
     };
   }
@@ -103,5 +105,15 @@ describe('action.yml run step', () => {
 
   it('rejects an unknown inventory value', () => {
     expect(() => run('update')).toThrow();
+  });
+
+  // The final step fails the job unless both statuses are '0'; an unset
+  // output reads as '', so the skip path must still report success.
+  it('passes without running anything when there are no workflow files', () => {
+    fs.rmSync(path.join(dir, '.github'), { recursive: true, force: true });
+    const { calls, outputs } = run('check');
+    expect(calls).toEqual([]);
+    expect(outputs).toContain('status=0');
+    expect(outputs).toContain('inventory-status=0');
   });
 });
