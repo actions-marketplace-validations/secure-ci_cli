@@ -6,6 +6,7 @@ import * as YAML from 'yaml';
 import {
   collectReferences,
   buildInventory,
+  addTransitive,
   diffLock,
   type Lockfile
 } from './inventory';
@@ -124,19 +125,172 @@ describe('buildInventory', () => {
   });
 });
 
+describe('addTransitive', () => {
+  let root: string;
+  const sha = (c: string) => c.repeat(40);
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-trans-'));
+  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  /** Write a fetched repository's file under root/<name>/ and return it. */
+  const repoFile = (name: string, rel: string, content: unknown): string => {
+    const file = path.join(root, name, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, YAML.stringify(content));
+    return file;
+  };
+  const composite = (steps: unknown[]) => ({
+    name: 'c',
+    description: 'd',
+    runs: { using: 'composite', steps }
+  });
+
+  it('follows remote composite actions and reusable workflows, recording via', async () => {
+    const files: Record<string, string> = {
+      [`org/wrap@${sha('1')}`]: repoFile(
+        'wrap',
+        'action.yml',
+        composite([
+          { uses: 'org/inner@v2' },
+          { uses: './local-in-remote' },
+          { run: 'echo' }
+        ])
+      ),
+      [`org/inner@${sha('2')}`]: repoFile(
+        'inner',
+        'action.yml',
+        composite([{ uses: `org/leaf@${sha('3')}` }])
+      ),
+      [`org/leaf@${sha('3')}`]: repoFile('leaf', 'action.yml', {
+        name: 'n',
+        description: 'd',
+        runs: { using: 'node20', main: 'index.js' }
+      }),
+      [`org/flows/.github/workflows/ship.yml@${sha('4')}`]: repoFile(
+        'flows',
+        '.github/workflows/ship.yml',
+        {
+          name: 's',
+          on: 'workflow_call',
+          jobs: {
+            nested: { uses: './.github/workflows/sub.yml' },
+            go: { 'runs-on': 'x', steps: [{ uses: 'org/inner@v2' }] }
+          }
+        }
+      )
+    };
+    // A local reusable workflow inside a remote one is read from that repo.
+    repoFile('flows', '.github/workflows/sub.yml', {
+      name: 'sub',
+      on: 'workflow_call',
+      jobs: { j: { 'runs-on': 'x', steps: [{ uses: 'org/deep@v5' }] } }
+    });
+
+    const wf = workflow(root, {
+      a: {
+        'runs-on': 'x',
+        steps: [{ uses: 'org/wrap@v1' }]
+      },
+      b: { uses: 'org/flows/.github/workflows/ship.yml@v4' }
+    });
+    const resolved: Record<string, string> = {
+      'org/wrap@v1': sha('1'),
+      'org/flows/.github/workflows/ship.yml@v4': sha('4'),
+      'org/inner@v2': sha('2'),
+      'org/deep@v5': sha('5')
+    };
+    const resolveSha = async (uses: string) => resolved[uses];
+    const fetched: string[] = [];
+    const inv = await buildInventory(wf, resolveSha);
+    const all = await addTransitive(inv.actions, {
+      resolveSha,
+      fetch: async (uses) => {
+        fetched.push(uses);
+        return files[uses] ?? null;
+      },
+      warn: () => {}
+    });
+    const by = Object.fromEntries(all.map((a) => [a.uses, a]));
+
+    // Fetched at the locked commit, never by tag.
+    expect(fetched).toContain(`org/wrap@${sha('1')}`);
+    expect(fetched).toContain(
+      `org/flows/.github/workflows/ship.yml@${sha('4')}`
+    );
+    expect(by['org/wrap@v1'].via).toBeUndefined();
+    expect(by['org/inner@v2']).toMatchObject({
+      kind: 'action',
+      resolvedSha: sha('2'),
+      via: ['org/flows/.github/workflows/ship.yml@v4', 'org/wrap@v1']
+    });
+    expect(by['org/inner@v2'].paths).toContain('org/wrap@v1 > steps[0]');
+    expect(by[`org/leaf@${sha('3')}`]).toMatchObject({
+      resolvedSha: sha('3'),
+      via: ['org/inner@v2']
+    });
+    expect(by['org/deep@v5'].via).toEqual([
+      'org/flows/.github/workflows/ship.yml@v4'
+    ]);
+    // Local actions inside a remote action aren't followed or listed.
+    expect(Object.keys(by).some((u) => u.startsWith('.'))).toBe(false);
+  });
+
+  it('warns and carries on when a dependency cannot be fetched', async () => {
+    const wf = workflow(root, {
+      a: { 'runs-on': 'x', steps: [{ uses: `org/gone@${sha('9')}` }] }
+    });
+    const warnings: string[] = [];
+    const inv = await buildInventory(wf);
+    const all = await addTransitive(inv.actions, {
+      fetch: async () => null,
+      warn: (m) => warnings.push(m)
+    });
+    expect(all.map((a) => a.uses)).toEqual([`org/gone@${sha('9')}`]);
+    expect(warnings[0]).toMatch(/org\/gone@9+.*not listed/);
+  });
+
+  it('stops at a cycle', async () => {
+    const files: Record<string, string> = {
+      [`org/a@${sha('a')}`]: repoFile(
+        'a',
+        'action.yml',
+        composite([{ uses: `org/b@${sha('b')}` }])
+      ),
+      [`org/b@${sha('b')}`]: repoFile(
+        'b',
+        'action.yml',
+        composite([{ uses: `org/a@${sha('a')}` }])
+      )
+    };
+    const wf = workflow(root, {
+      a: { 'runs-on': 'x', steps: [{ uses: `org/a@${sha('a')}` }] }
+    });
+    const inv = await buildInventory(wf);
+    const all = await addTransitive(inv.actions, {
+      fetch: async (u) => files[u] ?? null,
+      warn: () => {}
+    });
+    expect(all.map((a) => a.uses).sort()).toEqual([
+      `org/a@${sha('a')}`,
+      `org/b@${sha('b')}`
+    ]);
+  });
+});
+
 describe('diffLock', () => {
   const lock: Lockfile = {
-    version: 1,
+    version: 2,
     actions: {
-      'actions/checkout@v4': 'a'.repeat(40),
-      'org/old@v1': 'd'.repeat(40)
+      'actions/checkout@v4': { commit: 'a'.repeat(40), ownerId: 1, repoId: 2 },
+      'org/old@v1': { commit: 'd'.repeat(40) }
     }
   };
 
   it('reports drift, additions and removals', () => {
     const current = {
-      'actions/checkout@v4': 'e'.repeat(40), // moved
-      'org/new@v2': 'f'.repeat(40) // added
+      'actions/checkout@v4': { commit: 'e'.repeat(40) }, // moved
+      'org/new@v2': { commit: 'f'.repeat(40) } // added
       // org/old@v1 removed
     };
     const diff = diffLock(current, lock);
@@ -149,15 +303,54 @@ describe('diffLock', () => {
     ]);
     expect(diff.added).toEqual(['org/new@v2']);
     expect(diff.removed).toEqual(['org/old@v1']);
+    expect(diff.identity).toEqual([]);
     expect(diff.changed).toBe(true);
   });
 
   it('is clean when nothing moved', () => {
     const diff = diffLock(
-      { 'actions/checkout@v4': 'a'.repeat(40), 'org/old@v1': 'd'.repeat(40) },
+      {
+        'actions/checkout@v4': {
+          commit: 'a'.repeat(40),
+          ownerId: 1,
+          repoId: 2
+        },
+        'org/old@v1': { commit: 'd'.repeat(40) }
+      },
       lock
     );
     expect(diff.changed).toBe(false);
     expect(diff.drifted).toEqual([]);
+  });
+
+  it('reports a repository whose identity changed, at the same commit', () => {
+    const diff = diffLock(
+      {
+        'actions/checkout@v4': {
+          commit: 'a'.repeat(40),
+          ownerId: 9,
+          repoId: 3
+        },
+        'org/old@v1': { commit: 'd'.repeat(40) }
+      },
+      lock
+    );
+    expect(diff.identity).toEqual([
+      { uses: 'actions/checkout@v4', field: 'owner_id', from: 1, to: 9 },
+      { uses: 'actions/checkout@v4', field: 'repo_id', from: 2, to: 3 }
+    ]);
+    expect(diff.changed).toBe(true);
+  });
+
+  it('skips the identity check when either side has no identity', () => {
+    const diff = diffLock(
+      {
+        'actions/checkout@v4': { commit: 'a'.repeat(40) },
+        'org/old@v1': { commit: 'd'.repeat(40), ownerId: 5, repoId: 6 }
+      },
+      lock
+    );
+    expect(diff.identity).toEqual([]);
+    expect(diff.changed).toBe(false);
   });
 });

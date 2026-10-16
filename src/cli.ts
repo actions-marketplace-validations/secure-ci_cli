@@ -5,9 +5,11 @@ import { dryRun } from './runner/dry-run';
 import { executeWorkflow } from './runner/executor';
 import {
   clearActionCache,
+  fetchAction,
   fetchRepoFile,
   getActionCacheDir,
-  resolveActionSha
+  resolveActionSha,
+  resolveRepoIdentity
 } from './runner/action-fetcher';
 import { resolveContractSource } from './contract-source';
 import { validateWorkflow, validateAction } from './parser/validator';
@@ -25,15 +27,18 @@ import {
 } from './report';
 import { renderInitWorkflow } from './init';
 import {
+  addTransitive,
   buildInventory,
   diffLock,
   InventoryAction,
+  LockEntry,
   Lockfile
 } from './inventory';
 import {
   GITHUB_LOCKFILE,
   findLockfile,
-  parseGitHubLockfile
+  readLockfile,
+  serializeSecureciLockfile
 } from './github-lockfile';
 import type { ValidationResult } from './types';
 import { logger, LogLevel } from './utils/logger';
@@ -289,7 +294,7 @@ program
 program
   .command('inventory')
   .description(
-    'List the actions and reusable workflows a workflow uses (resolved into called workflows/actions), with their commit SHAs; track supply-chain drift with a committed secureci.lock'
+    'List the actions and reusable workflows a workflow uses (including the actions those actions use), with their commit SHAs; track supply-chain drift with a committed secureci.lock'
   )
   .argument(
     '[file...]',
@@ -425,12 +430,79 @@ async function runInventory(
     }
   }
 
-  const actions = [...byUses.values()].sort((a, b) =>
-    a.uses.localeCompare(b.uses)
-  );
-  const current: Record<string, string> = {};
+  // Download progress would corrupt --dry-run's JSON on stdout; warnings
+  // still go to stderr.
+  if (options.dryRun) logger.setLevel(LogLevel.WARN);
+
+  // Follow remote composite actions and reusable workflows into the
+  // actions they use, downloaded at the resolved commit.
+  const actions = (
+    await addTransitive([...byUses.values()], {
+      resolveSha: resolver,
+      fetch: (uses, kind) =>
+        kind === 'action'
+          ? fetchAction(uses, { offline: options.offline })
+          : fetchRepoFile(uses, { offline: options.offline }),
+      warn: (message) => logger.warn(message)
+    })
+  ).sort((a, b) => a.uses.localeCompare(b.uses));
+
+  const lockPath = path.join(process.cwd(), LOCKFILE_NAME);
+  // secureci.lock is first-class; GitHub's actions.lock is used only when
+  // it is the lockfile the repository provides.
+  const source = findLockfile(process.cwd());
+  // `--update-lock`, or bare `inventory` when no lockfile exists yet,
+  // writes the lock; otherwise (`--check`, or bare `inventory` with a
+  // lockfile) compares against it.
+  const writing = update || (!check && !source);
+  let lock: Lockfile | undefined;
+  const github = source?.kind === 'github';
+  const lockName = github ? 'actions.lock' : LOCKFILE_NAME;
+  if (!writing && !options.dryRun) {
+    if (!source) {
+      logger.error(
+        `No ${LOCKFILE_NAME} found (or GitHub's ${GITHUB_LOCKFILE}). Create one with: secureci inventory --update-lock`
+      );
+      process.exit(1);
+    }
+    try {
+      lock = readLockfile(source);
+    } catch (error) {
+      logger.error(
+        `Could not read ${lockName}: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+      process.exit(1);
+    }
+  }
+
+  // Repository identity: recorded when writing; when checking, looked up
+  // only for repositories the lock has an identity for.
+  if (!options.offline) {
+    const lookups = new Map<
+      string,
+      Promise<{ ownerId: number; repoId: number } | undefined>
+    >();
+    for (const action of actions) {
+      if (!action.resolvedSha) continue;
+      if (lock && lock.actions[action.uses]?.repoId === undefined) continue;
+      const key = `${action.owner}/${action.repo}`.toLowerCase();
+      if (!lookups.has(key)) {
+        lookups.set(key, resolveRepoIdentity(action.owner, action.repo));
+      }
+      const identity = await lookups.get(key);
+      if (identity) Object.assign(action, identity);
+    }
+  }
+
+  const current: Record<string, LockEntry> = {};
   for (const action of actions) {
-    if (action.resolvedSha) current[action.uses] = action.resolvedSha;
+    if (!action.resolvedSha) continue;
+    current[action.uses] = {
+      commit: action.resolvedSha,
+      ...(action.ownerId !== undefined ? { ownerId: action.ownerId } : {}),
+      ...(action.repoId !== undefined ? { repoId: action.repoId } : {}),
+      ...(action.via ? { via: action.via } : {})
+    };
   }
 
   // --dry-run: print the resolved inventory as JSON, touching nothing.
@@ -440,62 +512,46 @@ async function runInventory(
     return;
   }
 
-  const lockPath = path.join(process.cwd(), LOCKFILE_NAME);
-  // secureci.lock is first-class; GitHub's actions.lock is used only when
-  // it is the lockfile the repository provides.
-  const source = findLockfile(process.cwd());
-
-  const writeLock = () => {
-    const updated: Lockfile = { version: 1, actions: current };
-    fs.writeFileSync(lockPath, JSON.stringify(updated, null, 2) + '\n');
+  if (writing) {
+    fs.writeFileSync(lockPath, serializeSecureciLockfile(current));
+    const transitive = Object.values(current).filter((e) => e.via).length;
     logger.success(
-      `Wrote ${Object.keys(current).length} action(s) to ${LOCKFILE_NAME}. Commit it to track supply-chain drift.`
+      `Wrote ${Object.keys(current).length} action(s) to ${LOCKFILE_NAME}` +
+        (transitive > 0 ? ` (${transitive} used by other actions)` : '') +
+        '. Commit it to track supply-chain drift.'
     );
-  };
-
-  // `--update-lock`, or bare `inventory` when no lockfile exists yet: write it.
-  if (update || (!check && !source)) {
-    writeLock();
     return;
   }
 
-  // Otherwise compare (explicit `--check`, or bare `inventory` with a lockfile).
-  if (!source) {
-    logger.error(
-      `No ${LOCKFILE_NAME} found (or GitHub's ${GITHUB_LOCKFILE}). Create one with: secureci inventory --update-lock`
-    );
-    process.exit(1);
-  }
-  const github = source.kind === 'github';
-  const lockName = github ? 'actions.lock' : LOCKFILE_NAME;
   const fixHint = github
     ? 'run `gh actions-lock` to update actions.lock'
     : 'run with --update-lock to accept it';
-  let lock: Lockfile;
-  try {
-    const text = fs.readFileSync(source.file, 'utf-8');
-    lock = github ? parseGitHubLockfile(text) : (JSON.parse(text) as Lockfile);
-  } catch (error) {
-    logger.error(
-      `Could not read ${lockName}: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
-    process.exit(1);
-  }
   logger.info(`Checking against ${github ? GITHUB_LOCKFILE : LOCKFILE_NAME}`);
 
-  const diff = diffLock(current, lock);
+  const diff = diffLock(current, lock as Lockfile);
   for (const d of diff.drifted) {
     logger.error(
       `Drift: ${d.uses} now resolves to ${d.to.slice(0, 12)} (was ${d.from.slice(0, 12)})`
     );
   }
+  for (const d of diff.identity) {
+    logger.error(
+      `Repository changed: ${d.uses} ${d.field} is now ${d.to} (was ${d.from}). The name now points at a different ${d.field === 'repo_id' ? 'repository (deleted and re-created?)' : 'owner (transferred, or the account re-registered?)'}.`
+    );
+  }
   diff.added.forEach((u) => logger.warn(`New action not in ${lockName}: ${u}`));
-  // actions.lock also records transitive dependencies, which SecureCI
-  // doesn't scan, so "no longer used" only means something for secureci.lock.
+  // actions.lock is written by `gh actions-lock`, which may record entries
+  // SecureCI doesn't follow, so "no longer used" is only for secureci.lock.
   if (!github) {
     diff.removed.forEach((u) =>
       logger.info(`In ${lockName} but no longer used: ${u}`)
     );
+  }
+  if (diff.identity.length > 0) {
+    logger.error(
+      `A locked repository is no longer the one that was locked. Verify it before trusting it, then ${fixHint}.`
+    );
+    process.exit(1);
   }
   if (diff.drifted.length > 0) {
     logger.error(

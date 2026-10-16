@@ -915,3 +915,95 @@ describe('validatePipelineContract', () => {
     });
   });
 });
+
+describe('lockfile.required', () => {
+  let root: string;
+  const sha = 'a'.repeat(40);
+  const steps = [
+    { uses: 'Actions/Checkout@v4' },
+    { uses: `org/scan@${sha}` },
+    { uses: './.github/actions/local' },
+    { uses: 'docker://alpine:3' }
+  ];
+  const wfAt = (): ParsedWorkflow => {
+    const file = path.join(root, '.github', 'workflows', 'ci.yml');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const wfObj = {
+      name: 'CI',
+      on: 'push',
+      jobs: { build: { 'runs-on': 'x', steps } }
+    } as ParsedWorkflow['file'];
+    fs.writeFileSync(file, YAML.stringify(wfObj));
+    return { type: 'workflow', path: file, file: wfObj };
+  };
+  const errors = async () =>
+    (
+      await validatePipelineContract(
+        wfAt(),
+        { lockfile: { required: true } },
+        { recurse: 'none' }
+      )
+    ).errors.filter((e) => e.severity === 'error');
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-lockrule-'));
+  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it('fails when the repository has no lockfile', async () => {
+    const errs = await errors();
+    expect(errs).toHaveLength(1);
+    expect(errs[0].path).toBe('lockfile');
+    expect(errs[0].message).toMatch(/requires a lockfile.*secureci.lock/);
+  });
+
+  it('passes when secureci.lock covers every remote reference (owner/repo case-insensitive)', async () => {
+    fs.writeFileSync(
+      path.join(root, 'secureci.lock'),
+      JSON.stringify({
+        version: 1,
+        actions: { 'actions/checkout@v4': sha, [`org/scan@${sha}`]: sha }
+      })
+    );
+    expect(await errors()).toEqual([]);
+  });
+
+  it('flags each remote reference missing from the lockfile', async () => {
+    fs.writeFileSync(
+      path.join(root, 'secureci.lock'),
+      JSON.stringify({
+        version: 2,
+        actions: { 'actions/checkout@v4': { commit: sha } }
+      })
+    );
+    const errs = await errors();
+    expect(errs).toHaveLength(1);
+    expect(errs[0].path).toBe('jobs.build.steps[1]');
+    expect(errs[0].message).toContain(`org/scan@${sha}`);
+    expect(errs[0].message).toContain('secureci.lock');
+  });
+
+  it("accepts GitHub's actions.lock when it is the only lockfile", async () => {
+    fs.mkdirSync(path.join(root, '.github', 'workflows'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.github', 'workflows', 'actions.lock'),
+      [
+        "version: 'v0.0.3'",
+        'dependencies:',
+        "  'actions/checkout@v4':",
+        `    commit: 'sha1-${sha}'`
+      ].join('\n')
+    );
+    const errs = await errors();
+    expect(errs).toHaveLength(1);
+    expect(errs[0].message).toContain('actions.lock');
+  });
+
+  it('reports an unreadable lockfile', async () => {
+    fs.writeFileSync(path.join(root, 'secureci.lock'), '{ nope');
+    const errs = await errors();
+    expect(errs).toHaveLength(1);
+    expect(errs[0].path).toBe('lockfile');
+    expect(errs[0].message).toMatch(/Could not read secureci.lock/);
+  });
+});

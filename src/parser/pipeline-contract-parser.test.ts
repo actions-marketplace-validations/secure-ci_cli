@@ -84,4 +84,22 @@ describe('parsePipelineContract', () => {
       parsePipelineContract(writeTemp('required:\n  - min-version: v1\n'))
     ).toThrow(/must be a mapping with a string "uses" field/);
   });
+
+  it('parses lockfile.required', () => {
+    expect(
+      parsePipelineContract(writeTemp('lockfile:\n  required: true\n'))
+    ).toEqual({ lockfile: { required: true } });
+    expect(
+      parsePipelineContract(writeTemp('lockfile:\n  required: false\n'))
+    ).toEqual({ lockfile: { required: false } });
+  });
+
+  it('throws when lockfile is not a mapping with a boolean required', () => {
+    expect(() =>
+      parsePipelineContract(writeTemp('lockfile: required\n'))
+    ).toThrow(/"lockfile" must be a mapping/);
+    expect(() =>
+      parsePipelineContract(writeTemp('lockfile:\n  required: yes-please\n'))
+    ).toThrow(/"lockfile.required" must be true or false/);
+  });
 });

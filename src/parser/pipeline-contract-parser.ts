@@ -75,6 +75,23 @@ export function parsePipelineContract(filePath: string): PipelineContractSpec {
       result.pins.allow = parseStringList(pins.allow, 'pins.allow');
     }
   }
+  if (spec.lockfile !== undefined) {
+    if (
+      typeof spec.lockfile !== 'object' ||
+      spec.lockfile === null ||
+      Array.isArray(spec.lockfile)
+    ) {
+      throw new Error('Contract "lockfile" must be a mapping');
+    }
+    const lockfile = spec.lockfile as Record<string, unknown>;
+    result.lockfile = {};
+    if (lockfile.required !== undefined) {
+      if (typeof lockfile.required !== 'boolean') {
+        throw new Error('Contract "lockfile.required" must be true or false');
+      }
+      result.lockfile.required = lockfile.required;
+    }
+  }
   if (spec['allowed-owners'] !== undefined) {
     result.allowedOwners = parseStringList(
       spec['allowed-owners'],

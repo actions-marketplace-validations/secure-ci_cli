@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { execFileSync } from 'child_process';
+import { execFile, execFileSync, spawnSync } from 'child_process';
+import * as http from 'http';
+import type { AddressInfo } from 'net';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -460,7 +462,8 @@ describe('secureci commands', () => {
     // the ref resolves to. --compare (alias of --check) reports drift and fails.
     const lockData = JSON.parse(fs.readFileSync(lock, 'utf-8'));
     const key = Object.keys(lockData.actions)[0];
-    lockData.actions[key] = '9'.repeat(40);
+    expect(lockData.version).toBe(2);
+    lockData.actions[key].commit = '9'.repeat(40);
     fs.writeFileSync(lock, JSON.stringify(lockData));
     const drift = run(['inventory', wf, '--offline', '--compare'], dir);
     expect(drift.status).not.toBe(0);
@@ -563,6 +566,191 @@ describe('secureci commands', () => {
     expect(out(future)).toContain('Unsupported actions.lock version');
 
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('inventory locks transitive dependencies and still reads a v1 lock', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-trans-cli-'));
+    const wfDir = path.join(dir, 'repo', '.github', 'workflows');
+    fs.mkdirSync(wfDir, { recursive: true });
+    const repo = path.join(dir, 'repo');
+    const wrap = 'org/wrap@' + '1'.repeat(40);
+    const leaf = 'org/leaf@' + '2'.repeat(40);
+    // Seed the action cache for the pinned composite action (offline).
+    const home = path.join(dir, 'home');
+    const cached = path.join(
+      home,
+      '.secureci',
+      'actions-cache',
+      'org',
+      'wrap',
+      '1'.repeat(40)
+    );
+    fs.mkdirSync(cached, { recursive: true });
+    fs.writeFileSync(
+      path.join(cached, 'action.yml'),
+      [
+        'name: wrap',
+        'description: d',
+        'runs:',
+        '  using: composite',
+        '  steps:',
+        `    - uses: ${leaf}`
+      ].join('\n')
+    );
+    const env = { ...process.env, HOME: home };
+    const wf = path.join(wfDir, 'ci.yml');
+    fs.writeFileSync(
+      wf,
+      [
+        'name: CI',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        `      - uses: ${wrap}`
+      ].join('\n')
+    );
+    const out = (r: { stdout: string; stderr: string }) => r.stdout + r.stderr;
+
+    const inv = JSON.parse(
+      run(['inventory', wf, '--offline', '--dry-run'], repo, env).stdout
+    );
+    const leafEntry = inv.actions.find(
+      (a: { uses: string }) => a.uses === leaf
+    );
+    expect(leafEntry.via).toEqual([wrap]);
+
+    const write = run(
+      ['inventory', wf, '--offline', '--update-lock'],
+      repo,
+      env
+    );
+    expect(write.status).toBe(0);
+    expect(out(write)).toContain('2 action(s)');
+    expect(out(write)).toContain('1 used by other actions');
+    const lock = JSON.parse(
+      fs.readFileSync(path.join(repo, 'secureci.lock'), 'utf-8')
+    );
+    expect(lock).toEqual({
+      version: 2,
+      actions: {
+        [leaf]: { commit: '2'.repeat(40), via: [wrap] },
+        [wrap]: { commit: '1'.repeat(40) }
+      }
+    });
+
+    // A v1 lock (from 0.4.0 and earlier) is still checked: missing the
+    // transitive entry, it reports it as new.
+    fs.writeFileSync(
+      path.join(repo, 'secureci.lock'),
+      JSON.stringify({ version: 1, actions: { [wrap]: '1'.repeat(40) } })
+    );
+    const v1 = run(['inventory', wf, '--offline', '--check'], repo, env);
+    expect(v1.status).not.toBe(0);
+    expect(out(v1)).toContain(`New action not in secureci.lock: ${leaf}`);
+
+    // An uncached dependency (offline) is a warning, not a crash.
+    fs.rmSync(path.join(home, '.secureci'), { recursive: true, force: true });
+    const missing = spawnSync(
+      'node',
+      [cliPath, 'inventory', wf, '--offline', '--dry-run'],
+      { cwd: repo, env, encoding: 'utf-8' }
+    );
+    expect(missing.status).toBe(0);
+    expect(JSON.parse(missing.stdout).actions).toHaveLength(1);
+    expect(missing.stderr).toContain(`Could not read ${wrap}`);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('inventory --check fails when a locked repository was re-created', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-ident-cli-'));
+    const wfDir = path.join(dir, '.github', 'workflows');
+    fs.mkdirSync(wfDir, { recursive: true });
+    const scan = 'org/scan@' + '1'.repeat(40);
+    const wf = path.join(wfDir, 'ci.yml');
+    fs.writeFileSync(
+      wf,
+      [
+        'name: CI',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        `      - uses: ${scan}`
+      ].join('\n')
+    );
+    // A fake GitHub API: org/scan is now repository 99, owner 7. It has no
+    // tarball, so the transitive walk just warns.
+    const server = http.createServer((req, res) => {
+      if (req.url === '/api/repos/org/scan') {
+        res.writeHead(200);
+        res.end(JSON.stringify({ id: 99, owner: { id: 7 } }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve)
+    );
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const env = {
+      ...process.env,
+      HOME: path.join(dir, 'home'),
+      GITHUB_SERVER_URL: base,
+      GITHUB_API_URL: `${base}/api`,
+      GITHUB_TOKEN: 'test-token',
+      no_proxy: '127.0.0.1,localhost',
+      NO_PROXY: '127.0.0.1,localhost'
+    };
+    const runAsync = (args: string[]) =>
+      new Promise<{ status: number; out: string }>((resolve) => {
+        execFile(
+          'node',
+          [cliPath, ...args],
+          { cwd: dir, env, encoding: 'utf-8' },
+          (error, stdout, stderr) =>
+            resolve({
+              status: error ? ((error as { code?: number }).code ?? 1) : 0,
+              out: stdout + stderr
+            })
+        );
+      });
+
+    try {
+      // Writing records the identity.
+      expect((await runAsync(['inventory', wf, '--update-lock'])).status).toBe(
+        0
+      );
+      const lockFile = path.join(dir, 'secureci.lock');
+      const lock = JSON.parse(fs.readFileSync(lockFile, 'utf-8'));
+      expect(lock.actions[scan]).toEqual({
+        commit: '1'.repeat(40),
+        owner_id: 7,
+        repo_id: 99
+      });
+      expect((await runAsync(['inventory', wf, '--check'])).status).toBe(0);
+
+      // Same name and commit, different repository: fail.
+      lock.actions[scan].repo_id = 42;
+      fs.writeFileSync(lockFile, JSON.stringify(lock));
+      const changed = await runAsync(['inventory', wf, '--check']);
+      expect(changed.status).not.toBe(0);
+      expect(changed.out).toContain('Repository changed');
+      expect(changed.out).toContain('repo_id is now 99 (was 42)');
+
+      // --offline can't look it up, so it doesn't check identity.
+      expect(
+        (await runAsync(['inventory', wf, '--offline', '--check'])).status
+      ).toBe(0);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('validate --contract reads owner/repo/path@sha from another repository', () => {

@@ -4,6 +4,7 @@ import {
   fetchRepoFile,
   lsRemoteSha,
   resolveActionSha,
+  resolveRepoIdentity,
   clearActionCache
 } from './action-fetcher';
 import * as fs from 'fs';
@@ -244,6 +245,56 @@ describe('Action Fetcher', () => {
       expect(await resolveActionSha('org/act@v1', { token: 'tok' })).toBe(SHA1);
       expect(requests[0].url).toBe('/api/repos/org/act/commits/v1');
       expect(requests[0].auth).toBe('Bearer tok');
+    });
+
+    it('resolveRepoIdentity reads the repository and owner ids', async () => {
+      handler = (req, res) => {
+        if (req.url === '/api/repos/org/act') {
+          res.writeHead(200);
+          res.end(JSON.stringify({ id: 42, owner: { id: 7 } }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      };
+      expect(await resolveRepoIdentity('org', 'act', { token: 'tok' })).toEqual(
+        { ownerId: 7, repoId: 42 }
+      );
+      expect(requests[0].auth).toBe('Bearer tok');
+      expect(await resolveRepoIdentity('org', 'act', { token: null })).toEqual({
+        ownerId: 7,
+        repoId: 42
+      });
+      expect(requests[1].auth).toBeUndefined();
+      expect(
+        await resolveRepoIdentity('org', 'missing', { token: null })
+      ).toBeUndefined();
+    });
+
+    it('resolveRepoIdentity retries without a rejected token', async () => {
+      handler = (req, res) => {
+        if (req.headers.authorization) {
+          res.writeHead(401);
+          res.end();
+          return;
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify({ id: 1, owner: { id: 2 } }));
+      };
+      expect(await resolveRepoIdentity('org', 'act', { token: 'bad' })).toEqual(
+        { ownerId: 2, repoId: 1 }
+      );
+      expect(requests).toHaveLength(2);
+    });
+
+    it('resolveRepoIdentity ignores a response without numeric ids', async () => {
+      handler = (_req, res) => {
+        res.writeHead(200);
+        res.end(JSON.stringify({ id: 'x' }));
+      };
+      expect(
+        await resolveRepoIdentity('org', 'act', { token: null })
+      ).toBeUndefined();
     });
 
     it('resolveActionSha returns undefined for a non-action reference', async () => {

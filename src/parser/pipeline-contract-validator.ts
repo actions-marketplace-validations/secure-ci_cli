@@ -13,6 +13,7 @@ import { topologicalJobOrder } from '../runner/job-plan';
 import { parseFile } from './workflow-parser';
 import { repositoryRoot } from '../utils/repository';
 import { fetchAction, fetchRepoFile } from '../runner/action-fetcher';
+import { findLockfile, readLockfile } from '../github-lockfile';
 
 /**
  * Which composite actions / reusable workflows to look inside: none, local
@@ -241,10 +242,61 @@ export async function validatePipelineContract(
     }
   }
 
+  if (spec.lockfile?.required) {
+    errors.push(...checkLockfile(parsed, sequence.filter(isRemote)));
+  }
+
   return {
     valid: errors.every((e) => e.severity !== 'error'),
     errors
   };
+}
+
+/**
+ * `lockfile.required`: the repository commits a lockfile (secureci.lock,
+ * else GitHub's actions.lock) and it lists every remote reference used.
+ * Offline: whether the locked commits still match is `inventory --check`.
+ */
+function checkLockfile(
+  parsed: ParsedWorkflow,
+  remote: UsageEntry[]
+): ValidationError[] {
+  const source = findLockfile(repositoryRoot(parsed.path));
+  if (!source) {
+    return [
+      {
+        path: 'lockfile',
+        message:
+          'The contract requires a lockfile, but the repository has no secureci.lock (or .github/workflows/actions.lock). Create one with: secureci inventory --update-lock',
+        severity: 'error'
+      }
+    ];
+  }
+  const name = path.basename(source.file);
+  let locked: Set<string>;
+  try {
+    locked = new Set(
+      Object.keys(readLockfile(source).actions).map((uses) => {
+        const { name: n, version } = splitActionRef(uses);
+        return version === undefined ? n : `${n}@${version}`;
+      })
+    );
+  } catch (error) {
+    return [
+      {
+        path: 'lockfile',
+        message: `Could not read ${name}: ${error instanceof Error ? error.message : String(error)}`,
+        severity: 'error'
+      }
+    ];
+  }
+  return remote
+    .filter((u) => !locked.has(`${u.name}@${u.version}`))
+    .map((u) => ({
+      path: u.path,
+      message: `Action "${u.name}${u.version ? '@' + u.version : ''}" is not in ${name}; lock it with ${source.kind === 'github' ? '`gh actions-lock`' : '`secureci inventory --update-lock`'}`,
+      severity: 'error' as const
+    }));
 }
 
 /** Whether job `from` (transitively) needs job `to`. */

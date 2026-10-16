@@ -71,7 +71,8 @@ secureci inventory --check    # fail on drift (use in CI)
   is checked against it, locally and in CI.
 - **Supply-chain visibility** — [`secureci inventory`](DOCS.md#action-inventory-and-drift-secureci-inventory)
   with a committed lockfile turns a silently moved action tag into a failing
-  check.
+  check, including tags inside the actions you use, and catches a locked
+  repository that was deleted and re-created.
 - **Machine-readable output** — `--format json|sarif` drops straight into CI and
   GitHub code scanning.
 - **Audit evidence** — the contract, `secureci.lock` and reports are plain files

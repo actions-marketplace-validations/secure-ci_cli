@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { parseFile } from './parser/workflow-parser';
 import { repositoryRoot } from './utils/repository';
-import type { ParsedWorkflow, Step, WorkflowFile } from './types';
+import type { ParsedFile, ParsedWorkflow, Step, WorkflowFile } from './types';
 
 /** A resolved `uses:` reference and where it appears. */
 export interface Reference {
@@ -51,8 +51,16 @@ function classify(uses: string, kind: Reference['kind']): Reference {
  * actions (`./path`) and local reusable workflows (`jobs.<id>.uses: ./x.yml`)
  * so wrapped references are still listed. Remote references are listed but
  * not followed. Order is the walk order; each carries its call path.
+ *
+ * Also takes a composite action (its steps). `localActions: false` lists
+ * but doesn't follow `./` actions: in a downloaded action or workflow they
+ * resolve against whatever the caller checked out, which isn't known here.
  */
-export function collectReferences(parsed: ParsedWorkflow): Reference[] {
+export function collectReferences(
+  parsed: ParsedFile,
+  options: { localActions?: boolean } = {}
+): Reference[] {
+  const followLocalActions = options.localActions ?? true;
   const root = repositoryRoot(parsed.path);
   const refs: Reference[] = [];
 
@@ -74,7 +82,7 @@ export function collectReferences(parsed: ParsedWorkflow): Reference[] {
     if (!step.uses) return;
     const ref = classify(step.uses, 'action');
     refs.push({ ...ref, path: at });
-    if (!isLocal(step.uses)) return;
+    if (!isLocal(step.uses) || !followLocalActions) return;
     const file = resolveLocal(step.uses, ['action.yml', 'action.yaml']);
     if (!file || stack.includes(file) || stack.length >= MAX_DEPTH) return;
     let parsedAction;
@@ -126,13 +134,20 @@ export function collectReferences(parsed: ParsedWorkflow): Reference[] {
     }
   };
 
-  addWorkflow(parsed.file, '', [path.resolve(parsed.path)]);
+  if (parsed.type === 'workflow') {
+    addWorkflow(parsed.file, '', [path.resolve(parsed.path)]);
+  } else if (parsed.file.runs.using === 'composite') {
+    (parsed.file.runs.steps ?? []).forEach((s, i) =>
+      addStep(s, `steps[${i}]`, [path.resolve(parsed.path)])
+    );
+  }
   return refs;
 }
 
 /** A remote action in the inventory, with its resolved commit. */
 export interface InventoryAction {
   uses: string;
+  kind: 'action' | 'reusable-workflow';
   owner: string;
   repo: string;
   subpath?: string;
@@ -140,6 +155,11 @@ export interface InventoryAction {
   pinned: boolean;
   resolvedSha?: string;
   paths: string[];
+  /** Set for a transitive dependency: the references that pull it in. */
+  via?: string[];
+  /** GitHub's ids for the repository, when looked up. */
+  ownerId?: number;
+  repoId?: number;
 }
 
 export interface Inventory {
@@ -169,22 +189,9 @@ export async function buildInventory(
 
   const byUses = new Map<string, InventoryAction>();
   for (const ref of remote) {
-    if (!ref.owner || !ref.repo) continue;
-    let action = byUses.get(ref.uses);
-    if (!action) {
-      action = {
-        uses: ref.uses,
-        owner: ref.owner,
-        repo: ref.repo,
-        subpath: ref.subpath,
-        ref: ref.ref,
-        pinned: ref.pinned,
-        resolvedSha:
-          ref.ref && FULL_SHA.test(ref.ref) ? ref.ref.toLowerCase() : undefined,
-        paths: []
-      };
-      byUses.set(ref.uses, action);
-    }
+    const action = byUses.get(ref.uses) ?? toAction(ref);
+    if (!action) continue;
+    byUses.set(ref.uses, action);
     action.paths.push(ref.path);
   }
 
@@ -203,10 +210,111 @@ export async function buildInventory(
   };
 }
 
-/** `secureci.lock`: a map of `owner/repo@ref` to the commit it resolved to. */
+/** A remote reference as an inventory entry (no paths yet), or null. */
+function toAction(ref: Reference): InventoryAction | null {
+  if (!ref.owner || !ref.repo) return null;
+  if (ref.kind !== 'action' && ref.kind !== 'reusable-workflow') return null;
+  return {
+    uses: ref.uses,
+    kind: ref.kind,
+    owner: ref.owner,
+    repo: ref.repo,
+    subpath: ref.subpath,
+    ref: ref.ref,
+    pinned: ref.pinned,
+    resolvedSha:
+      ref.ref && FULL_SHA.test(ref.ref) ? ref.ref.toLowerCase() : undefined,
+    paths: []
+  };
+}
+
+export interface TransitiveDeps {
+  /**
+   * Download `owner/repo[/path]@sha` and return the local path of the
+   * action's action.yml (kind `action`) or of the workflow file, or null.
+   */
+  fetch: (
+    uses: string,
+    kind: InventoryAction['kind']
+  ) => Promise<string | null>;
+  resolveSha?: ShaResolver;
+  warn: (message: string) => void;
+}
+
+/**
+ * The inventory plus every transitive dependency: remote composite actions
+ * and remote reusable workflows are downloaded at their resolved commit
+ * (so what's read is what's locked) and their own `uses:` added, up to
+ * MAX_DEPTH levels. A dependency records `via`, the references that pull it
+ * in. Node and Docker actions have no `uses:` to follow.
+ */
+export async function addTransitive(
+  direct: InventoryAction[],
+  deps: TransitiveDeps
+): Promise<InventoryAction[]> {
+  const byUses = new Map(direct.map((a) => [a.uses, a]));
+  const queue = direct.map((action) => ({ action, depth: 1 }));
+
+  while (queue.length > 0) {
+    const { action, depth } = queue.shift() as (typeof queue)[number];
+    const at = action.resolvedSha ?? action.ref;
+    if (!at || depth > MAX_DEPTH) continue;
+    const name = [action.owner, action.repo, action.subpath]
+      .filter(Boolean)
+      .join('/');
+    const file = await deps.fetch(`${name}@${at}`, action.kind);
+    let parsed: ParsedFile | undefined;
+    try {
+      parsed = file ? parseFile(file) : undefined;
+    } catch {
+      parsed = undefined;
+    }
+    if (!parsed) {
+      deps.warn(
+        `Could not read ${action.uses}, so the actions it uses are not listed.`
+      );
+      continue;
+    }
+
+    for (const ref of collectReferences(parsed, { localActions: false })) {
+      const refPath = `${action.uses} > ${ref.path}`;
+      const known = byUses.get(ref.uses);
+      if (known) {
+        known.paths.push(refPath);
+        if (known.via && !known.via.includes(action.uses)) {
+          known.via = [...known.via, action.uses].sort();
+        }
+        continue;
+      }
+      const dep = toAction(ref);
+      if (!dep) continue;
+      dep.paths.push(refPath);
+      dep.via = [action.uses];
+      if (!dep.resolvedSha && deps.resolveSha) {
+        dep.resolvedSha = await deps.resolveSha(dep.uses);
+      }
+      byUses.set(dep.uses, dep);
+      queue.push({ action: dep, depth: depth + 1 });
+    }
+  }
+  return [...byUses.values()];
+}
+
+/** One locked reference: its commit and, when known, its repository. */
+export interface LockEntry {
+  commit: string;
+  /** GitHub's numeric id of the repository owner. */
+  ownerId?: number;
+  /** GitHub's numeric id of the repository; changes if it's re-created. */
+  repoId?: number;
+  /** For a transitive dependency: the references that pull it in. */
+  via?: string[];
+}
+
+/** A lockfile, read into one shape whichever file it came from. */
 export interface Lockfile {
-  version: 1;
-  actions: Record<string, string>;
+  version: 1 | 2;
+  actions: Record<string, LockEntry>;
 }
 
 export interface LockDiff {
@@ -217,36 +325,59 @@ export interface LockDiff {
   added: string[];
   /** Refs in the lock but no longer referenced. */
   removed: string[];
+  /** Refs whose repository is no longer the one that was locked. */
+  identity: Array<{
+    uses: string;
+    field: 'owner_id' | 'repo_id';
+    from: number;
+    to: number;
+  }>;
 }
 
-/** Compare current `uses -> sha` against a lockfile's recorded commits. */
+/**
+ * Compare the current entries against a lockfile: moved commits, new and
+ * removed refs, and repositories whose identity changed (compared only
+ * when both sides know it).
+ */
 export function diffLock(
-  current: Record<string, string>,
+  current: Record<string, LockEntry>,
   lock: Lockfile
 ): LockDiff {
   const drifted: LockDiff['drifted'] = [];
+  const identity: LockDiff['identity'] = [];
   const added: string[] = [];
-  for (const [uses, sha] of Object.entries(current)) {
+  for (const [uses, entry] of Object.entries(current)) {
     const known = lock.actions[uses];
-    if (known === undefined) added.push(uses);
-    else if (known !== sha) drifted.push({ uses, from: known, to: sha });
+    if (known === undefined) {
+      added.push(uses);
+      continue;
+    }
+    if (known.commit !== entry.commit) {
+      drifted.push({ uses, from: known.commit, to: entry.commit });
+    }
+    for (const [field, key] of [
+      ['owner_id', 'ownerId'],
+      ['repo_id', 'repoId']
+    ] as const) {
+      const from = known[key];
+      const to = entry[key];
+      if (from !== undefined && to !== undefined && from !== to) {
+        identity.push({ uses, field, from, to });
+      }
+    }
   }
   const removed = Object.keys(lock.actions).filter(
     (uses) => !(uses in current)
   );
   return {
-    changed: drifted.length > 0 || added.length > 0 || removed.length > 0,
+    changed:
+      drifted.length > 0 ||
+      added.length > 0 ||
+      removed.length > 0 ||
+      identity.length > 0,
     drifted,
     added: added.sort(),
-    removed: removed.sort()
+    removed: removed.sort(),
+    identity
   };
-}
-
-/** The `uses -> resolvedSha` map an inventory contributes to a lockfile. */
-export function lockEntries(inv: Inventory): Record<string, string> {
-  const entries: Record<string, string> = {};
-  for (const action of inv.actions) {
-    if (action.resolvedSha) entries[action.uses] = action.resolvedSha;
-  }
-  return entries;
 }

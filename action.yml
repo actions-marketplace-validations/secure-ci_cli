@@ -31,7 +31,7 @@ inputs:
     required: false
     default: 'true'
   inventory:
-    description: 'Set to "check" to also fail when an action ref has moved since it was locked (runs `secureci inventory --check` against secureci.lock, or GitHub''s .github/workflows/actions.lock when that is the only lockfile). Default: off.'
+    description: 'Set to "check" to also fail when an action ref (including one inside the actions you use) has moved since it was locked, or a locked repository was re-created (runs `secureci inventory --check` against secureci.lock, or GitHub''s .github/workflows/actions.lock when that is the only lockfile). Default: off.'
     required: false
     default: ''
   version:

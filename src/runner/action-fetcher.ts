@@ -495,3 +495,41 @@ export async function resolveActionSha(
   }
   return undefined;
 }
+
+/**
+ * GitHub's numeric ids for a repository and its owner, from the REST API,
+ * or undefined if they can't be looked up (offline, rate-limited, gone).
+ * The ids survive a rename but not a delete-and-recreate, so a changed id
+ * means a different repository now answers to the same name.
+ */
+export async function resolveRepoIdentity(
+  owner: string,
+  repo: string,
+  options: { token?: string | null; timeoutMs?: number } = {}
+): Promise<{ ownerId: number; repoId: number } | undefined> {
+  const timeoutMs = options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
+  const token = options.token === undefined ? githubToken() : options.token;
+  const lookup = async (auth: string | null) => {
+    try {
+      const body = JSON.parse(
+        await getText(
+          `${apiUrl()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+          { ...requestHeaders(auth), Accept: 'application/vnd.github+json' },
+          timeoutMs
+        )
+      ) as { id?: unknown; owner?: { id?: unknown } };
+      const repoId = body.id;
+      const ownerId = body.owner?.id;
+      return typeof repoId === 'number' && typeof ownerId === 'number'
+        ? { identity: { ownerId, repoId } }
+        : {};
+    } catch (error) {
+      return { unauthorized: (error as { status?: number }).status === 401 };
+    }
+  };
+  const first = await lookup(token);
+  if (first.identity) return first.identity;
+  // A rejected token shouldn't block the lookup: retry anonymously.
+  if (token && first.unauthorized) return (await lookup(null)).identity;
+  return undefined;
+}

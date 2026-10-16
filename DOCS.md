@@ -14,6 +14,7 @@ introduction and install steps, see the [README](README.md).
 - [Global configuration](#global-configuration)
 - [Pipeline contracts (`validate --contract`)](#pipeline-contracts-validate---contract)
   - [Supply-chain pinning](#supply-chain-pinning)
+  - [Requiring a lockfile](#requiring-a-lockfile)
   - [Contracts from another repository](#contracts-from-another-repository)
   - [Contract limitations (v1 scope)](#contract-limitations-v1-scope)
 - [Machine-readable output (`--format`)](#machine-readable-output---format)
@@ -211,6 +212,19 @@ allowed-owners: # if set, every remote action's owner must be listed
 
 Local (`./`) and `docker://` references are exempt from SHA pinning. An unpinned action or a disallowed owner is an **error**, reported at the step's call path.
 
+### Requiring a lockfile
+
+A contract can require every repository to commit a lockfile that covers what its workflows use:
+
+```yaml
+lockfile:
+  required: true
+```
+
+- **The lockfile must exist** at the root of the workflow's repository: `secureci.lock`, or GitHub's `.github/workflows/actions.lock` when that is the only one. A missing lockfile is an **error** at `lockfile`.
+- **Every remote action and reusable workflow** in the flattened sequence must be listed in it. With `--contract-recurse all`, that includes the actions inside remote composite actions and reusable workflows. Each missing reference is an **error** at its call path. The `owner/repo` part is matched case-insensitively.
+- **This check runs offline.** It confirms the lock covers the workflow; whether each locked commit still matches is `secureci inventory --check` (or `inventory: check` in the GitHub Action).
+
 `--contract` runs the normal syntax validation too, and currently applies to workflow files only (not standalone actions, since the contract is about a job/step sequence). Passing `--contract` against an action file fails with a clear error.
 
 ### Contracts from another repository
@@ -257,7 +271,11 @@ secureci inventory .github/workflows/ci.yml --dry-run # one file, as JSON
 secureci inventory --dry-run --offline              # don't resolve over the network
 ```
 
-Each entry carries `uses`, `owner`, `repo`, `ref`, whether it's `pinned` to a full commit SHA, the `resolvedSha`, and the call `paths` where it appears. Tags and branches are resolved with `git ls-remote` (or the API when a token is available); `--offline` resolves only already-pinned refs.
+Each entry carries `uses`, `kind`, `owner`, `repo`, `ref`, whether it's `pinned` to a full commit SHA, the `resolvedSha`, and the call `paths` where it appears. Tags and branches are resolved with `git ls-remote` (or the API when a token is available); `--offline` resolves only already-pinned refs.
+
+**Transitive dependencies.** Remote composite actions and remote reusable workflows are downloaded at their resolved commit, and the actions they use are added too, up to 10 levels deep. These entries carry `via`: the references that pull them in. Node and Docker actions have no `uses:` to follow. Downloads use the action cache. With `--offline`, only already-cached actions are followed. If one can't be downloaded, a warning names it and the actions it uses are left out.
+
+**Repository identity.** When the GitHub API answers, each entry also gets `ownerId` and `repoId`, GitHub's numeric ids for the repository and its owner. They survive a rename but not a delete-and-recreate.
 
 ### Drift against `secureci.lock`
 
@@ -272,10 +290,34 @@ secureci inventory --check         # compare against secureci.lock, fail on drif
 ```
 
 - **Bare `secureci inventory`** writes `secureci.lock` the first time (when none exists), and drift-checks against it on later runs.
-- **`--check` / `--compare`** always compares and fails (non-zero) when a `uses:` reference now resolves to a different commit than recorded (a moved tag) or a new action isn't in the lock yet. Use it in CI.
+- **`--check` / `--compare`** always compares and fails (non-zero) when a `uses:` reference now resolves to a different commit than recorded (a moved tag), a new action isn't in the lock yet, or a locked repository's identity changed. Use it in CI.
 - **`--update-lock` / `--update-lockfile`** accepts the current state by rewriting the lock. Review the diff, then commit it.
 
-The lockfile is plain JSON (`{ version, actions: { "owner/repo@ref": "<sha>" } }`), safe to commit and diff.
+The lockfile is plain JSON, safe to commit and diff:
+
+```json
+{
+  "version": 2,
+  "actions": {
+    "my-org/build-action@v2": {
+      "commit": "4f1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c",
+      "owner_id": 1234567,
+      "repo_id": 7654321
+    },
+    "my-org/setup-tool@v1": {
+      "commit": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d",
+      "owner_id": 1234567,
+      "repo_id": 7654322,
+      "via": ["my-org/build-action@v2"]
+    }
+  }
+}
+```
+
+- **Transitive dependencies are locked too**, with `via` showing what pulls each one in. A moved tag inside an action you use fails the check like one in your own workflow.
+- **`owner_id` and `repo_id` are recorded when the GitHub API answers**, and left out when it doesn't (offline, rate-limited). Anonymous API calls are limited to 60 an hour, so set `GITHUB_TOKEN` for large repositories.
+- **A changed identity fails `--check`.** If a locked name now points at a repository with a different `repo_id` (deleted and re-created, the pattern behind repo-jacking) or a different `owner_id` (transferred, or the account re-registered), the check fails even when the commit matches. Identity is checked only where the lock records it, and not with `--offline`.
+- **Version 1 locks still work.** A lock written by 0.4.0 or earlier (`{ "owner/repo@ref": "<sha>" }`) is still checked; it has no identities, and transitive dependencies show up as new until you run `--update-lock`, which writes version 2.
 
 ### GitHub's `actions.lock`
 
@@ -285,7 +327,7 @@ GitHub's [workflow dependency lockfiles](https://docs.github.com/actions/concept
 - **Otherwise, `actions.lock` is used.** Bare `secureci inventory` and `--check` compare each action's commit against `actions.lock` instead of creating `secureci.lock`. A moved ref or an action missing from the file fails, with a hint to run `gh actions-lock`.
 - **`--update-lock` always writes `secureci.lock`.** Use it to switch a repository to SecureCI's lockfile, for example on GitHub Enterprise Server, where `actions.lock` isn't available.
 
-`actions.lock` also lists transitive dependencies (actions your actions use). SecureCI doesn't scan those, so they are never reported as unused. Lockfile versions `v0.0.2` and `v0.0.3` are supported; a newer format fails with a clear error until SecureCI supports it.
+`actions.lock` lists transitive dependencies and each repository's `owner_id` and `repo_id`, so the transitive and identity checks apply to it too. Entries SecureCI doesn't find are never reported as unused, because `gh actions-lock` may record dependencies SecureCI doesn't follow. Lockfile versions `v0.0.2` and `v0.0.3` are supported; a newer format fails with a clear error until SecureCI supports it.
 
 ## Use in CI (GitHub Action)
 

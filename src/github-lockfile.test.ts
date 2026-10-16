@@ -5,7 +5,10 @@ import * as path from 'path';
 import {
   GITHUB_LOCKFILE,
   findLockfile,
-  parseGitHubLockfile
+  parseGitHubLockfile,
+  parseSecureciLockfile,
+  readLockfile,
+  serializeSecureciLockfile
 } from './github-lockfile';
 
 // Shape written by `gh actions-lock` (github/gh-actions-lock), v0.0.2.
@@ -37,15 +40,36 @@ const SAMPLE = [
 ].join('\n');
 
 describe('parseGitHubLockfile', () => {
-  it('maps each dependency to its locked commit, without the sha1- prefix', () => {
+  it('maps each dependency to its locked commit and repository identity', () => {
     expect(parseGitHubLockfile(SAMPLE)).toEqual({
-      version: 1,
+      version: 2,
       actions: {
-        'actions/checkout@v5.0.1': '93cb6efe18208431cddfb8368fd83d5badbf9bfd',
-        'github/codeql-action/upload-sarif@v3': 'a'.repeat(40),
-        'actions/attest@67422f5511b7ff725f4dbd6fb9bd2cd925c65a8d':
-          '67422f5511b7ff725f4dbd6fb9bd2cd925c65a8d'
+        'actions/checkout@v5.0.1': {
+          commit: '93cb6efe18208431cddfb8368fd83d5badbf9bfd',
+          ownerId: 44036562,
+          repoId: 197814629
+        },
+        'github/codeql-action/upload-sarif@v3': {
+          commit: 'a'.repeat(40),
+          ownerId: 1,
+          repoId: 2
+        },
+        'actions/attest@67422f5511b7ff725f4dbd6fb9bd2cd925c65a8d': {
+          commit: '67422f5511b7ff725f4dbd6fb9bd2cd925c65a8d',
+          ownerId: 44036562,
+          repoId: 760701061
+        }
       }
+    });
+  });
+
+  it('leaves out an identity that is not a number', () => {
+    const lock = parseGitHubLockfile(
+      SAMPLE.replace('owner_id: 44036562', "owner_id: 'x'")
+    );
+    expect(lock.actions['actions/checkout@v5.0.1']).toEqual({
+      commit: '93cb6efe18208431cddfb8368fd83d5badbf9bfd',
+      repoId: 197814629
     });
   });
 
@@ -104,5 +128,89 @@ describe('findLockfile', () => {
       kind: 'secureci',
       file: path.join(dir, 'secureci.lock')
     });
+  });
+});
+
+describe('secureci.lock', () => {
+  const a = 'a'.repeat(40);
+  const b = 'b'.repeat(40);
+
+  it('reads a version 1 lock (commit strings)', () => {
+    expect(
+      parseSecureciLockfile(
+        JSON.stringify({ version: 1, actions: { 'org/scan@v1': a } })
+      )
+    ).toEqual({ version: 1, actions: { 'org/scan@v1': { commit: a } } });
+  });
+
+  it('reads a version 2 lock with identities and via', () => {
+    const text = JSON.stringify({
+      version: 2,
+      actions: {
+        'org/scan@v1': { commit: a, owner_id: 7, repo_id: 8 },
+        'org/helper@v2': { commit: b, via: ['org/scan@v1'] }
+      }
+    });
+    expect(parseSecureciLockfile(text)).toEqual({
+      version: 2,
+      actions: {
+        'org/scan@v1': { commit: a, ownerId: 7, repoId: 8 },
+        'org/helper@v2': { commit: b, via: ['org/scan@v1'] }
+      }
+    });
+  });
+
+  it('rejects an unknown version or a malformed entry', () => {
+    expect(() =>
+      parseSecureciLockfile(JSON.stringify({ version: 3, actions: {} }))
+    ).toThrow(/Unsupported secureci.lock version "3"/);
+    expect(() =>
+      parseSecureciLockfile(
+        JSON.stringify({
+          version: 2,
+          actions: { 'org/scan@v1': { commit: 'x' } }
+        })
+      )
+    ).toThrow(/org\/scan@v1/);
+    expect(() => parseSecureciLockfile('not json')).toThrow();
+  });
+
+  it('writes version 2, sorted, and reads back what it wrote', () => {
+    const actions = {
+      'org/z@v1': { commit: b, via: ['org/a@v1'] },
+      'org/a@v1': { commit: a, ownerId: 1, repoId: 2 }
+    };
+    const text = serializeSecureciLockfile(actions);
+    expect(JSON.parse(text)).toEqual({
+      version: 2,
+      actions: {
+        'org/a@v1': { commit: a, owner_id: 1, repo_id: 2 },
+        'org/z@v1': { commit: b, via: ['org/a@v1'] }
+      }
+    });
+    expect(Object.keys(JSON.parse(text).actions)).toEqual([
+      'org/a@v1',
+      'org/z@v1'
+    ]);
+    expect(text.endsWith('\n')).toBe(true);
+    expect(parseSecureciLockfile(text)).toEqual({ version: 2, actions });
+  });
+
+  it('readLockfile reads either kind', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-lockread-'));
+    const secureci = path.join(dir, 'secureci.lock');
+    fs.writeFileSync(
+      secureci,
+      serializeSecureciLockfile({ 'org/a@v1': { commit: a } })
+    );
+    expect(readLockfile({ kind: 'secureci', file: secureci }).actions).toEqual({
+      'org/a@v1': { commit: a }
+    });
+    const github = path.join(dir, 'actions.lock');
+    fs.writeFileSync(github, SAMPLE);
+    expect(
+      Object.keys(readLockfile({ kind: 'github', file: github }).actions)
+    ).toHaveLength(3);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
