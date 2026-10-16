@@ -479,6 +479,92 @@ describe('secureci commands', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("inventory checks GitHub's actions.lock when no secureci.lock exists", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-ghlock-cli-'));
+    const wfDir = path.join(dir, '.github', 'workflows');
+    fs.mkdirSync(wfDir, { recursive: true });
+    const wf = path.join(wfDir, 'ci.yml');
+    const scan = 'org/scan@' + '1'.repeat(40);
+    fs.writeFileSync(
+      wf,
+      [
+        'name: CI',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        `      - uses: ${scan}`
+      ].join('\n')
+    );
+    const ghLock = path.join(wfDir, 'actions.lock');
+    const writeGhLock = (deps: Record<string, string>) =>
+      fs.writeFileSync(
+        ghLock,
+        [
+          "version: 'v0.0.2'",
+          'dependencies:',
+          ...Object.entries(deps).flatMap(([key, sha]) => [
+            `  '${key}':`,
+            "    ref: 'v1'",
+            `    commit: 'sha1-${sha}'`,
+            '    owner_id: 1',
+            '    repo_id: 1'
+          ]),
+          // A transitive dependency SecureCI doesn't scan: never "unused".
+          "  'org/helper@v1':",
+          "    ref: 'v1'",
+          `    commit: 'sha1-${'3'.repeat(40)}'`,
+          '    owner_id: 1',
+          '    repo_id: 2'
+        ].join('\n')
+      );
+    const secureciLock = path.join(dir, 'secureci.lock');
+    const out = (r: { stdout: string; stderr: string }) => r.stdout + r.stderr;
+
+    // Matching actions.lock: bare `inventory` checks it and passes, without
+    // creating secureci.lock.
+    writeGhLock({ [scan]: '1'.repeat(40) });
+    const ok = run(['inventory', wf, '--offline'], dir);
+    expect(ok.status).toBe(0);
+    expect(out(ok)).toContain('actions.lock');
+    expect(out(ok)).not.toContain('no longer used');
+    expect(fs.existsSync(secureciLock)).toBe(false);
+    expect(run(['inventory', wf, '--offline', '--check'], dir).status).toBe(0);
+
+    // A locked commit that no longer matches is drift.
+    writeGhLock({ [scan]: '9'.repeat(40) });
+    const drift = run(['inventory', wf, '--offline', '--check'], dir);
+    expect(drift.status).not.toBe(0);
+    expect(out(drift)).toContain('Drift:');
+    expect(out(drift)).toContain('gh actions-lock');
+
+    // An action missing from actions.lock fails too.
+    writeGhLock({});
+    const missing = run(['inventory', wf, '--offline'], dir);
+    expect(missing.status).not.toBe(0);
+    expect(out(missing)).toContain(`New action not in actions.lock: ${scan}`);
+
+    // secureci.lock stays first-class: once written, it wins over a stale
+    // actions.lock.
+    expect(
+      run(['inventory', wf, '--offline', '--update-lock'], dir).status
+    ).toBe(0);
+    expect(fs.existsSync(secureciLock)).toBe(true);
+    const preferred = run(['inventory', wf, '--offline', '--check'], dir);
+    expect(preferred.status).toBe(0);
+    expect(out(preferred)).toContain('secureci.lock');
+
+    // An actions.lock format this version doesn't understand is a clear error.
+    fs.rmSync(secureciLock);
+    fs.writeFileSync(ghLock, "version: 'v9.9.9'\ndependencies: {}\n");
+    const future = run(['inventory', wf, '--offline'], dir);
+    expect(future.status).not.toBe(0);
+    expect(out(future)).toContain('Unsupported actions.lock version');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('shows effective values, marking built-in defaults, in config list', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cfg-home-'));
     const env = { ...process.env, HOME: home };

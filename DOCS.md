@@ -17,6 +17,7 @@ introduction and install steps, see the [README](README.md).
   - [Contract limitations (v1 scope)](#contract-limitations-v1-scope)
 - [Machine-readable output (`--format`)](#machine-readable-output---format)
 - [Action inventory and drift (`secureci inventory`)](#action-inventory-and-drift-secureci-inventory)
+  - [GitHub's `actions.lock`](#githubs-actionslock)
 - [Use in CI (GitHub Action)](#use-in-ci-github-action)
   - [Generate the workflow (`secureci init workflow`)](#generate-the-workflow-secureci-init-workflow)
 - [Using output as audit evidence](#using-output-as-audit-evidence)
@@ -261,6 +262,16 @@ secureci inventory --check         # compare against secureci.lock, fail on drif
 
 The lockfile is plain JSON (`{ version, actions: { "owner/repo@ref": "<sha>" } }`), safe to commit and diff.
 
+### GitHub's `actions.lock`
+
+GitHub's [workflow dependency lockfiles](https://docs.github.com/actions/concepts/security/workflow-dependency-lockfiles) (public preview, GitHub.com only) live at `.github/workflows/actions.lock` and are maintained by [`gh actions-lock`](https://github.com/github/gh-actions-lock). SecureCI reads them too:
+
+- **`secureci.lock` comes first.** If it exists, SecureCI checks against it and ignores `actions.lock`.
+- **Otherwise, `actions.lock` is used.** Bare `secureci inventory` and `--check` compare each action's commit against `actions.lock` instead of creating `secureci.lock`. A moved ref or an action missing from the file fails, with a hint to run `gh actions-lock`.
+- **`--update-lock` always writes `secureci.lock`.** Use it to switch a repository to SecureCI's lockfile, for example on GitHub Enterprise Server, where `actions.lock` isn't available.
+
+`actions.lock` also lists transitive dependencies (actions your actions use). SecureCI doesn't scan those, so they are never reported as unused. Lockfile versions `v0.0.2` and `v0.0.3` are supported; a newer format fails with a clear error until SecureCI supports it.
+
 ## Use in CI (GitHub Action)
 
 Run the same checks on pull requests with the bundled composite action. It validates your workflows (optionally against a contract) and, by default, uploads a SARIF report so findings show up inline on the PR via GitHub code scanning.
@@ -287,7 +298,7 @@ jobs:
           # inventory: check                 # also fail when an action tag moved (needs a committed secureci.lock)
 ```
 
-The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `inventory` (`check` to also run `secureci inventory --check`), `version` (which `@secureci/cli` to run), and `github-token`.
+The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `inventory` (`check` to also run `secureci inventory --check` against `secureci.lock`, or GitHub's `actions.lock` when that is the only lockfile), `version` (which `@secureci/cli` to run), and `github-token`.
 
 Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v0.2.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; set the `version` input to pin which CLI release it runs (default `latest`).
 

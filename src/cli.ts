@@ -23,6 +23,11 @@ import {
   InventoryAction,
   Lockfile
 } from './inventory';
+import {
+  GITHUB_LOCKFILE,
+  findLockfile,
+  parseGitHubLockfile
+} from './github-lockfile';
 import type { ValidationResult } from './types';
 import { logger, LogLevel } from './utils/logger';
 import { parseKeyValuePairs } from './utils/key-value';
@@ -298,7 +303,7 @@ program
   .option('--update-lockfile', `Alias of --update-lock`)
   .option(
     '--check',
-    `Compare the current commit SHAs against ./${LOCKFILE_NAME} and fail on drift`
+    `Compare the current commit SHAs against ./${LOCKFILE_NAME} (or GitHub's ${GITHUB_LOCKFILE} when that is the only lockfile) and fail on drift`
   )
   .option('--compare', `Alias of --check`)
   .action(async (files: string[], options) => {
@@ -429,7 +434,9 @@ async function runInventory(
   }
 
   const lockPath = path.join(process.cwd(), LOCKFILE_NAME);
-  const lockExists = fs.existsSync(lockPath);
+  // secureci.lock is first-class; GitHub's actions.lock is used only when
+  // it is the lockfile the repository provides.
+  const source = findLockfile(process.cwd());
 
   const writeLock = () => {
     const updated: Lockfile = { version: 1, actions: current };
@@ -440,19 +447,34 @@ async function runInventory(
   };
 
   // `--update-lock`, or bare `inventory` when no lockfile exists yet: write it.
-  if (update || (!check && !lockExists)) {
+  if (update || (!check && !source)) {
     writeLock();
     return;
   }
 
   // Otherwise compare (explicit `--check`, or bare `inventory` with a lockfile).
-  if (!lockExists) {
+  if (!source) {
     logger.error(
-      `No ${LOCKFILE_NAME} found. Create one with: secureci inventory --update-lock`
+      `No ${LOCKFILE_NAME} found (or GitHub's ${GITHUB_LOCKFILE}). Create one with: secureci inventory --update-lock`
     );
     process.exit(1);
   }
-  const lock = JSON.parse(fs.readFileSync(lockPath, 'utf-8')) as Lockfile;
+  const github = source.kind === 'github';
+  const lockName = github ? 'actions.lock' : LOCKFILE_NAME;
+  const fixHint = github
+    ? 'run `gh actions-lock` to update actions.lock'
+    : 'run with --update-lock to accept it';
+  let lock: Lockfile;
+  try {
+    const text = fs.readFileSync(source.file, 'utf-8');
+    lock = github ? parseGitHubLockfile(text) : (JSON.parse(text) as Lockfile);
+  } catch (error) {
+    logger.error(
+      `Could not read ${lockName}: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+    process.exit(1);
+  }
+  logger.info(`Checking against ${github ? GITHUB_LOCKFILE : LOCKFILE_NAME}`);
 
   const diff = diffLock(current, lock);
   for (const d of diff.drifted) {
@@ -460,25 +482,25 @@ async function runInventory(
       `Drift: ${d.uses} now resolves to ${d.to.slice(0, 12)} (was ${d.from.slice(0, 12)})`
     );
   }
-  diff.added.forEach((u) =>
-    logger.warn(`New action not in ${LOCKFILE_NAME}: ${u}`)
-  );
-  diff.removed.forEach((u) =>
-    logger.info(`In ${LOCKFILE_NAME} but no longer used: ${u}`)
-  );
+  diff.added.forEach((u) => logger.warn(`New action not in ${lockName}: ${u}`));
+  // actions.lock also records transitive dependencies, which SecureCI
+  // doesn't scan, so "no longer used" only means something for secureci.lock.
+  if (!github) {
+    diff.removed.forEach((u) =>
+      logger.info(`In ${lockName} but no longer used: ${u}`)
+    );
+  }
   if (diff.drifted.length > 0) {
     logger.error(
-      `Action commits drifted from ${LOCKFILE_NAME}. Review the change, then run with --update-lock to accept it.`
+      `Action commits drifted from ${lockName}. Review the change, then ${fixHint}.`
     );
     process.exit(1);
   }
   if (diff.added.length > 0) {
-    logger.warn(
-      `New actions are not yet in ${LOCKFILE_NAME} (run --update-lock).`
-    );
+    logger.warn(`New actions are not yet in ${lockName} (${fixHint}).`);
     process.exit(1);
   }
-  logger.success(`No action drift against ${LOCKFILE_NAME}.`);
+  logger.success(`No action drift against ${lockName}.`);
 }
 
 async function validateOneFile(
