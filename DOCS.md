@@ -14,6 +14,7 @@ introduction and install steps, see the [README](README.md).
 - [Global configuration](#global-configuration)
 - [Pipeline contracts (`validate --contract`)](#pipeline-contracts-validate---contract)
   - [Supply-chain pinning](#supply-chain-pinning)
+  - [Contracts from another repository](#contracts-from-another-repository)
   - [Contract limitations (v1 scope)](#contract-limitations-v1-scope)
 - [Machine-readable output (`--format`)](#machine-readable-output---format)
 - [Action inventory and drift (`secureci inventory`)](#action-inventory-and-drift-secureci-inventory)
@@ -211,6 +212,20 @@ allowed-owners: # if set, every remote action's owner must be listed
 Local (`./`) and `docker://` references are exempt from SHA pinning. An unpinned action or a disallowed owner is an **error**, reported at the step's call path.
 
 `--contract` runs the normal syntax validation too, and currently applies to workflow files only (not standalone actions, since the contract is about a job/step sequence). Passing `--contract` against an action file fails with a clear error.
+
+### Contracts from another repository
+
+A platform team can keep one contract in a central repository and have every repo check against it. Pass `--contract` the same `owner/repo/path@ref` form as a remote reusable workflow:
+
+```bash
+secureci validate .github/workflows/deploy.yml \
+  --contract my-org/standards/contracts/platform.yml@4f1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c
+```
+
+- **A local file always wins.** If the value names a file that exists, it is read from disk.
+- **Pin to a commit SHA.** A moving ref (`@main`, `@v1`) still works but prints a warning, because the contract's owner can then change the standard without any change in your repository.
+- **The version used is recorded.** Text output logs the commit; `--format json` adds a top-level `contract` object and SARIF adds it under `runs[0].properties.contract` (`source`, `ref`, `commit`, `pinned`), so audit evidence shows exactly which version of the standard was enforced.
+- **Private repositories** need a token that can read them: `GITHUB_TOKEN`/`GH_TOKEN` or `gh auth login` locally. In the GitHub Action, the default `github.token` can't read other private repositories, so pass a PAT or GitHub App token through the `github-token` input. Downloads use the same cache as remote actions, and GitHub Enterprise Server via `GITHUB_SERVER_URL`.
 
 ### Contract limitations (v1 scope)
 

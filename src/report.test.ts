@@ -97,3 +97,48 @@ describe('formatReport (multiple files)', () => {
     expect(uris).toEqual(['a.yml', 'a.yml']);
   });
 });
+
+describe('formatReport with a contract', () => {
+  const contract = {
+    source: 'my-org/standards/contracts/standard.yml@v1',
+    ref: 'v1',
+    commit: 'c'.repeat(40),
+    pinned: false
+  };
+
+  it('json: records which contract (and commit) was enforced', () => {
+    const one = JSON.parse(
+      formatReport([{ file: 'a.yml', result: good }], 'json', { contract })
+    );
+    expect(one.contract).toEqual(contract);
+    const many = JSON.parse(
+      formatReport(
+        [
+          { file: 'a.yml', result: good },
+          { file: 'b.yml', result: bad }
+        ],
+        'json',
+        { contract }
+      )
+    );
+    expect(many.contract).toEqual(contract);
+  });
+
+  it('sarif: records it in the run properties', () => {
+    const log = JSON.parse(
+      formatReport([{ file: 'a.yml', result: good }], 'sarif', { contract })
+    );
+    expect(log.runs[0].properties).toEqual({ contract });
+  });
+
+  it('adds nothing when no contract was used', () => {
+    expect(
+      JSON.parse(formatReport([{ file: 'a.yml', result: good }], 'json'))
+        .contract
+    ).toBeUndefined();
+    expect(
+      JSON.parse(formatReport([{ file: 'a.yml', result: good }], 'sarif'))
+        .runs[0].properties
+    ).toBeUndefined();
+  });
+});

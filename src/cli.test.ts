@@ -565,6 +565,66 @@ describe('secureci commands', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('validate --contract reads owner/repo/path@sha from another repository', () => {
+    const dir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'secureci-remote-contract-')
+    );
+    const sha = 'c'.repeat(40);
+    // Seed the action cache the fetcher reads for a SHA-pinned ref, under a
+    // temporary HOME, so no network is needed.
+    const home = path.join(dir, 'home');
+    const cached = path.join(
+      home,
+      '.secureci',
+      'actions-cache',
+      'my-org',
+      'standards',
+      sha,
+      'contracts'
+    );
+    fs.mkdirSync(cached, { recursive: true });
+    fs.writeFileSync(
+      path.join(cached, 'standard.yml'),
+      'required:\n  - uses: org/security-scan\n'
+    );
+    const wf = path.join(dir, 'ci.yml');
+    fs.writeFileSync(
+      wf,
+      [
+        'name: CI',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - uses: org/deploy@v1'
+      ].join('\n')
+    );
+    const env = { ...process.env, HOME: home, GITHUB_TOKEN: '', GH_TOKEN: '' };
+    const uses = `my-org/standards/contracts/standard.yml@${sha}`;
+
+    const res = run(
+      ['validate', wf, '--contract', uses, '--format', 'json'],
+      dir,
+      env
+    );
+    // The remote contract is enforced: the required scan is missing.
+    expect(res.status).not.toBe(0);
+    const report = JSON.parse(res.stdout);
+    expect(JSON.stringify(report.errors)).toContain('org/security-scan');
+    // ...and the report records exactly which contract version was used.
+    expect(report.contract).toEqual({
+      source: uses,
+      ref: sha,
+      commit: sha,
+      pinned: true
+    });
+    // A pinned ref doesn't warn.
+    expect(res.stderr).not.toContain('moving ref');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('shows effective values, marking built-in defaults, in config list', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cfg-home-'));
     const env = { ...process.env, HOME: home };

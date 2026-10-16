@@ -5,9 +5,11 @@ import { dryRun } from './runner/dry-run';
 import { executeWorkflow } from './runner/executor';
 import {
   clearActionCache,
+  fetchRepoFile,
   getActionCacheDir,
   resolveActionSha
 } from './runner/action-fetcher';
+import { resolveContractSource } from './contract-source';
 import { validateWorkflow, validateAction } from './parser/validator';
 import { parseFile } from './parser/workflow-parser';
 import { parsePipelineContract } from './parser/pipeline-contract-parser';
@@ -15,7 +17,12 @@ import {
   validatePipelineContract,
   ContractRecurse
 } from './parser/pipeline-contract-validator';
-import { formatReport, ReportEntry, ReportFormat } from './report';
+import {
+  ContractInfo,
+  formatReport,
+  ReportEntry,
+  ReportFormat
+} from './report';
 import { renderInitWorkflow } from './init';
 import {
   buildInventory,
@@ -564,12 +571,47 @@ async function validateFiles(
     if (!quiet) fn();
   };
 
+  // A contract may be a local file or `owner/repo/path@ref` in another
+  // repository; resolve it once and record which version was enforced.
+  let contractPath = contractFile;
+  let contract: ContractInfo | undefined;
+  let contractError: string | undefined;
+  if (contractFile) {
+    try {
+      const source = await resolveContractSource(contractFile, {
+        fetchFile: (uses) => fetchRepoFile(uses),
+        resolveSha: (uses) => resolveActionSha(uses),
+        warn: (message) => logger.warn(message)
+      });
+      contractPath = source.file;
+      const remote = source.remote;
+      contract = remote
+        ? {
+            source: remote.uses,
+            ref: remote.ref,
+            commit: remote.commit,
+            pinned: remote.pinned
+          }
+        : { source: contractFile };
+      if (remote) {
+        say(() =>
+          logger.info(
+            `Using contract ${remote.uses}${remote.commit ? ` at commit ${remote.commit.slice(0, 12)}` : ''}`
+          )
+        );
+      }
+    } catch (error) {
+      contractError = error instanceof Error ? error.message : 'Unknown error';
+    }
+  }
+
   const entries: ReportEntry[] = [];
   for (const filePath of files) {
     try {
+      if (contractError) throw new Error(contractError);
       const result = await validateOneFile(
         filePath,
-        contractFile,
+        contractPath,
         recurse,
         say
       );
@@ -595,7 +637,7 @@ async function validateFiles(
 
   if (quiet) {
     // eslint-disable-next-line no-console
-    console.log(formatReport(entries, format));
+    console.log(formatReport(entries, format, { contract }));
     if (!allValid) process.exit(1);
     return;
   }

@@ -25,6 +25,20 @@ interface SarifResult {
   }>;
 }
 
+/** The contract a run was checked against, recorded for audit. */
+export interface ContractInfo {
+  /** Local path or `owner/repo/path@ref` as given to --contract. */
+  source: string;
+  ref?: string;
+  /** Commit the remote contract resolved to. */
+  commit?: string;
+  pinned?: boolean;
+}
+
+export interface ReportMeta {
+  contract?: ContractInfo;
+}
+
 /** One validated file and its result. */
 export interface ReportEntry {
   file: string;
@@ -61,15 +75,18 @@ function sarifResults(entry: ReportEntry): SarifResult[] {
  */
 export function formatReport(
   entries: ReportEntry[],
-  format: Exclude<ReportFormat, 'text'>
+  format: Exclude<ReportFormat, 'text'>,
+  meta: ReportMeta = {}
 ): string {
+  const contract = meta.contract ? { contract: meta.contract } : {};
   if (format === 'json') {
     const body =
       entries.length === 1
-        ? jsonForFile(entries[0])
+        ? { ...jsonForFile(entries[0]), ...contract }
         : {
             valid: entries.every((e) => e.result.valid),
-            files: entries.map(jsonForFile)
+            files: entries.map(jsonForFile),
+            ...contract
           };
     return JSON.stringify(body, null, 2);
   }
@@ -87,7 +104,8 @@ export function formatReport(
               rules: Object.entries(RULES).map(([id, name]) => ({ id, name }))
             }
           },
-          results: entries.flatMap(sarifResults)
+          results: entries.flatMap(sarifResults),
+          ...(meta.contract ? { properties: contract } : {})
         }
       ]
     },

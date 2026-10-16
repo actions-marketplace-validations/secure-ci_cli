@@ -11,7 +11,7 @@ inputs:
     required: false
     default: ''
   contract:
-    description: 'Path to a pipeline contract to check workflows against (optional).'
+    description: 'Pipeline contract to check workflows against (optional): a path, or owner/repo/path@ref in another repository (pin to a commit SHA; a private repository needs a github-token that can read it).'
     required: false
     default: ''
   contract-recurse:
