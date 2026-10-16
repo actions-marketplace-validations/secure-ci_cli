@@ -275,6 +275,8 @@ Each entry carries `uses`, `kind`, `owner`, `repo`, `ref`, whether it's `pinned`
 
 **Transitive dependencies.** Remote composite actions and remote reusable workflows are downloaded at their resolved commit, and the actions they use are added too, up to 10 levels deep. These entries carry `via`: the references that pull them in. Node and Docker actions have no `uses:` to follow. Downloads use the action cache. With `--offline`, only already-cached actions are followed. If one can't be downloaded, a warning names it and the actions it uses are left out.
 
+**Progress.** Online runs print a notice and then progress to stderr, in three phases: resolving tags, reading actions for the actions they use, and checking repositories. In a terminal each phase updates one line in place (`Reading actions [3/12] org/action@v2`); in CI logs it prints one line per item. Stdout stays clean, so `--dry-run` JSON can be piped. `--offline` reads only the cache and shows no progress.
+
 **Repository identity.** When the GitHub API answers, each entry also gets `ownerId` and `repoId`, GitHub's numeric ids for the repository and its owner. They survive a rename but not a delete-and-recreate.
 
 ### Drift against `secureci.lock`
@@ -290,7 +292,7 @@ secureci inventory --check         # compare against secureci.lock, fail on drif
 ```
 
 - **Bare `secureci inventory`** writes `secureci.lock` the first time (when none exists), and drift-checks against it on later runs.
-- **`--check` / `--compare`** always compares and fails (non-zero) when a `uses:` reference now resolves to a different commit than recorded (a moved tag), a new action isn't in the lock yet, or a locked repository's identity changed. Use it in CI.
+- **`--check` / `--compare`** always compares and fails (non-zero) when a `uses:` reference now resolves to a different commit than recorded (a moved tag), a new action isn't in the lock yet, a locked repository's identity changed, or an action can't be verified (below). Use it in CI.
 - **`--update-lock` / `--update-lockfile`** accepts the current state by rewriting the lock. Review the diff, then commit it.
 
 The lockfile is plain JSON, safe to commit and diff:
@@ -317,6 +319,7 @@ The lockfile is plain JSON, safe to commit and diff:
 - **Transitive dependencies are locked too**, with `via` showing what pulls each one in. A moved tag inside an action you use fails the check like one in your own workflow.
 - **`owner_id` and `repo_id` are recorded when the GitHub API answers**, and left out when it doesn't (offline, rate-limited). Anonymous API calls are limited to 60 an hour, so set `GITHUB_TOKEN` for large repositories.
 - **A changed identity fails `--check`.** If a locked name now points at a repository with a different `repo_id` (deleted and re-created, the pattern behind repo-jacking) or a different `owner_id` (transferred, or the account re-registered), the check fails even when the commit matches. Identity is checked only where the lock records it, and not with `--offline`.
+- **An action that can't be verified fails `--check`.** If a tag no longer resolves, or a SHA-pinned action's repository can no longer be read (deleted, renamed or made private), the check fails and names it, with the locked commit. A pinned commit resolves without the network, so SecureCI makes one lookup per pinned repository to confirm it still exists. A network outage fails the check the same way. With `--offline`, tags can't be resolved at all, so they are listed in a warning instead.
 - **Version 1 locks still work.** A lock written by 0.4.0 or earlier (`{ "owner/repo@ref": "<sha>" }`) is still checked; it has no identities, and transitive dependencies show up as new until you run `--update-lock`, which writes version 2.
 
 ### GitHub's `actions.lock`

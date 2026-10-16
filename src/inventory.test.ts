@@ -202,9 +202,11 @@ describe('addTransitive', () => {
     };
     const resolveSha = async (uses: string) => resolved[uses];
     const fetched: string[] = [];
+    const queued: string[] = [];
     const inv = await buildInventory(wf, resolveSha);
     const all = await addTransitive(inv.actions, {
       resolveSha,
+      onQueue: (a) => queued.push(a.uses),
       fetch: async (uses) => {
         fetched.push(uses);
         return files[uses] ?? null;
@@ -232,6 +234,10 @@ describe('addTransitive', () => {
     expect(by['org/deep@v5'].via).toEqual([
       'org/flows/.github/workflows/ship.yml@v4'
     ]);
+    // Each new dependency is announced once, as it's queued.
+    expect(queued.sort()).toEqual(
+      ['org/deep@v5', 'org/inner@v2', `org/leaf@${sha('3')}`].sort()
+    );
     // Local actions inside a remote action aren't followed or listed.
     expect(Object.keys(by).some((u) => u.startsWith('.'))).toBe(false);
   });

@@ -5,6 +5,8 @@ import {
   lsRemoteSha,
   resolveActionSha,
   resolveRepoIdentity,
+  repoExists,
+  lsRemoteReachable,
   clearActionCache
 } from './action-fetcher';
 import * as fs from 'fs';
@@ -287,6 +289,16 @@ describe('Action Fetcher', () => {
       expect(requests).toHaveLength(2);
     });
 
+    it('repoExists asks the API with a token: 200 yes, 404 no', async () => {
+      handler = (req, res) => {
+        res.writeHead(req.url === '/api/repos/org/act' ? 200 : 404);
+        res.end('{}');
+      };
+      expect(await repoExists('org', 'act', { token: 'tok' })).toBe(true);
+      expect(await repoExists('org', 'gone', { token: 'tok' })).toBe(false);
+      expect(requests.map((r) => r.auth)).toEqual(['Bearer tok', 'Bearer tok']);
+    });
+
     it('resolveRepoIdentity ignores a response without numeric ids', async () => {
       handler = (_req, res) => {
         res.writeHead(200);
@@ -474,6 +486,19 @@ describe('Action Fetcher', () => {
       ).toBeNull();
       expect(Date.now() - started).toBeLessThan(5000);
       expect(fs.existsSync(path.join(repoCache(), SHA1))).toBe(false);
+    });
+  });
+
+  describe('lsRemoteReachable', () => {
+    it('is true for a repository and false for a missing one', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-reach-'));
+      try {
+        execFileSync('git', ['init', '-q', dir]);
+        expect(await lsRemoteReachable(dir)).toBe(true);
+        expect(await lsRemoteReachable(path.join(dir, 'missing'))).toBe(false);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 

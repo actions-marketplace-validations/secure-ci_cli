@@ -533,3 +533,45 @@ export async function resolveRepoIdentity(
   if (token && first.unauthorized) return (await lookup(null)).identity;
   return undefined;
 }
+
+/** Whether `git ls-remote` can read the repository at `url`. */
+export async function lsRemoteReachable(url: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['ls-remote', url, 'HEAD'], {
+      encoding: 'utf8',
+      timeout: 15000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `owner/repo` can still be read: via the API when a token is
+ * available (404 means no), otherwise (or if the API can't answer) via
+ * anonymous `git ls-remote`. False also when the network is down.
+ */
+export async function repoExists(
+  owner: string,
+  repo: string,
+  options: { token?: string | null; timeoutMs?: number } = {}
+): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS;
+  const token = options.token === undefined ? githubToken() : options.token;
+  if (token) {
+    try {
+      await getText(
+        `${apiUrl()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+        { ...requestHeaders(token), Accept: 'application/vnd.github+json' },
+        timeoutMs
+      );
+      return true;
+    } catch (error) {
+      if ((error as { status?: number }).status === 404) return false;
+      // 401, rate limit or network: fall back to anonymous git.
+    }
+  }
+  return lsRemoteReachable(`${serverUrl()}/${owner}/${repo}.git`);
+}
