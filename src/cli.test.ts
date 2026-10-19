@@ -753,6 +753,120 @@ describe('secureci commands', () => {
     }
   });
 
+  it('inventory --check fails online when a locked action no longer resolves, and shows progress', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-gone-cli-'));
+    const wfDir = path.join(dir, '.github', 'workflows');
+    fs.mkdirSync(wfDir, { recursive: true });
+    const tag = 'org/scan@v1';
+    const pinned = 'org/gone@' + '2'.repeat(40);
+    const wf = path.join(wfDir, 'ci.yml');
+    fs.writeFileSync(
+      wf,
+      [
+        'name: CI',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        `      - uses: ${tag}`,
+        `      - uses: ${pinned}`
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'secureci.lock'),
+      JSON.stringify({
+        version: 2,
+        actions: {
+          [tag]: { commit: '1'.repeat(40) },
+          [pinned]: { commit: '2'.repeat(40) }
+        }
+      })
+    );
+    // A fake GitHub where org/scan@v1 resolves until `gone` is set, and
+    // org/gone doesn't exist. No tarballs: the transitive walk only warns.
+    let gone = false;
+    const server = http.createServer((req, res) => {
+      if (!gone && req.url === '/api/repos/org/scan/commits/v1') {
+        res.writeHead(200);
+        res.end('1'.repeat(40));
+        return;
+      }
+      if (!gone && req.url === '/api/repos/org/scan') {
+        res.writeHead(200);
+        res.end('{}');
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve)
+    );
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const env = {
+      ...process.env,
+      HOME: path.join(dir, 'home'),
+      GITHUB_SERVER_URL: base,
+      GITHUB_API_URL: `${base}/api`,
+      GITHUB_TOKEN: 'test-token',
+      no_proxy: '127.0.0.1,localhost',
+      NO_PROXY: '127.0.0.1,localhost'
+    };
+    const runAsync = (args: string[]) =>
+      new Promise<{ status: number; stdout: string; stderr: string }>(
+        (resolve) => {
+          execFile(
+            'node',
+            [cliPath, ...args],
+            { cwd: dir, env, encoding: 'utf-8' },
+            (error, stdout, stderr) =>
+              resolve({
+                status: error ? ((error as { code?: number }).code ?? 1) : 0,
+                stdout,
+                stderr
+              })
+          );
+        }
+      );
+
+    try {
+      // The pinned action's repository is gone: fail, though its commit
+      // "resolves" without the network.
+      const first = await runAsync(['inventory', wf, '--check']);
+      expect(first.status).not.toBe(0);
+      expect(first.stderr).toContain(`Repository gone: ${pinned}`);
+      // Not a terminal: a notice, then a line per item, on stderr.
+      expect(first.stderr).toContain('Resolving 2 action(s) over the network');
+      expect(first.stderr).toContain(`Resolving tags [1/1] ${tag}`);
+      expect(first.stderr).toContain('Checking repositories [1/1] org/gone');
+      expect(first.stdout).not.toContain('Resolving tags');
+
+      // Now the tag no longer resolves either: also a failure, naming the
+      // locked commit; it isn't reported as "no longer used".
+      gone = true;
+      const second = await runAsync(['inventory', wf, '--check']);
+      expect(second.status).not.toBe(0);
+      expect(second.stderr).toContain(
+        `Could not resolve ${tag} (locked at ${'1'.repeat(12)})`
+      );
+      expect(second.stdout + second.stderr).not.toContain('no longer used');
+
+      // --offline can't resolve tags at all: a warning, not a failure, and
+      // no network notice.
+      const offline = await runAsync(['inventory', wf, '--offline', '--check']);
+      expect(offline.status).toBe(0);
+      expect(offline.stderr).toContain(
+        `Not checked offline (tags need the network): ${tag}`
+      );
+      expect(offline.stderr).not.toContain('over the network');
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('validate --contract reads owner/repo/path@sha from another repository', () => {
     const dir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'secureci-remote-contract-')

@@ -239,6 +239,8 @@ export interface TransitiveDeps {
   ) => Promise<string | null>;
   resolveSha?: ShaResolver;
   warn: (message: string) => void;
+  /** Called when a newly found dependency is queued to be read. */
+  onQueue?: (action: InventoryAction) => void;
 }
 
 /**
@@ -295,6 +297,7 @@ export async function addTransitive(
       }
       byUses.set(dep.uses, dep);
       queue.push({ action: dep, depth: depth + 1 });
+      deps.onQueue?.(dep);
     }
   }
   return [...byUses.values()];

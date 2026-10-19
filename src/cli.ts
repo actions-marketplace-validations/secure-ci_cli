@@ -8,9 +8,12 @@ import {
   fetchAction,
   fetchRepoFile,
   getActionCacheDir,
+  githubToken,
+  repoExists,
   resolveActionSha,
   resolveRepoIdentity
 } from './runner/action-fetcher';
+import { Progress } from './utils/progress';
 import { resolveContractSource } from './contract-source';
 import { validateWorkflow, validateAction } from './parser/validator';
 import { parseFile } from './parser/workflow-parser';
@@ -403,20 +406,17 @@ async function runInventory(
   }
   targets.forEach(requireFile);
 
-  const resolver = options.offline
-    ? undefined
-    : (uses: string) => resolveActionSha(uses);
-
   // Merge every file's remote actions by `uses`.
   const byUses = new Map<string, InventoryAction>();
   for (const file of targets) {
     try {
       const parsed = parseFile(file);
       if (parsed.type !== 'workflow') continue;
-      const inv = await buildInventory(
-        { type: 'workflow', path: file, file: parsed.file },
-        resolver
-      );
+      const inv = await buildInventory({
+        type: 'workflow',
+        path: file,
+        file: parsed.file
+      });
       for (const action of inv.actions) {
         const existing = byUses.get(action.uses);
         if (existing) existing.paths.push(...action.paths);
@@ -429,23 +429,7 @@ async function runInventory(
       process.exit(1);
     }
   }
-
-  // Download progress would corrupt --dry-run's JSON on stdout; warnings
-  // still go to stderr.
-  if (options.dryRun) logger.setLevel(LogLevel.WARN);
-
-  // Follow remote composite actions and reusable workflows into the
-  // actions they use, downloaded at the resolved commit.
-  const actions = (
-    await addTransitive([...byUses.values()], {
-      resolveSha: resolver,
-      fetch: (uses, kind) =>
-        kind === 'action'
-          ? fetchAction(uses, { offline: options.offline })
-          : fetchRepoFile(uses, { offline: options.offline }),
-      warn: (message) => logger.warn(message)
-    })
-  ).sort((a, b) => a.uses.localeCompare(b.uses));
+  const direct = [...byUses.values()];
 
   const lockPath = path.join(process.cwd(), LOCKFILE_NAME);
   // secureci.lock is first-class; GitHub's actions.lock is used only when
@@ -455,10 +439,11 @@ async function runInventory(
   // writes the lock; otherwise (`--check`, or bare `inventory` with a
   // lockfile) compares against it.
   const writing = update || (!check && !source);
+  const comparing = !writing && !options.dryRun;
   let lock: Lockfile | undefined;
   const github = source?.kind === 'github';
   const lockName = github ? 'actions.lock' : LOCKFILE_NAME;
-  if (!writing && !options.dryRun) {
+  if (comparing) {
     if (!source) {
       logger.error(
         `No ${LOCKFILE_NAME} found (or GitHub's ${GITHUB_LOCKFILE}). Create one with: secureci inventory --update-lock`
@@ -475,24 +460,98 @@ async function runInventory(
     }
   }
 
-  // Repository identity: recorded when writing; when checking, looked up
-  // only for repositories the lock has an identity for.
-  if (!options.offline) {
-    const lookups = new Map<
-      string,
-      Promise<{ ownerId: number; repoId: number } | undefined>
-    >();
+  // Download messages would corrupt --dry-run's JSON on stdout and clash
+  // with the progress lines; warnings and errors still go to stderr.
+  const level = logger.getLevel();
+  if (level === LogLevel.INFO) logger.setLevel(LogLevel.WARN);
+  const online = !options.offline;
+  if (online && direct.length > 0) {
+    process.stderr.write(
+      `Resolving ${direct.length} action(s) over the network, and reading the actions they use. This can take a while (--offline uses only what is cached).\n`
+    );
+  }
+
+  // 1. Resolve each tag or branch to the commit it points at.
+  const toResolve = online ? direct.filter((a) => !a.resolvedSha) : [];
+  const resolving = new Progress('Resolving tags', toResolve.length);
+  for (const action of toResolve) {
+    resolving.tick(action.uses);
+    action.resolvedSha = await resolveActionSha(action.uses);
+  }
+  resolving.done(`Resolved ${toResolve.length} tag(s)`);
+
+  // 2. Follow remote composite actions and reusable workflows into the
+  // actions they use, downloaded at the resolved commit.
+  const reading = new Progress('Reading actions', online ? direct.length : 0);
+  let read = 0;
+  const actions = (
+    await addTransitive(direct, {
+      resolveSha: online ? (uses) => resolveActionSha(uses) : undefined,
+      fetch: (uses, kind) => {
+        if (online)
+          reading.tick(uses.replace(/@([0-9a-f]{12})[0-9a-f]{28}$/, '@$1'));
+        read++;
+        return kind === 'action'
+          ? fetchAction(uses, { offline: options.offline })
+          : fetchRepoFile(uses, { offline: options.offline });
+      },
+      warn: (message) => logger.warn(message),
+      onQueue: () => reading.grow()
+    })
+  ).sort((a, b) => a.uses.localeCompare(b.uses));
+  reading.done(`Read ${read} action(s) for the actions they use`);
+
+  // 3. Repositories: identity (recorded when writing; when comparing, only
+  // where the lock has one), and whether a SHA-pinned action's repository
+  // still exists, since resolving a pin needs no network.
+  type RepoCheck = {
+    owner: string;
+    repo: string;
+    identity: boolean;
+    existence: boolean;
+  };
+  const repos = new Map<string, RepoCheck>();
+  if (online) {
     for (const action of actions) {
       if (!action.resolvedSha) continue;
-      if (lock && lock.actions[action.uses]?.repoId === undefined) continue;
+      const identity = !lock || lock.actions[action.uses]?.repoId !== undefined;
+      const existence = comparing && action.pinned;
+      if (!identity && !existence) continue;
       const key = `${action.owner}/${action.repo}`.toLowerCase();
-      if (!lookups.has(key)) {
-        lookups.set(key, resolveRepoIdentity(action.owner, action.repo));
-      }
-      const identity = await lookups.get(key);
-      if (identity) Object.assign(action, identity);
+      const entry = repos.get(key) ?? {
+        owner: action.owner,
+        repo: action.repo,
+        identity: false,
+        existence: false
+      };
+      entry.identity ||= identity;
+      entry.existence ||= existence;
+      repos.set(key, entry);
     }
   }
+  const identities = new Map<string, { ownerId: number; repoId: number }>();
+  const missingRepos = new Set<string>();
+  const checking = new Progress('Checking repositories', repos.size);
+  for (const [key, r] of repos) {
+    checking.tick(`${r.owner}/${r.repo}`);
+    const identity = r.identity
+      ? await resolveRepoIdentity(r.owner, r.repo)
+      : undefined;
+    if (identity) identities.set(key, identity);
+    else if (r.existence && !(await repoExists(r.owner, r.repo))) {
+      missingRepos.add(key);
+    }
+  }
+  checking.done(
+    `Checked ${repos.size} repositor${repos.size === 1 ? 'y' : 'ies'}`
+  );
+  for (const action of actions) {
+    const identity = identities.get(
+      `${action.owner}/${action.repo}`.toLowerCase()
+    );
+    if (identity && action.resolvedSha) Object.assign(action, identity);
+  }
+  logger.setLevel(level);
 
   const current: Record<string, LockEntry> = {};
   for (const action of actions) {
@@ -512,7 +571,17 @@ async function runInventory(
     return;
   }
 
+  // Used references that couldn't be resolved to a commit now.
+  const unresolved = actions.filter((a) => !a.resolvedSha);
+
   if (writing) {
+    if (online) {
+      unresolved.forEach((a) =>
+        logger.warn(
+          `Not locked: could not resolve ${a.uses} (repository deleted, renamed or private, or the network is unavailable?)`
+        )
+      );
+    }
     fs.writeFileSync(lockPath, serializeSecureciLockfile(current));
     const transitive = Object.values(current).filter((e) => e.via).length;
     logger.success(
@@ -539,17 +608,48 @@ async function runInventory(
       `Repository changed: ${d.uses} ${d.field} is now ${d.to} (was ${d.from}). The name now points at a different ${d.field === 'repo_id' ? 'repository (deleted and re-created?)' : 'owner (transferred, or the account re-registered?)'}.`
     );
   }
+  for (const a of actions) {
+    if (missingRepos.has(`${a.owner}/${a.repo}`.toLowerCase())) {
+      logger.error(
+        `Repository gone: ${a.uses} can no longer be read (deleted, renamed or made private?). The locked commit can't be fetched, and the name could be re-registered by someone else.`
+      );
+    }
+  }
+  // Online, a used reference that doesn't resolve is a failure (its
+  // repository may be gone); offline, tags can't resolve, so it's a warning.
+  for (const a of unresolved) {
+    const locked = lock?.actions[a.uses];
+    const at = locked ? ` (locked at ${locked.commit.slice(0, 12)})` : '';
+    if (online) {
+      logger.error(
+        `Could not resolve ${a.uses}${at}: the repository or ref may have been deleted, renamed or made private, or the network is unavailable.`
+      );
+    }
+  }
+  if (!online && unresolved.length > 0) {
+    logger.warn(
+      `Not checked offline (tags need the network): ${unresolved.map((a) => a.uses).join(', ')}`
+    );
+  }
   diff.added.forEach((u) => logger.warn(`New action not in ${lockName}: ${u}`));
   // actions.lock is written by `gh actions-lock`, which may record entries
   // SecureCI doesn't follow, so "no longer used" is only for secureci.lock.
+  // A reference still in use but unresolved isn't "no longer used".
   if (!github) {
-    diff.removed.forEach((u) =>
-      logger.info(`In ${lockName} but no longer used: ${u}`)
-    );
+    const used = new Set(unresolved.map((a) => a.uses));
+    diff.removed
+      .filter((u) => !used.has(u))
+      .forEach((u) => logger.info(`In ${lockName} but no longer used: ${u}`));
   }
   if (diff.identity.length > 0) {
     logger.error(
       `A locked repository is no longer the one that was locked. Verify it before trusting it, then ${fixHint}.`
+    );
+    process.exit(1);
+  }
+  if (missingRepos.size > 0 || (online && unresolved.length > 0)) {
+    logger.error(
+      `Locked actions could not be verified. Check that each repository and ref still exists and is readable${githubToken() ? '' : ' (set GITHUB_TOKEN for private repositories)'}.`
     );
     process.exit(1);
   }

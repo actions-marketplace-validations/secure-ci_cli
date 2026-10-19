@@ -11,8 +11,22 @@ class Logger {
   private level: LogLevel = LogLevel.INFO;
   private secrets: Set<string> = new Set();
 
+  private beforeWrite?: () => void;
+
   setLevel(level: LogLevel): void {
     this.level = level;
+  }
+
+  getLevel(): LogLevel {
+    return this.level;
+  }
+
+  /**
+   * Run `hook` before each message is written (e.g. to clear an in-place
+   * progress line); undefined removes it.
+   */
+  setBeforeWrite(hook: (() => void) | undefined): void {
+    this.beforeWrite = hook;
   }
 
   /**
@@ -48,6 +62,7 @@ class Logger {
 
   debug(message: string, ...args: unknown[]): void {
     if (this.level <= LogLevel.DEBUG) {
+      this.beforeWrite?.();
       console.log(
         colors.gray(`[DEBUG] ${this.mask(message)}`),
         ...args.map((a) => this.maskArg(a))
@@ -57,6 +72,7 @@ class Logger {
 
   info(message: string, ...args: unknown[]): void {
     if (this.level <= LogLevel.INFO) {
+      this.beforeWrite?.();
       console.log(
         colors.blue(`[INFO] ${this.mask(message)}`),
         ...args.map((a) => this.maskArg(a))
@@ -66,6 +82,7 @@ class Logger {
 
   success(message: string, ...args: unknown[]): void {
     if (this.level <= LogLevel.INFO) {
+      this.beforeWrite?.();
       console.log(
         colors.green(`✓ ${this.mask(message)}`),
         ...args.map((a) => this.maskArg(a))
@@ -75,6 +92,7 @@ class Logger {
 
   warn(message: string, ...args: unknown[]): void {
     if (this.level <= LogLevel.WARN) {
+      this.beforeWrite?.();
       console.warn(
         colors.yellow(`[WARN] ${this.mask(message)}`),
         ...args.map((a) => this.maskArg(a))
@@ -84,6 +102,7 @@ class Logger {
 
   error(message: string, ...args: unknown[]): void {
     if (this.level <= LogLevel.ERROR) {
+      this.beforeWrite?.();
       console.error(
         colors.red(`[ERROR] ${this.mask(message)}`),
         ...args.map((a) => this.maskArg(a))
@@ -92,12 +111,14 @@ class Logger {
   }
 
   step(message: string): void {
+    this.beforeWrite?.();
     console.log(colors.cyan(`\n→ ${this.mask(message)}`));
   }
 
   result(message: string, success: boolean): void {
     const icon = success ? '✓' : '✗';
     const color = success ? colors.green : colors.red;
+    this.beforeWrite?.();
     console.log(color(`${icon} ${this.mask(message)}`));
   }
 }
