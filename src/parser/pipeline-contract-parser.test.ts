@@ -210,4 +210,27 @@ describe('parsePipelineContract', () => {
       expect(() => parsePipelineContract(writeTemp(yaml))).toThrow(message);
     });
   });
+
+  it('parses advisories.fail-on', () => {
+    expect(
+      parsePipelineContract(writeTemp('advisories:\n  fail-on: medium\n'))
+    ).toEqual({ advisories: { failOn: 'medium' } });
+    expect(
+      parsePipelineContract(writeTemp('advisories:\n  fail-on: CRITICAL\n'))
+    ).toEqual({ advisories: { failOn: 'critical' } });
+    expect(parsePipelineContract(writeTemp('advisories: {}\n'))).toEqual({
+      advisories: {}
+    });
+  });
+
+  it('throws when advisories is not a mapping or fail-on is not a severity', () => {
+    expect(() =>
+      parsePipelineContract(writeTemp('advisories: high\n'))
+    ).toThrow(/"advisories" must be a mapping/);
+    expect(() =>
+      parsePipelineContract(writeTemp('advisories:\n  fail-on: severe\n'))
+    ).toThrow(
+      /"advisories.fail-on" must be one of critical, high, medium, low/
+    );
+  });
 });

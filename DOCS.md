@@ -20,12 +20,14 @@ introduction and install steps, see the [README](README.md).
   - [Requiring a lockfile](#requiring-a-lockfile)
   - [Permissions policy](#permissions-policy)
   - [Forbidding triggers](#forbidding-triggers)
+  - [Advisory severity threshold](#advisory-severity-threshold)
   - [Contracts from another repository](#contracts-from-another-repository)
   - [Contract limitations (v1 scope)](#contract-limitations-v1-scope)
 - [Machine-readable output (`--format`)](#machine-readable-output---format)
 - [Action inventory and drift (`secureci inventory`)](#action-inventory-and-drift-secureci-inventory)
   - [GitHub's `actions.lock`](#githubs-actionslock)
 - [Pin actions to commit SHAs (`secureci pin`)](#pin-actions-to-commit-shas-secureci-pin)
+- [Known security advisories](#known-security-advisories)
 - [Use in CI (GitHub Action)](#use-in-ci-github-action)
   - [Generate the workflow (`secureci init workflow`)](#generate-the-workflow-secureci-init-workflow)
 - [Using output as audit evidence](#using-output-as-audit-evidence)
@@ -63,6 +65,7 @@ secureci run .github/workflows/ci.yml --job build
 secureci validate .github/workflows/ci.yml
 secureci validate .github/workflows/deploy.yml --contract contracts/standard.yml
 secureci validate .github/workflows/ci.yml --format json
+secureci validate .github/workflows/ci.yml --offline  # no network (cached advisories only)
 
 # Inventory the actions a workflow uses, and track drift
 secureci inventory                 # bootstrap secureci.lock, or drift-check if it exists
@@ -451,6 +454,17 @@ Each forbidden event in a workflow's `on:` (string, list or map form) is an
 Only the validated workflow's own `on:` is checked: a reusable workflow it
 calls runs under the caller's event. The value must be a list of strings.
 
+### Advisory severity threshold
+
+`secureci validate` flags actions with [known security advisories](#known-security-advisories). By default, critical and high advisories are errors and medium and low ones are warnings. A contract can move that line:
+
+```yaml
+advisories:
+  fail-on: medium # critical | high (default) | medium | low
+```
+
+Findings at or above `fail-on` become errors and the rest warnings. Any other value is a contract error.
+
 ### Contracts from another repository
 
 A platform team can keep one contract in a central repository and have every repo check against it. Pass `--contract` the same `owner/repo/path@ref` form as a remote reusable workflow:
@@ -483,7 +497,7 @@ secureci validate .github/workflows/ci.yml --contract contract.yml --format sari
 ```
 
 - **`json`**: `{ file, valid, errors: [{ path, message, severity }] }`.
-- **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`, `secureci/injection`, `secureci/permissions`, `secureci/dangerous-trigger`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
+- **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`, `secureci/injection`, `secureci/permissions`, `secureci/dangerous-trigger`, `secureci/vulnerable-action`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
 
 ## Action inventory and drift (`secureci inventory`)
 
@@ -499,7 +513,7 @@ Each entry carries `uses`, `kind`, `owner`, `repo`, `ref`, whether it's `pinned`
 
 **Transitive dependencies.** Remote composite actions and remote reusable workflows are downloaded at their resolved commit, and the actions they use are added too, up to 10 levels deep. These entries carry `via`: the references that pull them in. Node and Docker actions have no `uses:` to follow. Downloads use the action cache. With `--offline`, only already-cached actions are followed. If one can't be downloaded, a warning names it and the actions it uses are left out.
 
-**Progress.** Online runs print a notice and then progress to stderr, in three phases: resolving tags, reading actions for the actions they use, and checking repositories. In a terminal each phase updates one line in place (`Reading actions [3/12] org/action@v2`); in CI logs it prints one line per item. Stdout stays clean, so `--dry-run` JSON can be piped. `--offline` reads only the cache and shows no progress.
+**Progress.** Online runs print a notice and then progress to stderr, in four phases: resolving tags, reading actions for the actions they use, checking repositories, and checking [security advisories](#known-security-advisories). In a terminal each phase updates one line in place (`Reading actions [3/12] org/action@v2`); in CI logs it prints one line per item. Stdout stays clean, so `--dry-run` JSON can be piped. `--offline` reads only the cache and shows no progress.
 
 **Repository identity.** When the GitHub API answers, each entry also gets `ownerId` and `repoId`, GitHub's numeric ids for the repository and its owner. They survive a rename but not a delete-and-recreate.
 
@@ -585,6 +599,26 @@ Each change is printed as `file:line owner/repo@v4 -> <sha12> (v4)`, followed by
 - **Unresolvable references** (a deleted or private repository, a missing ref, or anything not cached with `--offline`) are reported with their file and line and left unchanged. `pin` still pins everything else and exits 0; `pin --check` exits non-zero. A reference with no `@ref`, or one written as a YAML block scalar, is reported the same way.
 - **`--check`** writes nothing and exits non-zero if any reference would be pinned or can't be resolved. Use it in CI to keep workflows pinned.
 - **`--update-lock`** runs [`inventory --update-lock`](#drift-against-secureciclock) after pinning, so `secureci.lock` records the new `owner/repo@<sha>` references. It can't be combined with `--check`.
+
+## Known security advisories
+
+`secureci inventory` and `secureci validate` check the actions a workflow uses against the [GitHub Advisory Database](https://github.com/advisories?query=ecosystem%3Aactions) and report published vulnerabilities, such as [GHSA-mrrh-fwg8-r2c3](https://github.com/advisories/GHSA-mrrh-fwg8-r2c3) in `tj-actions/changed-files` before 46.0.1.
+
+```
+[ERROR]   [ERROR] jobs.build.steps[3]: tj-actions/changed-files@v45.0.7 has a known security advisory: GHSA-mrrh-fwg8-r2c3 (CVE-2025-30066, high): ... Affected versions: < 46.0.1; first patched version: 46.0.1. https://github.com/advisories/GHSA-mrrh-fwg8-r2c3
+```
+
+- **What is checked.** `inventory` checks every action it lists, including transitive ones, at the commit each resolved to. `validate` checks the file's own `uses:` references, including those in local composite actions and local reusable workflows it calls. It doesn't download remote actions to look inside them.
+- **How the version is found.** A full release tag (`v45.0.7`) is compared as is. A SHA pin, or a moving tag such as `v4`, is mapped to the most specific release tag (`x.y.z`) at the same commit, using `git ls-remote --tags`. Tags are only listed for a repository that has advisories. The version is then compared with each advisory's affected range, such as `< 46.0.1` or `>= 1.0, < 2.3.4`.
+- **Moving tags that can't be mapped.** If tags can't be listed (offline, or the repository can't be read anonymously), `v4` is compared as `4.0.0`, its lowest possible release. A match is reported as **may be affected**, always as a warning, never an error, because the release the tag points at isn't known. Pin a release tag or commit to check it exactly. An affected range that can't be read is reported the same way.
+- **Unknown versions.** A commit that isn't at any release tag, or a branch, has no version to compare. If its repository has advisories, an info line names them as an `unknown version`. It isn't counted as a finding.
+- **Severity.** In `validate`, findings use the rule `secureci/vulnerable-action`. Critical and high advisories are errors that fail validation. Medium, low and unrated ones are warnings. A contract can change the threshold with [`advisories: fail-on`](#advisory-severity-threshold). `inventory` reports findings (errors and warnings in text, an `advisories` array in `--dry-run` JSON), but they don't change its exit code. Use `validate` to gate on them.
+- **`--dry-run` JSON.** Each entry in `advisories` has `uses`, `ghsaId`, `cveId`, `severity`, `summary`, `url`, the affected `range`, `firstPatched`, the `version` compared, `approximate` (the "may be affected" case) and `path`. `advisoryUnknownVersions` lists `{ uses, advisories }` for references whose version couldn't be found.
+
+**Network, rate limits and caching.** Each distinct `owner/repo` is one request to the REST API: `GET /advisories?ecosystem=actions&affects=owner/repo` on `GITHUB_API_URL`, or on GitHub Enterprise Server's API when `GITHUB_SERVER_URL` is set. Requests use `GITHUB_TOKEN`/`GH_TOKEN` or `gh auth token` when one is available. Advisories are public, so they work without a token, but anonymous requests are limited to 60 an hour. The GitHub Action passes its `github-token`. Responses are cached per repository under `~/.secureci/advisories/` for 24 hours. Only the first 100 advisories for a repository are read.
+
+- **When the API can't answer** (network down, rate-limited, or a GitHub Enterprise Server without the advisory database), a warning names the repositories that weren't checked. This doesn't fail the run. A cache older than 24 hours is used if there is one, with a warning.
+- **`--offline`** (on both commands) makes no advisory requests and lists no tags. It uses cached advisories at any age, and warns about repositories with nothing cached. For `validate`, `--offline` also reads a remote `--contract` and `--contract-recurse all` actions only from the action cache.
 
 ## Use in CI (GitHub Action)
 

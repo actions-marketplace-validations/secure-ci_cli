@@ -6,6 +6,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+// `validate` and `inventory` query the GitHub Advisory Database (#47).
+// Point the API at a closed local port so no test reaches the real one
+// unless it sets GITHUB_API_URL itself.
+process.env.GITHUB_API_URL = 'http://127.0.0.1:9';
+
 // Black-box integration tests: invoke the built CLI binary as a subprocess,
 // since cli.ts calls `program.parse()`/`process.exit()` at module scope and
 // isn't structured for in-process unit testing (see vitest.config.mts, which
@@ -1233,6 +1238,218 @@ describe('secureci commands', () => {
       expect(fs.readFileSync(wf, 'utf-8')).toContain(
         `    uses: org/workflows/.github/workflows/build.yml@${sha} # v1\n`
       );
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('validate and inventory flag actions with known security advisories (#47)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-adv-cli-'));
+    const fixtures = path.join(root, 'test', 'fixtures', 'advisories');
+    const tjSha = '4'.repeat(40);
+    const untagged = 'org/other@' + '5'.repeat(40);
+    const wf = path.join(dir, 'ci.yml');
+    fs.writeFileSync(
+      wf,
+      [
+        'name: CI',
+        'on: push',
+        'permissions: {}',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - uses: actions/checkout@v4',
+        '      - uses: tj-actions/changed-files@v45.0.7'
+      ].join('\n')
+    );
+    const pinnedWf = path.join(dir, 'pinned.yml');
+    fs.writeFileSync(
+      pinnedWf,
+      [
+        'name: Pinned',
+        'on: push',
+        'permissions: {}',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        `      - uses: ${untagged}`
+      ].join('\n')
+    );
+    // A fake GitHub API: advisories by ?affects=, and tag -> commit.
+    const requests: string[] = [];
+    const server = http.createServer((req, res) => {
+      requests.push(req.url ?? '');
+      const url = new URL(req.url ?? '/', 'http://x');
+      if (url.pathname === '/api/advisories') {
+        const affects = url.searchParams.get('affects');
+        const body =
+          affects === 'tj-actions/changed-files'
+            ? fs.readFileSync(
+                path.join(fixtures, 'tj-actions-changed-files.json'),
+                'utf8'
+              )
+            : affects === 'org/other'
+              ? JSON.stringify([
+                  {
+                    ghsa_id: 'GHSA-xxxx-yyyy-zzzz',
+                    severity: 'critical',
+                    summary: 'Bad',
+                    vulnerabilities: [
+                      {
+                        package: { ecosystem: 'actions', name: 'org/other' },
+                        vulnerable_version_range: '< 2.0.0',
+                        first_patched_version: '2.0.0'
+                      }
+                    ]
+                  }
+                ])
+              : '[]';
+        res.writeHead(200);
+        res.end(body);
+        return;
+      }
+      if (
+        url.pathname === '/api/repos/tj-actions/changed-files/commits/v45.0.7'
+      ) {
+        res.writeHead(200);
+        res.end(tjSha);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve)
+    );
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const home = path.join(dir, 'home');
+    const env = {
+      ...process.env,
+      HOME: home,
+      GITHUB_SERVER_URL: base,
+      GITHUB_API_URL: `${base}/api`,
+      GITHUB_TOKEN: 'test-token',
+      no_proxy: '127.0.0.1,localhost',
+      NO_PROXY: '127.0.0.1,localhost'
+    };
+    const runAsync = (args: string[], runEnv: NodeJS.ProcessEnv = env) =>
+      new Promise<{ status: number; stdout: string; stderr: string }>(
+        (resolve) => {
+          execFile(
+            'node',
+            [cliPath, ...args],
+            { cwd: dir, env: runEnv, encoding: 'utf-8' },
+            (error, stdout, stderr) =>
+              resolve({
+                status: error ? ((error as { code?: number }).code ?? 1) : 0,
+                stdout,
+                stderr
+              })
+          );
+        }
+      );
+
+    try {
+      // validate: the high advisory is an error (fails), with its SARIF rule.
+      const sarif = await runAsync(['validate', wf, '--format', 'sarif']);
+      expect(sarif.status).not.toBe(0);
+      const results = JSON.parse(sarif.stdout).runs[0].results;
+      expect(results).toEqual([
+        expect.objectContaining({
+          ruleId: 'secureci/vulnerable-action',
+          level: 'error',
+          message: {
+            text: expect.stringContaining(
+              'jobs.a.steps[1]: tj-actions/changed-files@v45.0.7 has a known security advisory: GHSA-mrrh-fwg8-r2c3 (CVE-2025-30066, high)'
+            )
+          }
+        })
+      ]);
+      expect(results[0].message.text).toContain(
+        'first patched version: 46.0.1'
+      );
+      // One query per repository, cached under ~/.secureci/advisories.
+      expect(
+        requests.filter((r) => r.startsWith('/api/advisories')).length
+      ).toBe(2);
+      expect(
+        fs.existsSync(
+          path.join(
+            home,
+            '.secureci',
+            'advisories',
+            'tj-actions',
+            'changed-files.json'
+          )
+        )
+      ).toBe(true);
+
+      // The cache answers the next run (and --offline), without the API.
+      requests.length = 0;
+      const text = await runAsync(['validate', wf]);
+      expect(text.status).not.toBe(0);
+      expect(text.stderr).toContain('GHSA-mrrh-fwg8-r2c3');
+      expect(requests).toEqual([]);
+      const cachedOffline = await runAsync(['validate', wf, '--offline']);
+      expect(cachedOffline.status).not.toBe(0);
+
+      // A contract can raise the bar: fail-on: critical lets this pass.
+      const contract = path.join(dir, 'contract.yml');
+      fs.writeFileSync(contract, 'advisories:\n  fail-on: critical\n');
+      const relaxed = await runAsync([
+        'validate',
+        wf,
+        '--contract',
+        contract,
+        '--format',
+        'json'
+      ]);
+      expect(relaxed.status).toBe(0);
+      expect(JSON.parse(relaxed.stdout).errors).toEqual([
+        expect.objectContaining({ severity: 'warning' })
+      ]);
+
+      // --offline with nothing cached: skipped with a warning, not a failure.
+      const fresh = await runAsync(['validate', wf, '--offline'], {
+        ...env,
+        HOME: path.join(dir, 'empty-home')
+      });
+      expect(fresh.status).toBe(0);
+      expect(fresh.stderr).toContain(
+        'Security advisories not checked for actions/checkout, tj-actions/changed-files (offline and not cached)'
+      );
+
+      // inventory --dry-run: the tag resolves, and an untagged SHA pin of
+      // a repository with advisories is an "unknown version", not a finding.
+      requests.length = 0;
+      const inv = await runAsync(['inventory', wf, pinnedWf, '--dry-run']);
+      expect(inv.status).toBe(0);
+      const parsed = JSON.parse(inv.stdout);
+      expect(parsed.advisories).toEqual([
+        expect.objectContaining({
+          uses: 'tj-actions/changed-files@v45.0.7',
+          ghsaId: 'GHSA-mrrh-fwg8-r2c3',
+          severity: 'high',
+          firstPatched: '46.0.1'
+        })
+      ]);
+      expect(parsed.advisoryUnknownVersions).toEqual([
+        { uses: untagged, advisories: ['GHSA-xxxx-yyyy-zzzz'] }
+      ]);
+
+      // Human output: the finding, and the unknown version as info.
+      const human = await runAsync(['inventory', wf, pinnedWf]);
+      expect(human.status).toBe(0);
+      expect(human.stderr).toContain(
+        '[ERROR] tj-actions/changed-files@v45.0.7 has a known security advisory: GHSA-mrrh-fwg8-r2c3'
+      );
+      // v45.0.7 is past the medium advisory's range (< 41.0.0).
+      expect(human.stderr).not.toContain('GHSA-mcph-m25j-8j63');
+      expect(human.stdout).toContain(`${untagged}: unknown version`);
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -80,6 +80,10 @@ secureci pin
   repository that was deleted and re-created, and
   [`secureci pin`](DOCS.md#pin-actions-to-commit-shas-secureci-pin) rewrites
   action tags to commit SHAs in place.
+- **Known vulnerabilities** — `inventory` and `validate` flag actions with
+  published [security advisories](DOCS.md#known-security-advisories) (for
+  example GHSA-mrrh-fwg8-r2c3 in `tj-actions/changed-files`), using the GitHub
+  Advisory Database.
 - **Machine-readable output** — `--format json|sarif` drops straight into CI and
   GitHub code scanning.
 - **Audit evidence** — the contract, `secureci.lock` and reports are plain files

@@ -175,6 +175,13 @@ export interface PipelineContractSpec {
   };
   /** GITHUB_TOKEN permissions policy. */
   permissions?: PermissionsPolicy;
+  /**
+   * Known security advisories (`secureci/vulnerable-action`): findings at
+   * or above `failOn` are errors, the rest warnings. Default: high.
+   */
+  advisories?: {
+    failOn?: 'critical' | 'high' | 'medium' | 'low';
+  };
 }
 
 /** Contract `permissions:` policy; violations are errors. */

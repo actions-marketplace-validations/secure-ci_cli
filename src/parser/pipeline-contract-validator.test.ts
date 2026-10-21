@@ -679,7 +679,9 @@ describe('validatePipelineContract', () => {
         forbidden,
         { recurse: 'all' }
       );
-      expect(fetchActionMock).toHaveBeenCalledWith('org/wrap@v1');
+      expect(fetchActionMock).toHaveBeenCalledWith('org/wrap@v1', {
+        offline: false
+      });
       expect(result.errors).toEqual([
         expect.objectContaining({
           path: 'jobs.build.steps[0] > org/wrap@v1 > steps[0]',
@@ -719,6 +721,26 @@ describe('validatePipelineContract', () => {
           path: 'jobs.release > org/shared/.github/workflows/outer.yml@v1 > jobs.inner > ./.github/workflows/inner.yml > jobs.ship.steps[0]'
         })
       ]);
+    });
+
+    it('with recurse: all and offline, reads remote refs only from the cache', async () => {
+      fetchActionMock.mockResolvedValueOnce(null);
+      fetchRepoFileMock.mockResolvedValueOnce(null);
+      await validatePipelineContract(
+        caller({
+          ...wrapperJob,
+          release: { uses: 'org/shared/.github/workflows/outer.yml@v1' }
+        } as ParsedWorkflow['file']['jobs']),
+        forbidden,
+        { recurse: 'all', offline: true }
+      );
+      expect(fetchActionMock).toHaveBeenCalledWith('org/wrap@v1', {
+        offline: true
+      });
+      expect(fetchRepoFileMock).toHaveBeenCalledWith(
+        'org/shared/.github/workflows/outer.yml@v1',
+        { offline: true }
+      );
     });
 
     it('warns when a remote ref cannot be fetched', async () => {

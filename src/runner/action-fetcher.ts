@@ -90,14 +90,19 @@ export function _resetGithubTokenForTests(): void {
   discoveredToken = undefined;
 }
 
-function serverUrl(): string {
+/** The GitHub server ($GITHUB_SERVER_URL, default https://github.com). */
+export function serverUrl(): string {
   return (process.env.GITHUB_SERVER_URL || 'https://github.com').replace(
     /\/+$/,
     ''
   );
 }
 
-function apiUrl(): string {
+/**
+ * The GitHub REST API base: $GITHUB_API_URL, else api.github.com, or
+ * `<server>/api/v3` for GitHub Enterprise Server.
+ */
+export function apiUrl(): string {
   if (process.env.GITHUB_API_URL) {
     return process.env.GITHUB_API_URL.replace(/\/+$/, '');
   }
@@ -149,8 +154,55 @@ export async function lsRemoteSha(
   );
 }
 
-/** GET a small text response (the API commit lookup). */
-function getText(
+/**
+ * Tag name -> commit SHA from `git ls-remote --tags` output. An annotated
+ * tag's peeled entry (`refs/tags/x^{}`) wins, so every SHA is a commit.
+ */
+export function parseLsRemoteTags(output: string): Map<string, string> {
+  const tags = new Map<string, string>();
+  const peeled = new Set<string>();
+  for (const line of output.split('\n')) {
+    const [sha, ref] = line.trim().split(/\s+/);
+    if (!sha || !FULL_SHA.test(sha) || !ref?.startsWith('refs/tags/')) continue;
+    let name = ref.slice('refs/tags/'.length);
+    const isPeeled = name.endsWith('^{}');
+    if (isPeeled) name = name.slice(0, -3);
+    if (isPeeled || !peeled.has(name)) tags.set(name, sha.toLowerCase());
+    if (isPeeled) peeled.add(name);
+  }
+  return tags;
+}
+
+/**
+ * Every tag of the repository at `url` and the commit it points at, via
+ * anonymous `git ls-remote --tags` (no API rate limit), or undefined if
+ * the repository can't be read.
+ */
+export async function lsRemoteTags(
+  url: string
+): Promise<Map<string, string> | undefined> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['ls-remote', '--tags', url],
+      {
+        encoding: 'utf8',
+        timeout: 15000,
+        maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+      }
+    );
+    return parseLsRemoteTags(stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * GET a small text response (API lookups). Rejects on a non-200 status
+ * with an error carrying `status`.
+ */
+export function getText(
   url: string,
   headers: Record<string, string>,
   timeoutMs: number

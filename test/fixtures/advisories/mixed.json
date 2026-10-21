@@ -1,0 +1,58 @@
+[
+  {
+    "ghsa_id": "GHSA-aaaa-bbbb-cccc",
+    "cve_id": null,
+    "html_url": "https://github.com/advisories/GHSA-aaaa-bbbb-cccc",
+    "summary": "Critical issue in the upload sub-action",
+    "type": "reviewed",
+    "severity": "critical",
+    "withdrawn_at": null,
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "actions",
+          "name": "Example-Org/Toolkit/upload"
+        },
+        "vulnerable_version_range": ">= 2.0.0, <= 2.3.4",
+        "first_patched_version": { "identifier": "2.3.5" }
+      },
+      {
+        "package": { "ecosystem": "npm", "name": "example-org/toolkit" },
+        "vulnerable_version_range": "< 9.0.0",
+        "first_patched_version": "9.0.0"
+      }
+    ]
+  },
+  {
+    "ghsa_id": "GHSA-dddd-eeee-ffff",
+    "cve_id": null,
+    "html_url": "https://github.com/advisories/GHSA-dddd-eeee-ffff",
+    "summary": "Withdrawn: not actually a vulnerability",
+    "type": "reviewed",
+    "severity": "high",
+    "withdrawn_at": "2024-01-02T00:00:00Z",
+    "vulnerabilities": [
+      {
+        "package": { "ecosystem": "actions", "name": "example-org/toolkit" },
+        "vulnerable_version_range": "< 99.0.0",
+        "first_patched_version": null
+      }
+    ]
+  },
+  {
+    "ghsa_id": "GHSA-gggg-hhhh-iiii",
+    "cve_id": "CVE-2024-0001",
+    "html_url": "https://github.com/advisories/GHSA-gggg-hhhh-iiii",
+    "summary": "Low-severity log leak, no fix yet",
+    "type": "reviewed",
+    "severity": "low",
+    "withdrawn_at": null,
+    "vulnerabilities": [
+      {
+        "package": { "ecosystem": "actions", "name": "example-org/toolkit" },
+        "vulnerable_version_range": "= 3.1.0",
+        "first_patched_version": null
+      }
+    ]
+  }
+]

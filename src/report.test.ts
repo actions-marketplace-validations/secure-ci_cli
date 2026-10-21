@@ -106,6 +106,31 @@ describe('SARIF rule ids', () => {
         .results[0].ruleId
     ).toBe('secureci/expression');
   });
+
+  it('uses an explicit rule, e.g. secureci/vulnerable-action', () => {
+    const log = JSON.parse(
+      formatValidation(
+        'ci.yml',
+        {
+          valid: false,
+          errors: [
+            {
+              path: 'jobs.a.steps[0]',
+              message: 'tj-actions/changed-files@v45 has a known advisory',
+              severity: 'error',
+              rule: 'secureci/vulnerable-action'
+            }
+          ]
+        },
+        'sarif'
+      )
+    );
+    expect(log.runs[0].results[0].ruleId).toBe('secureci/vulnerable-action');
+    expect(log.runs[0].tool.driver.rules).toContainEqual({
+      id: 'secureci/vulnerable-action',
+      name: 'Action with a known security advisory'
+    });
+  });
 });
 
 describe('formatReport (multiple files)', () => {

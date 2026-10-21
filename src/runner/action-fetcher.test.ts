@@ -3,6 +3,8 @@ import {
   fetchAction,
   fetchRepoFile,
   lsRemoteSha,
+  lsRemoteTags,
+  parseLsRemoteTags,
   resolveActionSha,
   resolveRepoIdentity,
   repoExists,
@@ -568,9 +570,38 @@ describe('Action Fetcher', () => {
         expect(await lsRemoteSha(work, 'main')).toBe(head);
         expect(await lsRemoteSha(work, 'v1')).toBe(head);
         expect(await lsRemoteSha(work, 'nope')).toBeUndefined();
+        // Every tag, annotated ones peeled to their commit.
+        git('tag', 'v1.0.0');
+        expect(await lsRemoteTags(work)).toEqual(
+          new Map([
+            ['v1', head],
+            ['v1.0.0', head]
+          ])
+        );
+        expect(await lsRemoteTags(path.join(dir, 'missing'))).toBeUndefined();
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
     });
+  });
+
+  it('parses ls-remote tag output, preferring peeled entries', () => {
+    const a = 'a'.repeat(40);
+    const b = 'B'.repeat(40);
+    const output = [
+      `${a}\trefs/tags/v2`,
+      `${b}\trefs/tags/v2^{}`,
+      `${a}\trefs/tags/v3^{}`,
+      `${b}\trefs/tags/v3`,
+      `${a}\trefs/heads/main`,
+      'garbage',
+      ''
+    ].join('\n');
+    expect(parseLsRemoteTags(output)).toEqual(
+      new Map([
+        ['v2', 'b'.repeat(40)],
+        ['v3', a]
+      ])
+    );
   });
 });
