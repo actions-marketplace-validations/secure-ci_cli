@@ -33,8 +33,11 @@ import {
   matrixLabel,
   isTruthySetting,
   expandMatrix,
+  filterMatrix,
+  noMatrixMatchMessage,
   numberSetting,
-  topologicalJobOrder
+  topologicalJobOrder,
+  unknownMatrixKeys
 } from './job-plan';
 import {
   createRunDir,
@@ -127,7 +130,9 @@ async function executeReusableWorkflowJob(
     ...options,
     inputs,
     secrets,
-    job: undefined
+    // --job and --matrix select the caller's jobs, not the called ones.
+    job: undefined,
+    matrix: undefined
   });
 
   return {
@@ -198,6 +203,26 @@ export async function executeWorkflow(
       const jobs: JobResult[] = [];
       const jobResults = new Map<string, NeedsInfo>();
       const jobOrder = topologicalJobOrder(parsed.file.jobs);
+      const matrixFilter = options.matrix ?? {};
+      const definedMatrixKeys = new Set<string>();
+      let matrixUnmatched = false;
+      // --matrix: the combinations of this job to run, with their index in
+      // the full expansion. None left skips the job (and fails the run).
+      const selectCombinations = (
+        jobId: string,
+        combinations: Array<Record<string, unknown>>
+      ): Array<{ index: number; values: Record<string, unknown> }> => {
+        for (const combo of combinations) {
+          Object.keys(combo).forEach((key) => definedMatrixKeys.add(key));
+        }
+        const { keys, matches } = filterMatrix(combinations, matrixFilter);
+        if (keys.length > 0 && matches.length === 0) {
+          logger.warn(noMatrixMatchMessage(jobId, matrixFilter, combinations));
+          jobResults.set(jobId, { result: 'skipped', outputs: {} });
+          matrixUnmatched = true;
+        }
+        return matches;
+      };
 
       for (const jobId of jobOrder) {
         const job = parsed.file.jobs[jobId];
@@ -267,9 +292,11 @@ export async function executeWorkflow(
         // Handle reusable workflow calls (once per matrix combination)
         if (job.uses) {
           const combinations = expandMatrix(job.strategy?.matrix, jobIfCtx);
+          const selected = selectCombinations(jobId, combinations);
+          if (selected.length === 0) continue;
           const callOutputs: Record<string, string> = {};
           let callFailed = false;
-          for (const matrixValues of combinations) {
+          for (const { values: matrixValues } of selected) {
             if (callFailed && job.strategy?.['fail-fast'] !== false) break;
             const label =
               combinations.length > 1
@@ -297,11 +324,13 @@ export async function executeWorkflow(
         }
 
         const matrixCombinations = expandMatrix(job.strategy?.matrix, jobIfCtx);
+        const selected = selectCombinations(jobId, matrixCombinations);
+        if (selected.length === 0) continue;
         const failFast = job.strategy?.['fail-fast'] !== false;
         let matrixFailed = false;
         const jobOutputs: Record<string, string> = {};
 
-        for (const [jobIndex, matrixValues] of matrixCombinations.entries()) {
+        for (const { index: jobIndex, values: matrixValues } of selected) {
           if (matrixFailed && failFast) {
             logger.info(
               `Skipping remaining matrix jobs for ${jobId} (fail-fast)`
@@ -595,9 +624,16 @@ export async function executeWorkflow(
         }
       }
 
+      for (const key of unknownMatrixKeys(matrixFilter, definedMatrixKeys)) {
+        logger.warn(
+          `--matrix ${key}: no matrix job defines this key; it was ignored`
+        );
+      }
+
       const callOutputs = workflowCallOutputs(parsed.file.on);
       return {
-        success: jobs.every((j) => j.success || j.continueOnError),
+        success:
+          !matrixUnmatched && jobs.every((j) => j.success || j.continueOnError),
         jobs,
         duration: Date.now() - startTime,
         ...(callOutputs

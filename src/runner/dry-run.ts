@@ -5,6 +5,25 @@ import {
   actionExpressionErrors,
   workflowExpressionErrors
 } from '../parser/validator';
+import { createContext } from './expression';
+import {
+  expandMatrix,
+  filterMatrix,
+  matrixLabel,
+  MatrixFilter,
+  noMatrixMatchMessage,
+  unknownMatrixKeys
+} from './job-plan';
+
+export interface DryRunOptions {
+  /** Show only this job (`--job`). */
+  job?: string;
+  /** `--matrix key:value` filters. */
+  matrix?: MatrixFilter;
+}
+
+// A matrix expression reading a context a dry run doesn't have.
+const RUN_TIME_MATRIX = /\$\{\{[^}]*\b(?:needs|inputs|vars|github|secrets)\b/;
 
 export interface DryRunResult {
   success: boolean;
@@ -12,6 +31,8 @@ export interface DryRunResult {
   jobs?: Array<{
     name: string;
     steps: string[];
+    /** Matrix combinations that would run, when known before running. */
+    matrix?: string[];
   }>;
   inputs?: string[];
   outputs?: string[];
@@ -22,7 +43,10 @@ export interface DryRunResult {
  * Perform a dry run of a workflow or action file
  * Shows what would be executed without actually running anything
  */
-export function dryRun(filePath: string): DryRunResult {
+export function dryRun(
+  filePath: string,
+  options: DryRunOptions = {}
+): DryRunResult {
   try {
     const parsed = parseFile(filePath);
 
@@ -40,7 +64,7 @@ export function dryRun(filePath: string): DryRunResult {
     }
 
     if (parsed.type === 'workflow') {
-      return dryRunWorkflow(parsed);
+      return dryRunWorkflow(parsed, options);
     } else {
       return dryRunAction(parsed);
     }
@@ -55,14 +79,52 @@ export function dryRun(filePath: string): DryRunResult {
   }
 }
 
-function dryRunWorkflow(parsed: ParsedWorkflow): DryRunResult {
+function dryRunWorkflow(
+  parsed: ParsedWorkflow,
+  options: DryRunOptions
+): DryRunResult {
   const workflow = parsed.file;
+  const filter = options.matrix ?? {};
+  const definedKeys = new Set<string>();
+  let runTimeMatrix = false;
+  let unmatched = false;
 
   logger.info(`Workflow: ${workflow.name}`);
   logger.info(`Trigger: ${JSON.stringify(workflow.on)}`);
 
-  const jobs = Object.entries(workflow.jobs).map(([jobId, job]) => {
+  const selectedJobs = Object.entries(workflow.jobs).filter(
+    ([jobId]) => !options.job || jobId === options.job
+  );
+  const jobs = selectedJobs.flatMap(([jobId, job]) => {
+    // Matrix combinations, as far as they can be known without running.
+    let matrix: string[] | undefined;
+    const rawMatrix = job.strategy?.matrix;
+    const atRunTime =
+      rawMatrix !== undefined &&
+      RUN_TIME_MATRIX.test(JSON.stringify(rawMatrix));
+    if (atRunTime) {
+      runTimeMatrix = true;
+    } else if (rawMatrix !== undefined) {
+      const combinations = expandMatrix(rawMatrix, createContext());
+      combinations.forEach((c) =>
+        Object.keys(c).forEach((k) => definedKeys.add(k))
+      );
+      const { keys, matches } = filterMatrix(combinations, filter);
+      if (keys.length > 0 && matches.length === 0) {
+        logger.warn(noMatrixMatchMessage(jobId, filter, combinations));
+        unmatched = true;
+        return [];
+      }
+      matrix = matches.map((m) => matrixLabel(m.values));
+    }
+
     logger.step(`Job: ${jobId} (${job.name || jobId})`);
+    if (atRunTime) {
+      logger.info('  Matrix: resolved at run time');
+    } else if (matrix) {
+      logger.info(`  Matrix (${matrix.length} combination(s)):`);
+      matrix.forEach((label) => logger.info(`    ${label}`));
+    }
 
     // Handle reusable workflow calls
     if (job.uses) {
@@ -70,10 +132,13 @@ function dryRunWorkflow(parsed: ParsedWorkflow): DryRunResult {
       if (job.with) {
         logger.info(`  With inputs: ${JSON.stringify(job.with)}`);
       }
-      return {
-        name: jobId,
-        steps: [`Calls reusable workflow: ${job.uses}`]
-      };
+      return [
+        {
+          name: jobId,
+          steps: [`Calls reusable workflow: ${job.uses}`],
+          ...(matrix ? { matrix } : {})
+        }
+      ];
     }
 
     // Handle regular jobs
@@ -100,11 +165,22 @@ function dryRunWorkflow(parsed: ParsedWorkflow): DryRunResult {
       return stepDesc;
     });
 
-    return {
-      name: jobId,
-      steps
-    };
+    return [{ name: jobId, steps, ...(matrix ? { matrix } : {}) }];
   });
+
+  // A key might belong to a matrix only known at run time.
+  if (!runTimeMatrix) {
+    for (const key of unknownMatrixKeys(filter, definedKeys)) {
+      logger.warn(
+        `--matrix ${key}: no matrix job defines this key; it was ignored`
+      );
+    }
+  }
+
+  if (unmatched) {
+    logger.error('Dry run failed: a --matrix filter matched no combination');
+    return { success: false, type: 'workflow', jobs };
+  }
 
   logger.success('Dry run completed successfully');
 

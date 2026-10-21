@@ -3390,6 +3390,132 @@ jobs:
     });
   });
 
+  describe('--matrix filter (#50)', () => {
+    let dir: string;
+    let file: string;
+    let warnings: string[];
+    beforeEach(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-matrix-filter-'));
+      file = path.join(dir, 'wf.yml');
+      warnings = [];
+      vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+        warnings.push(args.join(' '));
+      });
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      fs.writeFileSync(
+        file,
+        `
+name: Matrix
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 20]
+        os: [linux, mac]
+    steps:
+      - run: echo "node=\${{ matrix.node }} os=\${{ matrix.os }} index=\${{ strategy.job-index }}/\${{ strategy.job-total }}"
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo lint
+  after:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo after
+  call:
+    strategy:
+      matrix:
+        node: [18, 20]
+    uses: ./called.yml
+    with:
+      who: \${{ matrix.node }}
+`
+      );
+      fs.writeFileSync(
+        path.join(dir, 'called.yml'),
+        `
+name: Called
+on:
+  workflow_call:
+    inputs:
+      who:
+        type: string
+jobs:
+  inner:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "called \${{ inputs.who }}"
+`
+      );
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('runs only the matching combinations, keeping their names and strategy values', async () => {
+      const result = await executeWorkflow(file, {
+        matrix: { node: ['20'], os: ['mac'] }
+      });
+      expect(result.success).toBe(true);
+      expect(result.jobs.map((j) => j.job)).toEqual([
+        'test (node: 20, os: mac)',
+        'lint',
+        'call (node: 20)',
+        'after'
+      ]);
+      expect(result.jobs[0].steps[0].output).toContain(
+        'node=20 os=mac index=3/4'
+      );
+      expect(result.jobs[2].steps[0].output).toContain('called 20');
+      expect(warnings).toEqual([]);
+    });
+
+    it('applies with --job', async () => {
+      const result = await executeWorkflow(file, {
+        job: 'test',
+        matrix: { node: ['18'] }
+      });
+      expect(result.jobs.map((j) => j.job)).toEqual([
+        'test (node: 18, os: linux)',
+        'test (node: 18, os: mac)'
+      ]);
+    });
+
+    it('skips a job with no matching combination, warns, and fails the run', async () => {
+      const result = await executeWorkflow(file, {
+        matrix: { node: ['16'] }
+      });
+      expect(result.success).toBe(false);
+      expect(result.jobs.map((j) => [j.job, j.success])).toEqual([
+        ['lint', true]
+      ]);
+      const text = warnings.join('\n');
+      expect(text).toContain(
+        'No matrix combination of job "test" matches --matrix node:16; skipping it. Available combinations:'
+      );
+      expect(text).toContain('  node: 20, os: mac');
+      expect(text).toContain(
+        'No matrix combination of job "call" matches --matrix node:16'
+      );
+    });
+
+    it('warns about a key no matrix job defines, and runs everything', async () => {
+      const result = await executeWorkflow(file, {
+        job: 'test',
+        matrix: { nod: ['20'] }
+      });
+      expect(result.success).toBe(true);
+      expect(result.jobs).toHaveLength(4);
+      expect(warnings.join('\n')).toContain(
+        '--matrix nod: no matrix job defines this key; it was ignored'
+      );
+    });
+  });
+
   describe('runner fidelity (#36)', () => {
     let dir: string;
     beforeEach(() => {

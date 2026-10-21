@@ -60,6 +60,7 @@ starts.
 secureci run .github/workflows/ci.yml           # executes for real
 secureci run .github/workflows/ci.yml --dry-run # simulate, no execution
 secureci run .github/workflows/ci.yml --job build
+secureci run .github/workflows/test.yml --job test --matrix node:20 --matrix os:ubuntu-latest
 
 # Validate (optionally against a pipeline contract), human or machine output
 secureci validate .github/workflows/ci.yml
@@ -778,6 +779,26 @@ A job runs once per matrix combination (sequentially), with `matrix.*` and `stra
 - The matrix, or any axis, can be an expression, e.g. `matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}`.
 - `fail-fast` (default `true`) skips the remaining combinations after a failure. Job-level `continue-on-error` (e.g. `${{ matrix.experimental }}`) lets a combination fail without failing the job, its dependents or the run.
 - `max-parallel` is accepted but has no effect, since combinations run one after another.
+- `run --dry-run` lists each matrix job's combinations (or notes that the matrix is only known at run time), and, like `run`, shows only the `--job` job when one is given.
+
+#### Running a subset of combinations (`--matrix`)
+
+```bash
+secureci run .github/workflows/test.yml --job test --matrix node:20 --matrix os:ubuntu-latest
+secureci run .github/workflows/test.yml --matrix node:18 --matrix node:20 --dry-run
+```
+
+`--matrix key:value` (repeatable) runs only the combinations that match, for both `run` and `run --dry-run`:
+
+- Combinations are filtered **after** `include`/`exclude` expansion, so an excluded combination can't be selected, while combinations added by `include` (and keys merged in by it) can.
+- The argument is split on the **first** colon, so values may contain colons: `--matrix image:node:20-alpine`.
+- Values compare as text, as they appear in the job name: `--matrix node:20` matches `20` and `"20"`, `--matrix experimental:true` matches the boolean `true`, and object values compare as compact JSON (`--matrix 'cfg:{"arch":"arm64"}'`). Note that YAML reads `3.10` as the number `3.1`, as on GitHub; quote it in the workflow to keep `3.10`.
+- Different keys must all match; repeating a key accepts any of its values (`--matrix node:18 --matrix node:20`).
+- A key applies only to jobs whose matrix defines it; jobs without a matrix, or whose matrix doesn't have that key, run as usual. A key that no matrix job defines is ignored with a warning (in `--dry-run`, only when every matrix is known before running).
+- The selected combinations keep their full names and `strategy.job-index` / `strategy.job-total` from the whole matrix, so they behave as they would on GitHub.
+- When no combination of a job matches, SecureCI warns, lists the available combinations, and skips the job (and the jobs that need it). The run then **exits non-zero**, so a typo in a CI script doesn't pass silently.
+- Matrices from expressions (e.g. `${{ fromJSON(needs.setup.outputs.matrix) }}`) are filtered once they're resolved during the run; `--dry-run` shows them as resolved at run time and doesn't filter them.
+- The filter applies to the workflow's own jobs (including a job that calls a reusable workflow with a matrix), not to the jobs inside a called workflow.
 
 ### Reusable workflows (`jobs.<id>.uses:`)
 

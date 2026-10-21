@@ -2,6 +2,7 @@
 
 import { Command, Option } from 'commander';
 import { dryRun } from './runner/dry-run';
+import { MatrixFilter, parseMatrixFilter } from './runner/job-plan';
 import { executeWorkflow } from './runner/executor';
 import {
   clearActionCache,
@@ -177,6 +178,10 @@ program
   )
   .option('-j, --job <name>', 'Run only this job')
   .option(
+    '--matrix <key:value...>',
+    'Run only the matrix combinations whose key has this value (as shown in the job name). Repeat for more keys (all must match) or values (any matches)'
+  )
+  .option(
     '--offline',
     'Use only cached remote actions and workflows; never download'
   )
@@ -220,8 +225,16 @@ program
     }
     requireFile(file);
 
+    let matrix: MatrixFilter;
+    try {
+      matrix = parseMatrixFilter(options.matrix);
+    } catch (error) {
+      logger.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+
     if (options.dryRun) {
-      const result = dryRun(file);
+      const result = dryRun(file, { job: options.job, matrix });
       if (!result.success) {
         process.exit(1);
       }
@@ -274,6 +287,7 @@ program
         eventPath: options.eventPath,
         eventName: options.eventName,
         job: options.job,
+        matrix,
         localCheckout: options.localCheckout,
         offline: options.offline,
         verbose: program.opts().verbose,

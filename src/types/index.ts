@@ -231,6 +231,11 @@ export interface RunOptions {
   inputs?: Record<string, string>;
   secrets?: Record<string, string>;
   job?: string;
+  /**
+   * `--matrix key:value` filters: run only the matrix combinations whose
+   * value (as text) for each key is one of the given ones.
+   */
+  matrix?: Record<string, string[]>;
   verbose?: boolean;
   /** Container runtime to use for isolating `run:` steps. Default: 'docker'. */
   containerRuntime?: 'auto' | 'docker' | 'podman' | 'containerd' | 'host';

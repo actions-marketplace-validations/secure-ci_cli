@@ -537,6 +537,100 @@ describe('secureci commands', () => {
     expect(result.stdout + result.stderr).not.toMatch(/not a dry run/i);
   });
 
+  describe('run --matrix (#50)', () => {
+    const matrixWf = () => {
+      const file = path.join(tempDir, 'matrix.yml');
+      fs.writeFileSync(
+        file,
+        [
+          'name: Matrix',
+          'on: push',
+          'jobs:',
+          '  test:',
+          '    runs-on: ubuntu-latest',
+          '    strategy:',
+          '      matrix:',
+          '        node: [18, 20]',
+          '        image: ["node:18-alpine", "node:20-alpine"]',
+          '    steps:',
+          '      - run: echo "combo ${{ matrix.node }} ${{ matrix.image }}"',
+          '  lint:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - run: echo lint'
+        ].join('\n')
+      );
+      return file;
+    };
+
+    it('dry-runs only the selected combinations (split on the first colon)', () => {
+      const result = run(
+        [
+          'run',
+          matrixWf(),
+          '--dry-run',
+          '--job',
+          'test',
+          '--matrix',
+          'node:20',
+          '--matrix',
+          'image:node:20-alpine'
+        ],
+        tempDir
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('node: 20, image: node:20-alpine');
+      expect(result.stdout).not.toContain('node: 18');
+      expect(result.stdout).not.toContain('Job: lint');
+    });
+
+    it('runs only the selected combinations', () => {
+      const result = run(
+        [
+          'run',
+          matrixWf(),
+          '--container-runtime',
+          'host',
+          '--job',
+          'test',
+          '--matrix',
+          'node:18',
+          '--matrix',
+          'image:node:18-alpine'
+        ],
+        tempDir
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('combo 18 node:18-alpine');
+      expect(result.stdout).not.toContain('combo 20');
+    });
+
+    it('exits non-zero, listing the combinations, when none matches', () => {
+      for (const extra of [['--dry-run'], ['--container-runtime', 'host']]) {
+        const result = run(
+          ['run', matrixWf(), ...extra, '--matrix', 'node:16'],
+          tempDir
+        );
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          'No matrix combination of job "test" matches --matrix node:16'
+        );
+        expect(result.stderr).toContain('node: 20, image: node:20-alpine');
+      }
+    });
+
+    it('rejects a --matrix argument without a colon', () => {
+      const result = run(
+        ['run', matrixWf(), '--dry-run', '--matrix', 'node=20'],
+        tempDir
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        'Invalid --matrix argument "node=20": expected key:value'
+      );
+    });
+  });
+
   it('prints and clears the action cache with secureci cache', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cache-home-'));
     const env = { ...process.env, HOME: home };
