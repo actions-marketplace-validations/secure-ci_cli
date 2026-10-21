@@ -163,3 +163,35 @@ describe('formatReport with a contract', () => {
     ).toBeUndefined();
   });
 });
+
+describe('SARIF rule ids', () => {
+  const ruleOf = (error: ValidationResult['errors'][number]): string =>
+    JSON.parse(
+      formatValidation('wf.yml', { valid: true, errors: [error] }, 'sarif')
+    ).runs[0].results[0].ruleId;
+
+  it('uses an explicit rule over the one derived from the path', () => {
+    expect(
+      ruleOf({
+        path: 'permissions',
+        message: 'no permissions',
+        severity: 'warning',
+        rule: 'secureci/permissions'
+      })
+    ).toBe('secureci/permissions');
+  });
+
+  it('still derives the rule from the path when none is set', () => {
+    expect(
+      ruleOf({ path: 'required[0]', message: 'm', severity: 'error' })
+    ).toBe('secureci/contract');
+  });
+
+  it('declares secureci/permissions in the driver rules', () => {
+    const log = JSON.parse(formatValidation('wf.yml', good, 'sarif'));
+    expect(log.runs[0].tool.driver.rules).toContainEqual({
+      id: 'secureci/permissions',
+      name: 'GITHUB_TOKEN permissions'
+    });
+  });
+});

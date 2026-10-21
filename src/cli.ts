@@ -15,7 +15,11 @@ import {
 } from './runner/action-fetcher';
 import { Progress } from './utils/progress';
 import { resolveContractSource } from './contract-source';
-import { validateWorkflow, validateAction } from './parser/validator';
+import {
+  mergeValidationResults,
+  validateWorkflow,
+  validateAction
+} from './parser/validator';
 import { parseFile } from './parser/workflow-parser';
 import { parsePipelineContract } from './parser/pipeline-contract-parser';
 import {
@@ -705,10 +709,7 @@ async function validateOneFile(
       const contractResult = await validatePipelineContract(parsed, spec, {
         recurse
       });
-      result = {
-        valid: result.valid && contractResult.valid,
-        errors: [...result.errors, ...contractResult.errors]
-      };
+      result = mergeValidationResults(result, contractResult);
     }
   }
   return result;

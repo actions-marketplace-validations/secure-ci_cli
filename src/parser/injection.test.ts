@@ -34,6 +34,8 @@ describe('template injection checks', () => {
     write('.github/workflows/ci.yml', [
       'name: CI',
       `on: ${on}`,
+      // Least-privilege token, so only injection findings are reported.
+      'permissions: {}',
       'jobs:',
       '  a:',
       '    runs-on: ubuntu-latest',

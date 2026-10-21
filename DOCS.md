@@ -13,9 +13,11 @@ introduction and install steps, see the [README](README.md).
   - [`actions/checkout`](#actionscheckout)
 - [Global configuration](#global-configuration)
 - [Template injection checks (`validate`)](#template-injection-checks-validate)
+- [GITHUB_TOKEN permissions (`validate`)](#github_token-permissions-validate)
 - [Pipeline contracts (`validate --contract`)](#pipeline-contracts-validate---contract)
   - [Supply-chain pinning](#supply-chain-pinning)
   - [Requiring a lockfile](#requiring-a-lockfile)
+  - [Permissions policy](#permissions-policy)
   - [Contracts from another repository](#contracts-from-another-repository)
   - [Contract limitations (v1 scope)](#contract-limitations-v1-scope)
 - [Machine-readable output (`--format`)](#machine-readable-output---format)
@@ -207,6 +209,40 @@ What is checked:
 
 Limitations: data that reaches a script indirectly (for example an untrusted value written to a step output or to `env:` and then expanded as `${{ steps.x.outputs.y }}` or `${{ env.Y }}`) is not tracked. `github.ref` / `github.ref_name` are not flagged, because only someone with push access to the repository chooses those names.
 
+## GITHUB_TOKEN permissions (`validate`)
+
+Every job gets a `GITHUB_TOKEN`. Without a `permissions:` block it gets the repository's (or organization's) default permissions, which on many repositories is read/write on every scope. `secureci validate` flags workflows that leave the token broader than it needs to be. These findings are **warnings** (rule `secureci/permissions` in SARIF): they're reported, but validation still passes. A [contract](#permissions-policy) can make them errors.
+
+| Finding                        | Reported at             | When                                                                                                                                                           |
+| ------------------------------ | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No permissions declared        | `permissions`           | The workflow has no top-level `permissions:` and at least one job has none either. The message names those jobs. A job with its own `permissions:` is covered. |
+| `write-all` at the top level   | `permissions`           | `permissions: write-all` gives every job write access to every scope.                                                                                          |
+| A write scope at the top level | `permissions.<scope>`   | For example `contents: write` in the top-level block, which applies to every job. Declare it on the job that needs it instead.                                 |
+| `write-all` on a job           | `jobs.<id>.permissions` | The job's token can write to every scope. List only the scopes it needs.                                                                                       |
+
+- **Fine as they are:** `permissions: {}` (no access), `permissions: read-all`, and any mapping of `read` / `none` scopes, at either level. Write scopes on a job (not `write-all`) are not flagged; that's where they belong.
+- **Reusable workflows are exempt from the missing-block check.** A workflow whose only trigger is `on: workflow_call` runs with the token of the job that calls it, so the caller is where permissions are set. If it has any other trigger as well (for example `workflow_dispatch`), it is checked like any other workflow. The `write-all` and write-scope checks still apply to reusable workflows.
+- **Job-level permissions replace the top-level ones**, they don't add to them. When you move a write scope to a job, repeat the read scopes that job still needs:
+
+```yaml
+permissions:
+  contents: read # every job: read-only
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # only this job can push tags and create releases
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run release
+```
+
 ## Pipeline contracts (`validate --contract`)
 
 In organizations with a central repo of reusable workflows/actions, a platform team can define a minimum pipeline standard — required actions, forbidden actions, and (optionally) the order required actions must run in — and have SecureCI check a caller's workflow against it.
@@ -273,6 +309,24 @@ lockfile:
 
 `--contract` runs the normal syntax validation too, and currently applies to workflow files only (not standalone actions, since the contract is about a job/step sequence). Passing `--contract` against an action file fails with a clear error.
 
+### Permissions policy
+
+A contract can turn the [GITHUB_TOKEN permissions](#github_token-permissions-validate) checks into a policy whose violations are **errors**:
+
+```yaml
+permissions:
+  required: true # every workflow (or every job) must declare permissions
+  max: # ceiling for the top-level block; write scopes only per job
+    contents: read
+```
+
+- **`required: true`**: a workflow without a top-level `permissions:` block in which any job also has none is an **error** at `permissions`, naming the jobs. Declaring permissions on every job satisfies it too.
+- **`max`**: a ceiling for the workflow's top-level `permissions:`. Each scope there must be at or below its level in `max`, and **scopes not listed in `max` are capped at `none`**. A scope above the ceiling is an **error** at `permissions.<scope>`. `read-all` and `write-all` at the top level are errors unless `max` allows that level for every scope. Job-level permissions are not capped, so write scopes go on the jobs that need them. A workflow with no top-level block, where any job relies on the default token, is also an error, since that token isn't held to the ceiling.
+- **Workflows whose only trigger is `workflow_call`** need no top-level block for either option, as above. A top-level block they do declare is still held to `max`.
+- When the contract turns a warning into an error, only the error is reported. Write scopes and `write-all` that the contract doesn't cover stay warnings.
+- Only the validated workflow file is checked, not the reusable workflows it calls; validate those files too (the [GitHub Action](#use-in-ci-github-action) validates every file in `.github/workflows` by default).
+- The contract file is checked strictly: `permissions` accepts only `required` (`true` or `false`) and `max`, and `max` takes GitHub's scope names (`actions`, `artifact-metadata`, `attestations`, `checks`, `contents`, `deployments`, `discussions`, `id-token`, `issues`, `models`, `packages`, `pages`, `pull-requests`, `repository-projects`, `security-events`, `statuses`) with the values `read`, `write` or `none`. Anything else fails with an error naming the key.
+
 ### Contracts from another repository
 
 A platform team can keep one contract in a central repository and have every repo check against it. Pass `--contract` the same `owner/repo/path@ref` form as a remote reusable workflow:
@@ -305,7 +359,7 @@ secureci validate .github/workflows/ci.yml --contract contract.yml --format sari
 ```
 
 - **`json`**: `{ file, valid, errors: [{ path, message, severity }] }`.
-- **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`, `secureci/injection`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
+- **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`, `secureci/injection`, `secureci/permissions`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
 
 ## Action inventory and drift (`secureci inventory`)
 
@@ -388,10 +442,12 @@ name: SecureCI
 on: [pull_request]
 permissions:
   contents: read
-  security-events: write # for the SARIF upload
 jobs:
   secureci:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # for the SARIF upload
     steps:
       - uses: actions/checkout@v4
       - uses: secure-ci/cli@v0.4.0 # a release tag; see below
@@ -419,7 +475,7 @@ secureci init workflow --no-upload                        # keep contents: read 
 secureci init workflow --output .github/workflows/ci-security.yml
 ```
 
-It refuses to overwrite an existing file unless you pass `--force`, and the file it writes passes `secureci validate`.
+It refuses to overwrite an existing file unless you pass `--force`, and the file it writes passes `secureci validate` with no findings: `contents: read` at the top level, and `security-events: write` (for the upload) on the job.
 
 ## Using output as audit evidence
 

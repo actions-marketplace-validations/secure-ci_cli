@@ -1,6 +1,12 @@
 import * as fs from 'fs';
 import * as YAML from 'yaml';
-import { PipelineContractEntry, PipelineContractSpec } from '../types';
+import {
+  PermissionLevel,
+  PermissionsPolicy,
+  PipelineContractEntry,
+  PipelineContractSpec
+} from '../types';
+import { GITHUB_TOKEN_SCOPES } from './permissions';
 
 /**
  * Parse a pipeline contract file (`secureci validate --contract <file>`).
@@ -92,6 +98,9 @@ export function parsePipelineContract(filePath: string): PipelineContractSpec {
       result.lockfile.required = lockfile.required;
     }
   }
+  if (spec.permissions !== undefined) {
+    result.permissions = parsePermissionsPolicy(spec.permissions);
+  }
   if (spec['allowed-owners'] !== undefined) {
     result.allowedOwners = parseStringList(
       spec['allowed-owners'],
@@ -100,6 +109,59 @@ export function parsePipelineContract(filePath: string): PipelineContractSpec {
   }
 
   return result;
+}
+
+const isMapping = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * ```yaml
+ * permissions:
+ *   required: true          # every workflow (or job) declares permissions
+ *   max: { contents: read } # ceiling for workflow-level permissions
+ * ```
+ */
+function parsePermissionsPolicy(value: unknown): PermissionsPolicy {
+  if (!isMapping(value)) {
+    throw new Error('Contract "permissions" must be a mapping');
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== 'required' && key !== 'max') {
+      throw new Error(
+        `Contract "permissions" has an unknown key "${key}" (expected "required" or "max")`
+      );
+    }
+  }
+  const policy: PermissionsPolicy = {};
+  if (value.required !== undefined) {
+    if (typeof value.required !== 'boolean') {
+      throw new Error('Contract "permissions.required" must be true or false');
+    }
+    policy.required = value.required;
+  }
+  if (value.max !== undefined) {
+    if (!isMapping(value.max)) {
+      throw new Error(
+        'Contract "permissions.max" must be a mapping of scope to read, write or none'
+      );
+    }
+    const max: Record<string, PermissionLevel> = {};
+    for (const [scope, level] of Object.entries(value.max)) {
+      if (!GITHUB_TOKEN_SCOPES.includes(scope)) {
+        throw new Error(
+          `Contract "permissions.max" has an unknown scope "${scope}" (expected one of: ${GITHUB_TOKEN_SCOPES.join(', ')})`
+        );
+      }
+      if (level !== 'read' && level !== 'write' && level !== 'none') {
+        throw new Error(
+          `Contract "permissions.max.${scope}" must be "read", "write" or "none", got "${String(level)}"`
+        );
+      }
+      max[scope] = level;
+    }
+    policy.max = max;
+  }
+  return policy;
 }
 
 function parseStringList(value: unknown, section: string): string[] {

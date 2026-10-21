@@ -9,12 +9,24 @@
 export interface WorkflowFile {
   name: string;
   on: WorkflowTrigger;
+  /** Default GITHUB_TOKEN permissions for every job. */
+  permissions?: Permissions;
   env?: Record<string, string>;
   defaults?: WorkflowDefaults;
   jobs: Record<string, Job>;
 }
 
 export type WorkflowTrigger = string | string[] | Record<string, unknown>;
+
+/** Access a GITHUB_TOKEN permission scope grants. */
+export type PermissionLevel = 'read' | 'write' | 'none';
+
+/**
+ * `permissions:` at the workflow or job level: a shorthand for every scope,
+ * or scope -> level (unlisted scopes get `none`).
+ */
+export type Permissions =
+  'read-all' | 'write-all' | Partial<Record<string, PermissionLevel>>;
 
 export interface WorkflowDefaults {
   run?: {
@@ -31,6 +43,8 @@ export interface Job {
   secrets?: Record<string, string> | 'inherit';
   needs?: string | string[];
   if?: string | boolean;
+  /** GITHUB_TOKEN permissions for this job; replaces the workflow's. */
+  permissions?: Permissions;
   env?: Record<string, string>;
   defaults?: WorkflowDefaults;
   steps?: Step[];
@@ -157,6 +171,19 @@ export interface PipelineContractSpec {
   lockfile?: {
     required?: boolean;
   };
+  /** GITHUB_TOKEN permissions policy. */
+  permissions?: PermissionsPolicy;
+}
+
+/** Contract `permissions:` policy; violations are errors. */
+export interface PermissionsPolicy {
+  /** Every workflow (or every job) must declare `permissions:`. */
+  required?: boolean;
+  /**
+   * Ceiling for workflow-level permissions (unlisted scopes: `none`); write
+   * scopes beyond it must be granted per job.
+   */
+  max?: Record<string, PermissionLevel>;
 }
 
 export interface PipelineContractEntry {

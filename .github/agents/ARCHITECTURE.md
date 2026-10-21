@@ -33,6 +33,7 @@ src/
 │   ├── workflow-parser.ts            # Parse workflow AND action YAML (parseFile)
 │   ├── validator.ts                  # Syntax validation + expression checks
 │   ├── injection.ts                  # Template injection: untrusted ${{ }} in run:/github-script (recursive)
+│   ├── permissions.ts                # GITHUB_TOKEN permissions checks (default + contract policy)
 │   ├── pipeline-contract-parser.ts   # Parse --contract files
 │   └── pipeline-contract-validator.ts# Check a workflow against a contract (recursive)
 ├── runner/
@@ -77,6 +78,10 @@ and exit codes live here. Keep command wiring thin; put logic in the layer below
   (`workflowExpressionErrors`, `actionExpressionErrors`) and the template
   injection check from `injection.ts`, which uses `expressionDataFlow()` in
   `runner/expression.ts` to see which contexts reach a `run:` script.
+- `permissions.ts` — GITHUB_TOKEN `permissions:` checks: default warnings
+  (run by `validateWorkflow`) and the contract `permissions:` policy (errors,
+  run by the contract validator). `mergeValidationResults` drops a warning an
+  error with the same rule and path supersedes.
 - `pipeline-contract-{parser,validator}.ts` — parse a `--contract` file and check
   a workflow against it, recursing into local (and, opt-in, remote) composite
   actions and reusable workflows.

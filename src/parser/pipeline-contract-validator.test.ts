@@ -1007,3 +1007,45 @@ describe('lockfile.required', () => {
     expect(errs[0].message).toMatch(/Could not read secureci.lock/);
   });
 });
+
+describe('permissions policy (#45)', () => {
+  const steps = [{ run: 'echo ok' }];
+
+  it('reports contract permission violations as errors', async () => {
+    const result = await validatePipelineContract(
+      workflow({ build: { 'runs-on': 'x', steps } }),
+      { permissions: { required: true } },
+      { recurse: 'none' }
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        path: 'permissions',
+        severity: 'error',
+        rule: 'secureci/permissions'
+      })
+    ]);
+  });
+
+  it('enforces the top-level ceiling', async () => {
+    const wf = workflow({ build: { 'runs-on': 'x', steps } });
+    wf.file.permissions = { contents: 'write' };
+    const result = await validatePipelineContract(
+      wf,
+      { permissions: { max: { contents: 'read' } } },
+      { recurse: 'none' }
+    );
+    expect(result.errors.map((e) => [e.path, e.severity])).toEqual([
+      ['permissions.contents', 'error']
+    ]);
+  });
+
+  it('adds no permission findings without a permissions policy', async () => {
+    const result = await validatePipelineContract(
+      workflow({ build: { 'runs-on': 'x', steps } }),
+      {},
+      { recurse: 'none' }
+    );
+    expect(result.errors).toEqual([]);
+  });
+});

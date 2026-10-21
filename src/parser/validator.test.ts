@@ -1,4 +1,8 @@
-import { validateWorkflow, validateAction } from './validator';
+import {
+  mergeValidationResults,
+  validateWorkflow,
+  validateAction
+} from './validator';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -31,6 +35,7 @@ describe('Validator', () => {
         [
           'name: If',
           'on: push',
+          'permissions: {}',
           'jobs:',
           '  a:',
           '    runs-on: ubuntu-latest',
@@ -63,6 +68,64 @@ describe('Validator', () => {
       }
     });
 
+    describe('GITHUB_TOKEN permissions (#45)', () => {
+      const write = (content: string[]): { dir: string; file: string } => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-perm-'));
+        const file = path.join(dir, 'wf.yml');
+        fs.writeFileSync(file, content.join('\n'));
+        return { dir, file };
+      };
+      const jobs = [
+        'jobs:',
+        '  build:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: echo ok'
+      ];
+
+      it('warns about a missing permissions block without failing validation', () => {
+        const { dir, file } = write(['name: P', 'on: push', ...jobs]);
+        try {
+          const result = validateWorkflow(file);
+          expect(result.valid).toBe(true);
+          expect(result.errors).toEqual([
+            expect.objectContaining({
+              path: 'permissions',
+              severity: 'warning',
+              rule: 'secureci/permissions'
+            })
+          ]);
+        } finally {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      });
+
+      it('warns about write-all and workflow-level write scopes', () => {
+        const { dir, file } = write([
+          'name: P',
+          'on: push',
+          'permissions: write-all',
+          ...jobs
+        ]);
+        try {
+          const result = validateWorkflow(file);
+          expect(result.valid).toBe(true);
+          expect(result.errors.map((e) => e.path)).toEqual(['permissions']);
+        } finally {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      });
+
+      it('accepts a reusable workflow without a permissions block', () => {
+        const { dir, file } = write(['name: P', 'on: workflow_call', ...jobs]);
+        try {
+          expect(validateWorkflow(file).errors).toEqual([]);
+        } finally {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      });
+    });
+
     it('should validate job structure', () => {
       const workflowPath = path.join(fixturesDir, 'simple-workflow.yml');
       const result = validateWorkflow(workflowPath);
@@ -93,6 +156,56 @@ describe('Validator', () => {
       const result = validateAction(actionPath);
 
       expect(result.valid).toBe(true);
+    });
+  });
+
+  describe('mergeValidationResults', () => {
+    const warning = {
+      path: 'permissions',
+      message: 'w',
+      severity: 'warning' as const,
+      rule: 'secureci/permissions'
+    };
+    const error = { ...warning, message: 'e', severity: 'error' as const };
+
+    it('drops a warning an error at the same path and rule supersedes', () => {
+      expect(
+        mergeValidationResults(
+          { valid: true, errors: [warning] },
+          { valid: false, errors: [error] }
+        )
+      ).toEqual({ valid: false, errors: [error] });
+    });
+
+    it('keeps warnings at other paths, of other rules, or without a rule', () => {
+      const other = { ...warning, path: 'permissions.contents' };
+      const otherRule = { ...warning, rule: 'secureci/contract' };
+      const noRule = {
+        path: 'permissions',
+        message: 'x',
+        severity: 'warning' as const
+      };
+      const noRuleError = { ...noRule, severity: 'error' as const };
+      const merged = mergeValidationResults(
+        { valid: true, errors: [other, otherRule, noRule] },
+        { valid: false, errors: [error, noRuleError] }
+      );
+      expect(merged.errors).toEqual([
+        other,
+        otherRule,
+        noRule,
+        error,
+        noRuleError
+      ]);
+    });
+
+    it('is valid only when every result is valid', () => {
+      expect(
+        mergeValidationResults(
+          { valid: true, errors: [] },
+          { valid: true, errors: [warning] }
+        ).valid
+      ).toBe(true);
     });
   });
 });

@@ -131,6 +131,28 @@ describe('secureci validate --contract', () => {
     expect(result.stderr).toContain('Forbidden action "org/security-scan"');
   });
 
+  it('turns the permissions warning into a single contract error (#45)', () => {
+    const contract = write(
+      'permissions-contract.yml',
+      'permissions:\n  required: true\n'
+    );
+
+    const result = run([
+      'validate',
+      workflow,
+      '--contract',
+      contract,
+      '--format',
+      'json'
+    ]);
+
+    expect(result.status).toBe(1);
+    const report = JSON.parse(result.stdout);
+    expect(report.errors).toEqual([
+      expect.objectContaining({ path: 'permissions', severity: 'error' })
+    ]);
+  });
+
   it('fails when --contract is used against an action file', () => {
     const contract = write(
       'action-contract.yml',
@@ -386,9 +408,23 @@ describe('secureci commands', () => {
     const json = run(['validate', good, '--format', 'json']);
     expect(json.status).toBe(0);
     const parsed = JSON.parse(json.stdout);
-    expect(parsed).toMatchObject({ valid: true, errors: [] });
+    // The workflow declares no permissions: a warning, which doesn't fail
+    // validation (#45).
+    expect(parsed).toMatchObject({
+      valid: true,
+      errors: [{ path: 'permissions', severity: 'warning' }]
+    });
     // Only the JSON object is printed, nothing else.
     expect(json.stdout.trim().startsWith('{')).toBe(true);
+
+    const goodSarif = run(['validate', good, '--format', 'sarif']);
+    expect(goodSarif.status).toBe(0);
+    expect(JSON.parse(goodSarif.stdout).runs[0].results).toEqual([
+      expect.objectContaining({
+        ruleId: 'secureci/permissions',
+        level: 'warning'
+      })
+    ]);
 
     const bad = path.join(tempDir, 'bad.yml');
     fs.writeFileSync(
