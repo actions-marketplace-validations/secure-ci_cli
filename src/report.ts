@@ -5,6 +5,7 @@ export type ReportFormat = 'text' | 'json' | 'sarif';
 
 /** A SARIF rule id per error, so code-scanning can group findings. */
 function ruleIdFor(error: ValidationError): string {
+  if (error.rule) return error.rule;
   if (/^required\[|^forbidden\[/.test(error.path)) return 'secureci/contract';
   if (/\.if$|\bif:/.test(error.path)) return 'secureci/expression';
   return 'secureci/validation';
@@ -13,7 +14,8 @@ function ruleIdFor(error: ValidationError): string {
 const RULES: Record<string, string> = {
   'secureci/validation': 'Workflow or action structure',
   'secureci/contract': 'Pipeline contract',
-  'secureci/expression': 'Expression / if: condition'
+  'secureci/expression': 'Expression / if: condition',
+  'secureci/injection': 'Untrusted input in a shell or script'
 };
 
 interface SarifResult {

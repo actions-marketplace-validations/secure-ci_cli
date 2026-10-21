@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import {
   createContext,
   evaluateCondition,
+  expressionDataFlow,
   resolveExpressionValue,
   substituteExpressions,
   validateExpression
@@ -381,5 +382,139 @@ describe('validateExpression', () => {
     expect(
       validateExpression("fromJSON('not json')", 'step-if')
     ).toBeUndefined();
+  });
+});
+
+describe('expressionDataFlow', () => {
+  const values = (expr: string) => expressionDataFlow(expr)?.values;
+
+  it('returns the context path a plain reference substitutes', () => {
+    expect(expressionDataFlow('github.event.issue.title')).toEqual({
+      values: [['github', 'event', 'issue', 'title']],
+      trees: []
+    });
+  });
+
+  it('lower-cases paths and follows [] and .* access', () => {
+    expect(values("GitHub.Event['Pull_Request'].TITLE")).toEqual([
+      ['github', 'event', 'pull_request', 'title']
+    ]);
+    expect(values('github.event.commits[0].message')).toEqual([
+      ['github', 'event', 'commits', '0', 'message']
+    ]);
+    expect(values('github.event.commits.*.message')).toEqual([
+      ['github', 'event', 'commits', '*', 'message']
+    ]);
+    expect(values('github.event.commits[*].message')).toEqual([
+      ['github', 'event', 'commits', '*', 'message']
+    ]);
+  });
+
+  it('treats a computed key as any key', () => {
+    expect(values('github.event.issue[matrix.field]')).toEqual([
+      ['github', 'event', 'issue', '*']
+    ]);
+  });
+
+  it('has no data flow for literals, comparisons and negation', () => {
+    for (const expr of [
+      "'text'",
+      '42',
+      'true',
+      'null',
+      "github.event.issue.title == 'x'",
+      'github.event.issue.title != github.head_ref',
+      'github.event.issue.title < 3',
+      '!github.event.issue.title'
+    ]) {
+      expect(expressionDataFlow(expr)).toEqual({ values: [], trees: [] });
+    }
+  });
+
+  it('has no data flow out of boolean and status functions or hashFiles', () => {
+    for (const expr of [
+      "contains(github.event.issue.title, 'x')",
+      "startsWith(github.head_ref, 'x')",
+      "endsWith(github.head_ref, 'x')",
+      'success()',
+      'failure()',
+      'always()',
+      'cancelled()',
+      "hashFiles('**/package-lock.json')"
+    ]) {
+      expect(expressionDataFlow(expr)).toEqual({ values: [], trees: [] });
+    }
+  });
+
+  it('flows both operands of || and &&, which return an operand', () => {
+    expect(values("github.event.issue.title || 'none'")).toEqual([
+      ['github', 'event', 'issue', 'title']
+    ]);
+    expect(values('github.head_ref && github.sha')).toEqual([
+      ['github', 'head_ref'],
+      ['github', 'sha']
+    ]);
+  });
+
+  it('follows member access through parenthesized || results', () => {
+    expect(
+      values('(github.event.pull_request || github.event.issue).title')
+    ).toEqual([
+      ['github', 'event', 'pull_request', 'title'],
+      ['github', 'event', 'issue', 'title']
+    ]);
+  });
+
+  it('flows the arguments of format() and join()', () => {
+    expect(values("format('{0}-{1}', github.head_ref, github.sha)")).toEqual([
+      ['github', 'head_ref'],
+      ['github', 'sha']
+    ]);
+    expect(values("join(github.event.commits.*.message, ', ')")).toEqual([
+      ['github', 'event', 'commits', '*', 'message']
+    ]);
+  });
+
+  it('records toJSON() arguments as whole trees', () => {
+    expect(expressionDataFlow('toJSON(github.event)')).toEqual({
+      values: [],
+      trees: [['github', 'event']]
+    });
+  });
+
+  it('keeps trees through fromJSON() and member access', () => {
+    expect(
+      expressionDataFlow('fromJSON(toJSON(github.event)).issue.title')
+    ).toEqual({ values: [], trees: [['github', 'event']] });
+  });
+
+  it('flows the arguments of functions it does not know', () => {
+    expect(values('someFutureFunction(github.head_ref)')).toEqual([
+      ['github', 'head_ref']
+    ]);
+  });
+
+  it('ignores member access on literals', () => {
+    expect(values("'abc'.length")).toEqual([]);
+  });
+
+  it('accepts a ${{ }} wrapper', () => {
+    expect(values('${{ github.head_ref }}')).toEqual([['github', 'head_ref']]);
+  });
+
+  it('returns undefined for a syntax error', () => {
+    expect(expressionDataFlow('github.head_ref ==')).toBeUndefined();
+    expect(expressionDataFlow("'unterminated")).toBeUndefined();
+  });
+});
+
+describe('star filter vs a literal key', () => {
+  it("treats ['*'] as a property name, not the * filter", () => {
+    const ctx = createContext({}, {}, {}, { event: { '*': 'star', a: 'x' } });
+    expect(resolveExpressionValue("github.event['*']", ctx)).toBe('star');
+    expect(resolveExpressionValue('github.event.*', ctx)).toEqual([
+      'star',
+      'x'
+    ]);
   });
 });

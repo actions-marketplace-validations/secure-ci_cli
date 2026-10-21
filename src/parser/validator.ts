@@ -6,6 +6,7 @@ import {
   WorkflowFile
 } from '../types';
 import { validateExpression } from '../runner/expression';
+import { actionInjectionErrors, workflowInjectionErrors } from './injection';
 
 /**
  * Invalid `if:` expressions in a workflow: syntax errors, or contexts and
@@ -137,6 +138,7 @@ export function validateWorkflow(filePath: string): ValidationResult {
     }
 
     errors.push(...workflowExpressionErrors(workflow));
+    errors.push(...workflowInjectionErrors(workflow, filePath));
   } catch (error) {
     errors.push({
       path: 'root',
@@ -223,6 +225,7 @@ export function validateAction(filePath: string): ValidationResult {
             }
           });
           errors.push(...actionExpressionErrors(action));
+          errors.push(...actionInjectionErrors(action, filePath));
         }
       }
     }

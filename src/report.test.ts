@@ -61,6 +61,27 @@ describe('formatValidation (single file)', () => {
   });
 });
 
+describe('SARIF rule ids', () => {
+  it("uses an error's explicit rule over the one derived from its path", () => {
+    const result: ValidationResult = {
+      valid: false,
+      errors: [
+        {
+          path: 'jobs.a.steps[0].run',
+          message: 'untrusted input',
+          severity: 'error',
+          rule: 'secureci/injection'
+        },
+        { path: 'jobs.a.if', message: 'bad if', severity: 'error' }
+      ]
+    };
+    const log = JSON.parse(formatValidation('wf.yml', result, 'sarif'));
+    expect(
+      log.runs[0].results.map((r: { ruleId: string }) => r.ruleId)
+    ).toEqual(['secureci/injection', 'secureci/expression']);
+  });
+});
+
 describe('formatReport (multiple files)', () => {
   const entries = [
     { file: 'a.yml', result: bad },
