@@ -49,7 +49,7 @@ import {
 } from './github-lockfile';
 import type { ValidationResult } from './types';
 import { logger, LogLevel } from './utils/logger';
-import { parseKeyValuePairs } from './utils/key-value';
+import { loadKeyValues } from './utils/env-file';
 import {
   loadConfig,
   saveConfig,
@@ -141,6 +141,22 @@ program
     'Set a configuration variable for the vars context. Repeatable'
   )
   .option(
+    '--env-file <file...>',
+    'Read --env values from a .env-style file. Repeatable; later files win, --env wins over files. Config: env-file'
+  )
+  .option(
+    '--secret-file <file...>',
+    'Read --secret values from a .env-style file; every value is masked. Repeatable; later files win, --secret wins over files. Config: secret-file'
+  )
+  .option(
+    '--input-file <file...>',
+    'Read --input values from a .env-style file. Repeatable; later files win, --input wins over files. Config: input-file'
+  )
+  .option(
+    '--var-file <file...>',
+    'Read --var values from a .env-style file. Repeatable; later files win, --var wins over files. Config: var-file'
+  )
+  .option(
     '--event-path <file>',
     'Read the event payload (github.event, $GITHUB_EVENT_PATH) from a JSON file'
   )
@@ -206,13 +222,35 @@ program
     );
 
     try {
-      const inputs = parseKeyValuePairs(options.input, '--input');
-      const secrets = parseKeyValuePairs(options.secret, '--secret', {
-        redact: true,
+      const inputs = loadKeyValues({
+        flagName: '--input',
+        fileFlagName: '--input-file',
+        pairs: options.input,
+        files: options.inputFile,
+        configFiles: globalConfig['input-file']
+      });
+      const secrets = loadKeyValues({
+        flagName: '--secret',
+        fileFlagName: '--secret-file',
+        pairs: options.secret,
+        files: options.secretFile,
+        configFiles: globalConfig['secret-file'],
+        secret: true,
         fromEnv: process.env
       });
-      const vars = parseKeyValuePairs(options.var, '--var');
-      const env = parseKeyValuePairs(options.env, '--env', {
+      const vars = loadKeyValues({
+        flagName: '--var',
+        fileFlagName: '--var-file',
+        pairs: options.var,
+        files: options.varFile,
+        configFiles: globalConfig['var-file']
+      });
+      const env = loadKeyValues({
+        flagName: '--env',
+        fileFlagName: '--env-file',
+        pairs: options.env,
+        files: options.envFile,
+        configFiles: globalConfig['env-file'],
         fromEnv: process.env
       });
 

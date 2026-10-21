@@ -113,6 +113,9 @@ secureci run .github/workflows/ci.yml --job build --input ref=main --var ENV=sta
 # Pass a secret by name (value read from your environment, not the command line)
 secureci run .github/workflows/deploy.yml --secret TOKEN
 
+# Read env vars, secrets, inputs and variables from .env-style files
+secureci run .github/workflows/deploy.yml --env-file .env --secret-file .secrets
+
 # Validate against a central pipeline contract, recursing into called workflows
 secureci validate .github/workflows/deploy.yml \
   --contract contracts/platform-standard.yml --contract-recurse all
@@ -166,10 +169,10 @@ The exact scope of each is documented in
 - **No ambient environment or secrets.** On the host, steps get only a minimal
   allowlist plus the runner's `GITHUB_*`/`RUNNER_*` vars and the workflow's own
   `env:`; everything else is passed explicitly.
-- **Secret masking everywhere.** Values from `--secret` or `::add-mask::` are
-  redacted in all output, and in container mode never appear on the client
-  command line (passed via a `0600` env file). Prefer `--secret NAME` so the
-  value stays out of your shell history too.
+- **Secret masking everywhere.** Values from `--secret`, `--secret-file` or
+  `::add-mask::` are redacted in all output, and in container mode never appear
+  on the client command line (passed via a `0600` env file). Prefer
+  `--secret NAME` so the value stays out of your shell history too.
 - **Tokens are handled carefully** — sent only to the GitHub host in
   `GITHUB_SERVER_URL` / `GITHUB_API_URL` (github.com by default), never passed
   to actions, and masked in logs.

@@ -58,6 +58,7 @@ src/
 ├── utils/
 │   ├── logger.ts          # Logging with secret masking
 │   ├── key-value.ts       # --input/--secret/--env/--var parsing
+│   ├── env-file.ts        # --env-file/--secret-file/... parsing and precedence
 │   └── repository.ts      # Repository root for ./ references
 └── types/index.ts         # Shared TypeScript types
 ```
@@ -111,7 +112,9 @@ other dependency points one way.
 
 `logger.ts` is the **secret-masking** logger — use it, not `console`, so masked
 values stay redacted. `key-value.ts` parses the `--input/--secret/--env/--var`
-flags; `repository.ts` finds the repo root for `./` references.
+flags; `env-file.ts` parses their `.env`-style file counterparts
+(`--env-file` etc.) and merges config defaults, files and flags in precedence
+order; `repository.ts` finds the repo root for `./` references.
 
 ## Execution flow
 

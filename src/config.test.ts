@@ -129,6 +129,22 @@ describe('config', () => {
       );
       expect(parseConfigValue('container-memory', '512m')).toBe('512m');
     });
+
+    it('accepts env-file, secret-file, input-file and var-file paths', async () => {
+      const { parseConfigValue, isValidConfigKey } = await import('./config');
+      for (const key of [
+        'env-file',
+        'secret-file',
+        'input-file',
+        'var-file'
+      ] as const) {
+        expect(isValidConfigKey(key)).toBe(true);
+        expect(parseConfigValue(key, '.env')).toBe('.env');
+        expect(() => parseConfigValue(key, '')).toThrow(
+          new RegExp(`${key}. Must be a file path`)
+        );
+      }
+    });
   });
 
   describe('resolveNetworkDisabled', () => {

@@ -95,6 +95,40 @@ secureci run wf.yml --secret TOKEN=xxx
 secureci run wf.yml --var ENVIRONMENT=staging
 ```
 
+### Values from files (`--env-file`, `--secret-file`, `--input-file`, `--var-file`)
+
+Each of `--env`, `--secret`, `--input` and `--var` has a file counterpart that reads `KEY=value` pairs from a `.env`-style file:
+
+```bash
+secureci run wf.yml --env-file .env --secret-file .secrets \
+  --input-file inputs.env --var-file vars.env
+```
+
+- **Precedence:** every flag is repeatable and files are read in order, so later files override earlier ones. Explicit `--env`/`--secret`/`--input`/`--var` flags override values from files.
+- **Secrets:** every value from a `--secret-file` is masked in output like `--secret`, and in container mode reaches the container the same way (never on the client's command line; see [Secret Masking](#secret-masking)). On Linux and macOS, the CLI warns if a secret file is readable by group or others (`chmod 600` it); values are never logged.
+- **Errors:** a missing file, or a line that can't be parsed, stops the run before anything executes. Parse errors name `file:line` but never echo the line, since it may hold a secret.
+- **Config defaults:** `env-file`, `secret-file`, `input-file` and `var-file` in the [config file](#global-configuration) name files to read when the matching flag isn't given (relative paths resolve against the current directory). Passing the flag replaces the config default rather than adding to it.
+
+File format:
+
+```bash
+# Full-line comments and blank lines are ignored
+export NAME=value            # optional "export ", inline comment after whitespace
+URL=https://x.test/#anchor   # the URL keeps its #: a comment needs whitespace before it
+EMPTY=
+SINGLE='kept literally: $HOME \n # not a comment'
+DOUBLE="escapes: \n newline, \t tab, \" quote, \\ backslash"
+PEM="-----BEGIN KEY-----
+multi-line values work in double quotes
+-----END KEY-----"
+```
+
+- Keys are letters, digits, `_` and `-` (not starting with a digit); whitespace around the key and around an unquoted value is trimmed. A later duplicate key wins.
+- Unquoted values run to the end of the line or to a `#` preceded by whitespace.
+- Single-quoted values are literal and must close on the same line.
+- Double-quoted values may span lines and support the escapes `\n`, `\r`, `\t`, `\"` and `\\`; any other backslash is kept as written. No `${VAR}` expansion is done.
+- CRLF line endings and a UTF-8 byte order mark are accepted. Only a comment may follow a closing quote.
+
 ## Container isolation
 
 ### Flags
@@ -152,7 +186,19 @@ secureci config unset container-runtime        # revert to the built-in default 
 secureci config path                           # print the config file location
 ```
 
-Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`, and `runner-images.<label>`:
+Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`, `env-file`, `secret-file`, `input-file`, `var-file`, and `runner-images.<label>`.
+
+`env-file`, `secret-file`, `input-file` and `var-file` are default files for the matching `run` flags ([Values from files](#values-from-files---env-file---secret-file---input-file---var-file)). `config set` stores one path; edit the file by hand for a list, read in order:
+
+```yaml
+# ~/.secureci/config.yml
+secret-file: .secrets
+env-file:
+  - .env
+  - .env.local
+```
+
+`runner-images.<label>` maps a `runs-on` label to an image:
 
 ```bash
 secureci config set runner-images.ubuntu-latest node:20-bookworm   # map one runs-on label
@@ -705,7 +751,7 @@ Steps receive the runner's default variables, derived from the local `github` co
 
 ### Secret masking
 
-Any value passed via `--secret`, or registered by a step via `::add-mask::`, is automatically masked (`***`) wherever it appears in log output.
+Any value passed via `--secret` or read from a `--secret-file`, or registered by a step via `::add-mask::`, is automatically masked (`***`) wherever it appears in log output.
 
 In container mode, env values (secrets included) never appear in the container client's command line: they're passed in a private env file (mode `0600`, deleted as soon as the client exits), or, for values an env file can't carry verbatim (multi-line, quote-leading or whitespace-padded), by name with the value in the client's environment. Prefer `--secret NAME` over `--secret NAME=value` so the value isn't in the `secureci` command line either.
 
@@ -767,6 +813,7 @@ src/
 ├── utils/
 │   ├── logger.ts             # Logging utility with secret masking
 │   ├── key-value.ts          # --input/--secret/--env parsing
+│   ├── env-file.ts           # --env-file/--secret-file/... parsing and precedence
 │   └── repository.ts         # Repository root for ./ references
 └── types/
     └── index.ts              # TypeScript types

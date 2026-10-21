@@ -379,6 +379,146 @@ describe('secureci commands', () => {
     expect(result.stdout + result.stderr).toContain('all values arrived');
   });
 
+  describe('--env-file, --secret-file, --input-file and --var-file', () => {
+    let dir: string;
+    let home: string;
+
+    function writeFile(name: string, content: string, mode = 0o600): string {
+      const file = path.join(dir, name);
+      fs.writeFileSync(file, content);
+      fs.chmodSync(file, mode);
+      return name;
+    }
+
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cli-files-'));
+      home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cli-home-'));
+      fs.writeFileSync(
+        path.join(dir, 'files.yml'),
+        [
+          'name: Files',
+          'on: workflow_dispatch',
+          'jobs:',
+          '  a:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - run: |',
+          '          echo "E1=$E1 E2=$E2 E3=$E3"',
+          '          echo "I=${{ inputs.who }} V=${{ vars.colour }} V2=${{ vars.size }}"',
+          '          echo "S=${{ secrets.TOKEN }}"',
+          '          test "$ML" = "$(printf \'line one\\nline two\')" && echo multi-line ok',
+          '        env:',
+          '          ML: ${{ secrets.MULTI }}'
+        ].join('\n')
+      );
+    });
+
+    afterAll(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    const runIn = (args: string[]): ReturnType<typeof run> =>
+      run(['run', 'files.yml', '--container-runtime', 'host', ...args], dir, {
+        ...process.env,
+        HOME: home
+      });
+
+    it('feeds file values to steps, files in order, flags on top, secrets masked', () => {
+      writeFile('a.env', 'export E1=a1\nE2="a2 # kept"\nE3=a3 # comment\n');
+      writeFile('b.env', 'E3=b3\r\n');
+      writeFile(
+        '.secrets',
+        'TOKEN="tok-from-file-123"\nMULTI="line one\nline two"\n'
+      );
+      writeFile('inputs.env', "who='file who'\n");
+      writeFile('vars.env', 'colour=blue\nsize=small\n');
+
+      const result = runIn([
+        '--env-file',
+        'a.env',
+        '--env-file',
+        'b.env',
+        '--env',
+        'E1=flag1',
+        '--secret-file',
+        '.secrets',
+        '--input-file',
+        'inputs.env',
+        '--var-file',
+        'vars.env',
+        '--var',
+        'size=large'
+      ]);
+      const out = result.stdout + result.stderr;
+      expect(result.status).toBe(0);
+      expect(out).toContain('E1=flag1 E2=a2 # kept E3=b3');
+      expect(out).toContain('I=file who V=blue V2=large');
+      expect(out).toContain('S=***');
+      expect(out).not.toContain('tok-from-file-123');
+      expect(out).toContain('multi-line ok');
+      expect(out).not.toMatch(/readable by other users/);
+    });
+
+    it('fails clearly on a missing file', () => {
+      const result = runIn(['--secret-file', 'missing.secrets']);
+      expect(result.status).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain(
+        '--secret-file: file not found: missing.secrets'
+      );
+    });
+
+    it('reports an invalid line with file:line and without its value', () => {
+      writeFile('bad.secrets', 'GOOD=1\nsupersecretvalue\n');
+      const result = runIn(['--secret-file', 'bad.secrets']);
+      const out = result.stdout + result.stderr;
+      expect(result.status).not.toBe(0);
+      expect(out).toContain('bad.secrets:2: expected KEY=value');
+      expect(out).not.toContain('supersecretvalue');
+    });
+
+    it('warns when a secret file is readable by other users', () => {
+      writeFile('loose.secrets', 'TOKEN=loose-secret-value\n', 0o644);
+      // spawnSync: the warning goes to stderr, which run() drops on success.
+      const result = spawnSync(
+        'node',
+        [
+          cliPath,
+          'run',
+          'files.yml',
+          '--container-runtime',
+          'host',
+          '--secret-file',
+          'loose.secrets'
+        ],
+        { cwd: dir, encoding: 'utf-8', env: { ...process.env, HOME: home } }
+      );
+      const out = result.stdout + result.stderr;
+      expect(out).toContain('loose.secrets is readable by other users');
+      expect(out).not.toContain('loose-secret-value');
+    });
+
+    it('uses config defaults unless a file flag is given', () => {
+      writeFile('config.env', 'E1=from-config\n');
+      writeFile('flag.env', 'E1=from-flag\n');
+      const env = { ...process.env, HOME: home };
+      expect(
+        run(['config', 'set', 'env-file', 'config.env'], dir, env).status
+      ).toBe(0);
+      try {
+        expect(runIn([]).stdout).toContain('E1=from-config');
+        expect(runIn(['--env-file', 'flag.env']).stdout).toContain(
+          'E1=from-flag'
+        );
+      } finally {
+        run(['config', 'unset', 'env-file'], dir, env);
+      }
+      expect(run(['config', 'set', 'secret-file', ''], dir, env).status).toBe(
+        1
+      );
+    });
+  });
+
   it('dry-runs a workflow with secureci run --dry-run', () => {
     const result = run(
       ['run', '.github/workflows/ci.yml', '--dry-run'],
