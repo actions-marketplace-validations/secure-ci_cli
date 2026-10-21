@@ -25,6 +25,7 @@ introduction and install steps, see the [README](README.md).
 - [Machine-readable output (`--format`)](#machine-readable-output---format)
 - [Action inventory and drift (`secureci inventory`)](#action-inventory-and-drift-secureci-inventory)
   - [GitHub's `actions.lock`](#githubs-actionslock)
+- [Pin actions to commit SHAs (`secureci pin`)](#pin-actions-to-commit-shas-secureci-pin)
 - [Use in CI (GitHub Action)](#use-in-ci-github-action)
   - [Generate the workflow (`secureci init workflow`)](#generate-the-workflow-secureci-init-workflow)
 - [Using output as audit evidence](#using-output-as-audit-evidence)
@@ -68,6 +69,10 @@ secureci inventory                 # bootstrap secureci.lock, or drift-check if 
 secureci inventory --dry-run       # just print the resolved inventory as JSON
 secureci inventory --update-lock   # (re)write ./secureci.lock
 secureci inventory --check         # compare against ./secureci.lock, fail on drift
+
+# Pin action tags to commit SHAs in place (owner/repo@<sha> # v4)
+secureci pin                       # every workflow, plus the local actions they use
+secureci pin --check               # fail if anything would change (for CI)
 
 # Generate a PR-checks workflow, list workflows, manage config/cache
 secureci init workflow
@@ -396,6 +401,8 @@ allowed-owners: # if set, every remote action's owner must be listed
 
 Local (`./`) and `docker://` references are exempt from SHA pinning. An unpinned action or a disallowed owner is an **error**, reported at the step's call path.
 
+To fix unpinned actions, run [`secureci pin --contract <file>`](#pin-actions-to-commit-shas-secureci-pin): it rewrites tags to SHAs and leaves the `pins.allow` entries on their tags.
+
 ### Requiring a lockfile
 
 A contract can require every repository to commit a lockfile that covers what its workflows use:
@@ -548,6 +555,36 @@ GitHub's [workflow dependency lockfiles](https://docs.github.com/actions/concept
 - **`--update-lock` always writes `secureci.lock`.** Use it to switch a repository to SecureCI's lockfile, for example on GitHub Enterprise Server, where `actions.lock` isn't available.
 
 `actions.lock` lists transitive dependencies and each repository's `owner_id` and `repo_id`, so the transitive and identity checks apply to it too. Entries SecureCI doesn't find are never reported as unused, because `gh actions-lock` may record dependencies SecureCI doesn't follow. Lockfile versions `v0.0.2` and `v0.0.3` are supported; a newer format fails with a clear error until SecureCI supports it.
+
+## Pin actions to commit SHAs (`secureci pin`)
+
+A tag like `@v4` can be moved to different code at any time; a full commit SHA can't. `secureci pin` rewrites each tag or branch to the commit it points at now, and keeps the tag in a trailing comment so Dependabot and Renovate can still offer updates:
+
+```yaml
+- uses: actions/checkout@v4
+# becomes
+- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+```
+
+```bash
+secureci pin                                  # every file in .github/workflows, plus the local actions and reusable workflows they use
+secureci pin .github/workflows/ci.yml         # just this file (local actions it uses aren't followed)
+secureci pin --check                          # change nothing; fail if anything would change (for CI)
+secureci pin --contract contracts/standard.yml # leave the contract's pins.allow owners/actions on their tags
+secureci pin --offline                        # use only the action cache, no network
+secureci pin --update-lock                    # then rewrite ./secureci.lock from the pinned workflows
+```
+
+Each change is printed as `file:line owner/repo@v4 -> <sha12> (v4)`, followed by a count.
+
+- **What is pinned:** step `uses:` in workflows and in local composite actions, and reusable-workflow calls (`jobs.<id>.uses: owner/repo/.github/workflows/x.yml@v1`).
+- **What is left alone:** local (`./`) and `docker://` references, references already pinned to a 40-character SHA, and, with `--contract`, the owners and actions its [`pins.allow`](#supply-chain-pinning) lists. These are matched the way the contract check matches them (an owner, or the exact action name), so `validate --contract` passes afterwards.
+- **Formatting is kept.** Files are edited in place, never re-serialised: only the value (keeping its single or double quotes) and its trailing comment change. Blank lines, other comments, key order and `- uses:` list items stay as they are. Running `pin` again changes nothing.
+- **Comments:** with no comment, `# v4` is added. An old version comment (`# v3`, `# v3.2.1`, `# tag=v3`) is replaced, keeping any words after it. Any other comment is kept after the tag (`# v4 - needed for the audit`). When several references share one line (a flow sequence), no comment is added.
+- **Resolution** is the same as `inventory`'s: `git ls-remote`, or the GitHub API when a token is available (`GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`). Each distinct reference is looked up once. `--offline` uses only the commits recorded in the action cache by earlier `run` or `inventory` runs. For a branch (`@main`) that is the last commit seen, not necessarily the current one.
+- **Unresolvable references** (a deleted or private repository, a missing ref, or anything not cached with `--offline`) are reported with their file and line and left unchanged. `pin` still pins everything else and exits 0; `pin --check` exits non-zero. A reference with no `@ref`, or one written as a YAML block scalar, is reported the same way.
+- **`--check`** writes nothing and exits non-zero if any reference would be pinned or can't be resolved. Use it in CI to keep workflows pinned.
+- **`--update-lock`** runs [`inventory --update-lock`](#drift-against-secureciclock) after pinning, so `secureci.lock` records the new `owner/repo@<sha>` references. It can't be combined with `--check`.
 
 ## Use in CI (GitHub Action)
 

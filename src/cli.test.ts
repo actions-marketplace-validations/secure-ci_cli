@@ -282,7 +282,8 @@ describe('secureci commands', () => {
       'list',
       'init',
       'config',
-      'cache'
+      'cache',
+      'pin'
     ]) {
       expect(result.stdout).toMatch(new RegExp(`\\n\\s+${command}\\b`));
     }
@@ -1036,6 +1037,202 @@ describe('secureci commands', () => {
         `Not checked offline (tags need the network): ${tag}`
       );
       expect(offline.stderr).not.toContain('over the network');
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pin rewrites tags to cached commit SHAs offline, honours pins.allow, and --check fails until everything is pinned', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-pin-cli-'));
+    const wfDir = path.join(dir, '.github', 'workflows');
+    const actionDir = path.join(dir, '.github', 'actions', 'local');
+    fs.mkdirSync(wfDir, { recursive: true });
+    fs.mkdirSync(actionDir, { recursive: true });
+    const wf = path.join(wfDir, 'ci.yml');
+    const original = [
+      'name: CI',
+      'on: push',
+      'jobs:',
+      '  a:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      # checkout first',
+      "      - uses: 'actions/checkout@v4' # v3",
+      '      - uses: org/scan@v1',
+      '      - uses: trusted/tool@v2',
+      '      - uses: ./.github/actions/local',
+      '      - uses: docker://alpine:3.20',
+      ''
+    ].join('\n');
+    fs.writeFileSync(wf, original);
+    const action = path.join(actionDir, 'action.yml');
+    fs.writeFileSync(
+      action,
+      [
+        'name: Local',
+        'description: wraps a tool',
+        'runs:',
+        '  using: composite',
+        '  steps:',
+        '    - uses: org/tool@v2',
+        ''
+      ].join('\n')
+    );
+    const contract = path.join(dir, 'contract.yml');
+    fs.writeFileSync(contract, 'pins:\n  required: true\n  allow: [trusted]\n');
+
+    // Seed the action cache, as an earlier `run`/`inventory` would have:
+    // actions/checkout@v4 and org/tool@v2 resolve offline; org/scan@v1
+    // doesn't.
+    const home = path.join(dir, 'home');
+    const checkout = 'c'.repeat(40);
+    const tool = 'd'.repeat(40);
+    for (const [repo, ref, sha] of [
+      ['actions/checkout', 'v4', checkout],
+      ['org/tool', 'v2', tool]
+    ]) {
+      const cache = path.join(home, '.secureci', 'actions-cache', repo);
+      fs.mkdirSync(path.join(cache, sha), { recursive: true });
+      fs.writeFileSync(
+        path.join(cache, 'refs.json'),
+        JSON.stringify({ [ref]: sha })
+      );
+    }
+    const env = { ...process.env, HOME: home };
+    const pin = (...args: string[]) => {
+      const r = run(['pin', ...args], dir, env);
+      return { status: r.status, out: r.stdout + r.stderr };
+    };
+
+    try {
+      // --check changes nothing, lists what would change and fails.
+      const check = pin('--offline', '--check', '--contract', contract);
+      expect(check.status).not.toBe(0);
+      expect(check.out).toContain(
+        `.github/workflows/ci.yml:8 actions/checkout@v4 -> ${checkout.slice(0, 12)} (v4)`
+      );
+      expect(check.out).toContain(
+        `.github/actions/local/action.yml:6 org/tool@v2 -> ${tool.slice(0, 12)} (v2)`
+      );
+      expect(check.out).toMatch(/ci\.yml:9 org\/scan@v1 could not be resolved/);
+      expect(check.out).toContain('2 reference(s) would be pinned');
+      expect(fs.readFileSync(wf, 'utf-8')).toBe(original);
+
+      // Pinning rewrites only the resolvable references, in place.
+      const pinned = pin('--offline', '--contract', contract);
+      expect(pinned.out).toContain('Pinned 2 reference(s) in 2 file(s)');
+      expect(fs.readFileSync(wf, 'utf-8')).toBe(
+        original.replace(
+          "'actions/checkout@v4' # v3",
+          `'actions/checkout@${checkout}' # v4`
+        )
+      );
+      expect(fs.readFileSync(action, 'utf-8')).toContain(
+        `    - uses: org/tool@${tool} # v2\n`
+      );
+
+      // org/scan@v1 still can't be resolved, so --check still fails.
+      expect(
+        pin('--offline', '--check', '--contract', contract).status
+      ).not.toBe(0);
+      // Without the contract, trusted/tool@v2 must be pinned too.
+      fs.writeFileSync(
+        wf,
+        fs
+          .readFileSync(wf, 'utf-8')
+          .replace('org/scan@v1', `org/scan@${'e'.repeat(40)}`)
+      );
+      const noContract = pin(
+        '.github/workflows/ci.yml',
+        '--offline',
+        '--check'
+      );
+      expect(noContract.status).not.toBe(0);
+      expect(noContract.out).toContain('trusted/tool@v2 could not be resolved');
+      const clean = pin(
+        '.github/workflows/ci.yml',
+        '--offline',
+        '--check',
+        '--contract',
+        contract
+      );
+      expect(clean.status).toBe(0);
+      expect(clean.out).toContain('Nothing to pin');
+
+      // --update-lock refreshes secureci.lock from the pinned workflows.
+      expect(pin('--offline', '--update-lock', '--check').status).not.toBe(0);
+      expect(
+        pin('--offline', '--update-lock', '--contract', contract).status
+      ).toBe(0);
+      const lock = JSON.parse(
+        fs.readFileSync(path.join(dir, 'secureci.lock'), 'utf-8')
+      );
+      expect(Object.keys(lock.actions)).toContain(
+        `actions/checkout@${checkout}`
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pin resolves tags over the network (here a fake GitHub API)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-pin-net-'));
+    const wfDir = path.join(dir, '.github', 'workflows');
+    fs.mkdirSync(wfDir, { recursive: true });
+    const wf = path.join(wfDir, 'ci.yml');
+    fs.writeFileSync(
+      wf,
+      [
+        'on: push',
+        'jobs:',
+        '  call:',
+        '    uses: org/workflows/.github/workflows/build.yml@v1',
+        ''
+      ].join('\n')
+    );
+    const sha = 'f'.repeat(40);
+    const server = http.createServer((req, res) => {
+      if (req.url === '/api/repos/org/workflows/commits/v1') {
+        res.writeHead(200);
+        res.end(sha);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve)
+    );
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const env = {
+      ...process.env,
+      HOME: path.join(dir, 'home'),
+      GITHUB_SERVER_URL: base,
+      GITHUB_API_URL: `${base}/api`,
+      GITHUB_TOKEN: 'test-token',
+      no_proxy: '127.0.0.1,localhost',
+      NO_PROXY: '127.0.0.1,localhost'
+    };
+    try {
+      const result = await new Promise<{ status: number; out: string }>(
+        (resolve) =>
+          execFile(
+            'node',
+            [cliPath, 'pin'],
+            { cwd: dir, env, encoding: 'utf-8' },
+            (error, stdout, stderr) =>
+              resolve({
+                status: error ? ((error as { code?: number }).code ?? 1) : 0,
+                out: stdout + stderr
+              })
+          )
+      );
+      expect(result.status).toBe(0);
+      expect(fs.readFileSync(wf, 'utf-8')).toContain(
+        `    uses: org/workflows/.github/workflows/build.yml@${sha} # v1\n`
+      );
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

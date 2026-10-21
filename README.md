@@ -61,6 +61,9 @@ secureci init workflow
 # Lock the actions you use and catch supply-chain drift (commit secureci.lock)
 secureci inventory            # bootstraps secureci.lock, then drift-checks
 secureci inventory --check    # fail on drift (use in CI)
+
+# Pin action tags to commit SHAs in place (keeps `# v4` for Dependabot/Renovate)
+secureci pin
 ```
 
 ## Where it shines
@@ -74,7 +77,9 @@ secureci inventory --check    # fail on drift (use in CI)
 - **Supply-chain visibility** — [`secureci inventory`](DOCS.md#action-inventory-and-drift-secureci-inventory)
   with a committed lockfile turns a silently moved action tag into a failing
   check, including tags inside the actions you use, and catches a locked
-  repository that was deleted and re-created.
+  repository that was deleted and re-created, and
+  [`secureci pin`](DOCS.md#pin-actions-to-commit-shas-secureci-pin) rewrites
+  action tags to commit SHAs in place.
 - **Machine-readable output** — `--format json|sarif` drops straight into CI and
   GitHub code scanning.
 - **Audit evidence** — the contract, `secureci.lock` and reports are plain files

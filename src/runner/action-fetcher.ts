@@ -474,6 +474,22 @@ export function clearActionCache(): void {
 }
 
 /**
+ * The commit a ref resolved to when it was last downloaded into the action
+ * cache, without touching the network (for offline use), or undefined when
+ * that commit isn't cached. An already-pinned SHA is returned as is. For a
+ * moving ref (`@main`) this is the last commit seen, not necessarily the
+ * current one.
+ */
+export function cachedActionSha(uses: string): string | undefined {
+  const ref = parseActionReference(uses);
+  if (!ref) return undefined;
+  if (FULL_SHA.test(ref.ref)) return ref.ref.toLowerCase();
+  const dir = repoCacheDir(ref);
+  const sha = readRefIndex(dir)[ref.ref];
+  return sha && fs.existsSync(path.join(dir, sha)) ? sha : undefined;
+}
+
+/**
  * Resolve a `uses:` action reference to its current commit SHA, for the
  * inventory and lockfile. Returns undefined if the ref can't be resolved
  * (not an action reference, offline, or the lookup failed). Uses a token

@@ -23,10 +23,11 @@ CLI (cli.ts)
 
 ```
 src/
-├── cli.ts                 # Entry point: commander commands (run, validate, inventory, init, list, config, cache)
+├── cli.ts                 # Entry point: commander commands (run, validate, inventory, pin, init, list, config, cache)
 ├── config.ts              # ~/.secureci/config.yml defaults
 ├── report.ts              # --format text/json/sarif rendering
 ├── inventory.ts           # Action inventory + lockfile drift
+├── pin.ts                 # `secureci pin`: rewrite uses: tags to commit SHAs in place
 ├── init.ts                # `secureci init workflow` generator
 ├── index.ts               # Library exports
 ├── parser/
