@@ -914,6 +914,41 @@ describe('validatePipelineContract', () => {
       }
     });
   });
+
+  describe('forbidden-triggers (#46)', () => {
+    const steps = [{ run: 'echo hi' }];
+
+    it('errors once per forbidden trigger the workflow uses', async () => {
+      const result = await validatePipelineContract(
+        {
+          type: 'workflow',
+          path: '/tmp/workflow.yml',
+          file: {
+            name: 'PR',
+            on: { pull_request_target: null, workflow_run: null },
+            jobs: { a: { 'runs-on': 'ubuntu-latest', steps } }
+          }
+        },
+        { forbiddenTriggers: ['pull_request_target', 'schedule'] }
+      );
+      expect(result.valid).toBe(false);
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          path: 'on.pull_request_target',
+          severity: 'error',
+          rule: 'secureci/contract'
+        })
+      ]);
+    });
+
+    it('passes when the workflow uses none of them', async () => {
+      const result = await validatePipelineContract(
+        workflow({ a: { 'runs-on': 'ubuntu-latest', steps } }),
+        { forbiddenTriggers: ['pull_request_target'] }
+      );
+      expect(result).toEqual({ valid: true, errors: [] });
+    });
+  });
 });
 
 describe('lockfile.required', () => {

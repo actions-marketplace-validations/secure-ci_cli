@@ -85,6 +85,23 @@ describe('parsePipelineContract', () => {
     ).toThrow(/must be a mapping with a string "uses" field/);
   });
 
+  it('parses forbidden-triggers', () => {
+    expect(
+      parsePipelineContract(
+        writeTemp('forbidden-triggers:\n  - pull_request_target\n')
+      )
+    ).toEqual({ forbiddenTriggers: ['pull_request_target'] });
+  });
+
+  it('throws when forbidden-triggers is not a list of strings', () => {
+    expect(() =>
+      parsePipelineContract(writeTemp('forbidden-triggers: workflow_run\n'))
+    ).toThrow(/"forbidden-triggers" must be a list of strings/);
+    expect(() =>
+      parsePipelineContract(writeTemp('forbidden-triggers:\n  - 1\n'))
+    ).toThrow(/"forbidden-triggers" must be a list of strings/);
+  });
+
   it('parses lockfile.required', () => {
     expect(
       parsePipelineContract(writeTemp('lockfile:\n  required: true\n'))

@@ -20,6 +20,8 @@ import { GITHUB_TOKEN_SCOPES } from './permissions';
  *   - uses: org/deploy
  * forbidden:
  *   - uses: org/legacy-deploy
+ * forbidden-triggers:
+ *   - pull_request_target
  * ```
  */
 export function parsePipelineContract(filePath: string): PipelineContractSpec {
@@ -105,6 +107,12 @@ export function parsePipelineContract(filePath: string): PipelineContractSpec {
     result.allowedOwners = parseStringList(
       spec['allowed-owners'],
       'allowed-owners'
+    );
+  }
+  if (spec['forbidden-triggers'] !== undefined) {
+    result.forbiddenTriggers = parseStringList(
+      spec['forbidden-triggers'],
+      'forbidden-triggers'
     );
   }
 

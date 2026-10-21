@@ -80,6 +80,32 @@ describe('SARIF rule ids', () => {
       log.runs[0].results.map((r: { ruleId: string }) => r.ruleId)
     ).toEqual(['secureci/injection', 'secureci/expression']);
   });
+
+  const ruleOf = (error: ValidationResult['errors'][number]) =>
+    JSON.parse(
+      formatValidation('wf.yml', { valid: false, errors: [error] }, 'sarif')
+    ).runs[0];
+
+  it('uses an explicit rule on the error over the path heuristic', () => {
+    const run = ruleOf({
+      path: 'jobs.a.steps[0]',
+      message: 'checks out untrusted code',
+      severity: 'error',
+      rule: 'secureci/dangerous-trigger'
+    });
+    expect(run.results[0].ruleId).toBe('secureci/dangerous-trigger');
+    expect(run.tool.driver.rules).toContainEqual({
+      id: 'secureci/dangerous-trigger',
+      name: 'Privileged trigger with untrusted code'
+    });
+  });
+
+  it('falls back to the path when no rule is set', () => {
+    expect(
+      ruleOf({ path: 'jobs.a.if', message: 'bad', severity: 'error' })
+        .results[0].ruleId
+    ).toBe('secureci/expression');
+  });
 });
 
 describe('formatReport (multiple files)', () => {

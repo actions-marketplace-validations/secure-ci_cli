@@ -126,6 +126,66 @@ describe('Validator', () => {
       });
     });
 
+    describe('dangerous triggers (#46)', () => {
+      function validate(lines: string[]) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-trig-'));
+        const file = path.join(dir, 'wf.yml');
+        fs.writeFileSync(file, lines.join('\n'));
+        try {
+          return validateWorkflow(file);
+        } finally {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      }
+
+      it('fails a pull_request_target workflow that runs the PR head', () => {
+        const result = validate([
+          'name: PR',
+          'on: pull_request_target',
+          'permissions: {}',
+          'jobs:',
+          '  build:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - uses: actions/checkout@v4',
+          '        with:',
+          '          ref: ${{ github.event.pull_request.head.sha }}',
+          '      - run: npm test'
+        ]);
+        expect(result.valid).toBe(false);
+        expect(result.errors).toEqual([
+          expect.objectContaining({
+            path: 'jobs.build.steps[0]',
+            severity: 'error',
+            rule: 'secureci/dangerous-trigger'
+          })
+        ]);
+      });
+
+      it('passes with a warning when the trigger is used safely', () => {
+        const result = validate([
+          'name: PR',
+          'on:',
+          '  pull_request_target:',
+          '    types: [opened]',
+          'permissions: {}',
+          'jobs:',
+          '  label:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - uses: actions/checkout@v4',
+          '      - run: echo labelling'
+        ]);
+        expect(result.valid).toBe(true);
+        expect(result.errors).toEqual([
+          expect.objectContaining({
+            path: 'on.pull_request_target',
+            severity: 'warning'
+          })
+        ]);
+      });
+    });
+
     it('should validate job structure', () => {
       const workflowPath = path.join(fixturesDir, 'simple-workflow.yml');
       const result = validateWorkflow(workflowPath);

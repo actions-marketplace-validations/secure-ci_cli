@@ -164,6 +164,8 @@ export interface PipelineContractSpec {
   };
   /** If set, every remote action's owner must be in this list. */
   allowedOwners?: string[];
+  /** `forbidden-triggers`: events (e.g. pull_request_target) no workflow may use. */
+  forbiddenTriggers?: string[];
   /**
    * Require a committed lockfile (secureci.lock, or GitHub's actions.lock)
    * listing every remote action and reusable workflow used.

@@ -14,10 +14,12 @@ introduction and install steps, see the [README](README.md).
 - [Global configuration](#global-configuration)
 - [Template injection checks (`validate`)](#template-injection-checks-validate)
 - [GITHUB_TOKEN permissions (`validate`)](#github_token-permissions-validate)
+- [Dangerous triggers (`pull_request_target`, `workflow_run`)](#dangerous-triggers-pull_request_target-workflow_run)
 - [Pipeline contracts (`validate --contract`)](#pipeline-contracts-validate---contract)
   - [Supply-chain pinning](#supply-chain-pinning)
   - [Requiring a lockfile](#requiring-a-lockfile)
   - [Permissions policy](#permissions-policy)
+  - [Forbidding triggers](#forbidding-triggers)
   - [Contracts from another repository](#contracts-from-another-repository)
   - [Contract limitations (v1 scope)](#contract-limitations-v1-scope)
 - [Machine-readable output (`--format`)](#machine-readable-output---format)
@@ -46,7 +48,7 @@ introduction and install steps, see the [README](README.md).
 
 `run` **executes** the workflow (one container per job by default). To check a
 workflow without running anything, use [`validate`](#machine-readable-output---format)
-(static syntax, expression, template-injection and contract checks) or `run --dry-run` (simulate, showing
+(static syntax, expression, template-injection, trigger and contract checks) or `run --dry-run` (simulate, showing
 what would run). `run` prints a one-line reminder of these alternatives when it
 starts.
 
@@ -243,6 +245,60 @@ jobs:
       - run: npm run release
 ```
 
+## Dangerous triggers (`pull_request_target`, `workflow_run`)
+
+`secureci validate` flags workflows that a fork could use to run code with your
+repository's privileges (a "pwn request"). Workflows triggered by
+`pull_request_target` or `workflow_run` run with the base repository's secrets
+and a read/write `GITHUB_TOKEN`, even when the pull request (or the run that
+triggered them) came from a fork.
+
+```yaml
+on: pull_request_target
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }} # the fork's code
+      - run: npm ci && npm test # runs it with secrets: error
+```
+
+- **Error**: a job checks out untrusted code with `actions/checkout`, then
+  later in the same job runs a `run:` step or a local action (`uses: ./…`).
+  The finding is reported once per job, at the checkout step, and names the
+  step that executes the code. A checkout counts as untrusted when its `ref:`
+  or `repository:` references `github.event.pull_request.head.sha`, `.head.ref`
+  or `.head.repo.full_name`, `github.event.pull_request.merge_commit_sha`,
+  `github.head_ref`, `github.event.workflow_run.head_sha`, `.head_branch`,
+  `.head_commit.id` or `.head_repository.full_name`, or a literal `refs/pull/…`
+  ref.
+- **Warning instead of error** when the job's `if:` is a label check
+  (`github.event.pull_request.labels…`, e.g.
+  `contains(github.event.pull_request.labels.*.name, 'safe to test')`, or
+  `github.event.label.name`): a maintainer must approve each run, so review the
+  pull request's code before applying the label.
+- **Warning** for the trigger alone (path `on.<trigger>`, once per privileged
+  trigger), so teams can audit every such workflow. It is **omitted when a
+  job-level finding above is reported**, so a workflow is never reported twice
+  for the same trigger.
+- **Not flagged**: a checkout of the base (no `ref:`, or e.g.
+  `github.event.pull_request.base.sha`), and an untrusted checkout with no
+  later `run:` step or local action in that job (e.g. only a remote action
+  that reads the files).
+- Every form of `on:` is recognized (`on: pull_request_target`, a list, or a
+  map). Warnings don't fail validation; an error does. In SARIF output these
+  findings use the rule `secureci/dangerous-trigger`.
+
+Limitations: only `actions/checkout` steps are inspected (a `git fetch`/`gh pr
+checkout` in a `run:` step is not), the untrusted ref must appear directly in
+`ref:`/`repository:` (not via an `env:` variable or a step output), a remote
+action run after the checkout is not treated as executing it, `environment:`
+protection rules are not recognized as a gate, and jobs that call a reusable
+workflow are not inspected. To forbid these triggers outright, use
+[`forbidden-triggers`](#forbidding-triggers) in a pipeline contract.
+
 ## Pipeline contracts (`validate --contract`)
 
 In organizations with a central repo of reusable workflows/actions, a platform team can define a minimum pipeline standard — required actions, forbidden actions, and (optionally) the order required actions must run in — and have SecureCI check a caller's workflow against it.
@@ -327,6 +383,21 @@ permissions:
 - Only the validated workflow file is checked, not the reusable workflows it calls; validate those files too (the [GitHub Action](#use-in-ci-github-action) validates every file in `.github/workflows` by default).
 - The contract file is checked strictly: `permissions` accepts only `required` (`true` or `false`) and `max`, and `max` takes GitHub's scope names (`actions`, `artifact-metadata`, `attestations`, `checks`, `contents`, `deployments`, `discussions`, `id-token`, `issues`, `models`, `packages`, `pages`, `pull-requests`, `repository-projects`, `security-events`, `statuses`) with the values `read`, `write` or `none`. Anything else fails with an error naming the key.
 
+### Forbidding triggers
+
+A contract can forbid events outright, whatever the workflow does with them:
+
+```yaml
+forbidden-triggers:
+  - pull_request_target
+  - workflow_run
+```
+
+Each forbidden event in a workflow's `on:` (string, list or map form) is an
+**error** at `on.<event>`, reported with the SARIF rule `secureci/contract`.
+Only the validated workflow's own `on:` is checked: a reusable workflow it
+calls runs under the caller's event. The value must be a list of strings.
+
 ### Contracts from another repository
 
 A platform team can keep one contract in a central repository and have every repo check against it. Pass `--contract` the same `owner/repo/path@ref` form as a remote reusable workflow:
@@ -359,7 +430,7 @@ secureci validate .github/workflows/ci.yml --contract contract.yml --format sari
 ```
 
 - **`json`**: `{ file, valid, errors: [{ path, message, severity }] }`.
-- **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`, `secureci/injection`, `secureci/permissions`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
+- **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`, `secureci/injection`, `secureci/permissions`, `secureci/dangerous-trigger`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
 
 ## Action inventory and drift (`secureci inventory`)
 
