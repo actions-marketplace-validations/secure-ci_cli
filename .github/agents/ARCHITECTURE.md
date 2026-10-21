@@ -31,6 +31,7 @@ src/
 ├── advisories.ts          # GitHub Advisory Database lookups, version ranges, cache
 ├── init.ts                # `secureci init workflow` generator
 ├── index.ts               # Library exports
+├── version.ts             # --version: embedded at bundle time, else package.json
 ├── parser/
 │   ├── workflow-parser.ts            # Parse workflow AND action YAML (parseFile)
 │   ├── validator.ts                  # Syntax validation + expression checks
@@ -48,6 +49,7 @@ src/
 │   ├── steps.ts           # run: steps (host or job container)
 │   ├── actions.ts         # uses: dispatch, composite actions, built-ins, job-start pre
 │   ├── node-action.ts     # JavaScript actions (pre/main/post)
+│   ├── node-binary.ts     # Which node runs JS actions on the host (SEA-aware)
 │   ├── docker-action.ts   # Docker actions and docker:// steps
 │   ├── checkout.ts        # actions/checkout from the local working copy
 │   ├── builtin-actions.ts # Local upload/download-artifact and cache
@@ -64,6 +66,22 @@ src/
 │   └── repository.ts      # Repository root for ./ references
 └── types/index.ts         # Shared TypeScript types
 ```
+
+## Standalone binary (`scripts/`)
+
+Release binaries are Node.js single executable applications (SEA), built by
+`npm run build:sea` (`scripts/build-sea.mjs`) on each platform in CI:
+
+- `scripts/bundle.mjs` inlines `dist/` and its dependencies into one CommonJS
+  file (a SEA's `require` only loads built-ins). It is a deliberately small,
+  dependency-free bundler that fails the build on any `require()` it can't
+  resolve statically, and defines `__SECURECI_VERSION__` (read by
+  `version.ts`, since package.json isn't on disk next to a binary).
+- `build-sea.mjs` makes the SEA blob, injects it into a copy of the running
+  `node` with `postject`, and ad-hoc signs it on macOS.
+- Inside a SEA `process.execPath` is the CLI itself, so `node-binary.ts` runs
+  JavaScript actions on the host with the first `node` on the step's `PATH`
+  instead. Job containers always use the image's own `node`.
 
 ## Layers
 

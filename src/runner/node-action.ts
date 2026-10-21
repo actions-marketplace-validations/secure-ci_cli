@@ -27,13 +27,16 @@ import {
   finishStepOutput
 } from './job-runtime';
 import { DEFAULT_CONTAINER_IMAGE } from './job-container';
+import { hostNodeBinary, isSea } from './node-binary';
 
 const execFileAsync = promisify(execFile);
 
 /**
  * Execute a JavaScript action (`runs.using: node*`): `pre` (if any) and
  * `main` now, with `post` queued on the job runtime to run at job end.
- * Scripts run with the CLI's own Node binary, in the workspace, with the
+ * Scripts run with the CLI's own Node binary (in the standalone binary:
+ * `node` from the step's PATH; in a job container: the image's `node`),
+ * in the workspace, with the
  * runner's default env, the caller's env, `INPUT_*`, `STATE_*` and the
  * file-command variables. Note: GitHub runs every `pre` at job start;
  * here it runs immediately before its own `main`.
@@ -148,9 +151,18 @@ export async function executeNodeAction(
       };
     }
 
+    const hostPath = prependPath(
+      runtime.path,
+      callerCtx.env.PATH ?? process.env.PATH
+    );
+    const node = hostNodeBinary({ sea: isSea(), pathEnv: hostPath });
+    if ('error' in node) {
+      return { success: false, stdout: '', stderr: '', error: node.error };
+    }
+
     try {
       const { stdout, stderr } = await execFileAsync(
-        process.execPath,
+        node.path,
         [path.join(actionDir, script)],
         {
           cwd: process.cwd(),
@@ -165,10 +177,7 @@ export async function executeNodeAction(
             ...inputEnv,
             ...stateEnv,
             GITHUB_ACTION_PATH: actionDir,
-            PATH: prependPath(
-              runtime.path,
-              callerCtx.env.PATH ?? process.env.PATH
-            ),
+            PATH: hostPath,
             ...fileCommandEnv(files)
           }
         }

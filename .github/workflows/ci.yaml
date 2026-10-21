@@ -49,6 +49,86 @@ jobs:
           node dist/cli.js validate .github/workflows/ci.yaml
           node dist/cli.js run .github/workflows/ci.yaml --dry-run
 
+  standalone:
+    # Standalone binaries (Node.js single executable applications), built
+    # natively on each platform. On PRs this is the smoke test; on main the
+    # same binaries are kept for the release job below.
+    name: Standalone binary (${{ matrix.target }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+          - os: macos-15-intel
+            target: darwin-x64
+          - os: macos-latest
+            target: darwin-arm64
+          - os: windows-latest
+            target: win-x64
+            ext: .exe
+    defaults:
+      run:
+        shell: bash
+    env:
+      BINARY: build/sea/secureci-${{ matrix.target }}${{ matrix.ext }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # The binary embeds this Node.js (volta.node in package.json).
+          node-version-file: package.json
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Build the standalone binary
+        run: node scripts/build-sea.mjs "$BINARY"
+
+      - name: Smoke test --version
+        run: |
+          expected=$(node -p "require('./package.json').version")
+          actual=$("./$BINARY" --version)
+          echo "secureci --version: $actual"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Expected version $expected, got $actual"
+            exit 1
+          fi
+
+      - name: Smoke test validate
+        run: |
+          "./$BINARY" validate test/fixtures/simple-workflow.yml
+          "./$BINARY" validate .github/workflows/ci.yaml
+
+      # JavaScript actions run with the node on PATH inside the binary.
+      - name: Smoke test a JavaScript action on the host
+        if: runner.os != 'Windows'
+        run: |
+          "./$BINARY" run test/fixtures/js-action-workflow.yml --container-runtime host | tee run.log
+          grep -q 'Hello, secureci' run.log
+
+      - name: Keep the binary for the release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: secureci-${{ matrix.target }}
+          path: ${{ env.BINARY }}
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     name: Publish to npm
     needs: test
@@ -60,6 +140,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the git tag and GitHub release
+    outputs:
+      # 'true' only when this run published a new version (and its release).
+      released: ${{ steps.check.outputs.published == 'false' }}
+      version: ${{ steps.pkg.outputs.version }}
 
     steps:
       - name: Checkout code
@@ -125,3 +209,42 @@ jobs:
             --target "${{ github.sha }}" \
             --title "v${{ steps.pkg.outputs.version }}" \
             --generate-notes
+
+  release-binaries:
+    name: Attach standalone binaries to the release
+    needs: [publish, standalone]
+    # Same release condition as publish, and only once it has published the
+    # version and created its tag and GitHub release.
+    if: needs.publish.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload release assets
+      id-token: write # sign the build provenance attestation
+      attestations: write # store the attestation
+
+    steps:
+      - name: Download the binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: secureci-*
+          path: release
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        working-directory: release
+        run: |
+          sha256sum secureci-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/secureci-*
+
+      - name: Upload to the GitHub release
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.publish.outputs.version }}
+        # --clobber so re-running this job after a partial upload succeeds.
+        run: gh release upload "$TAG" secureci-* SHA256SUMS --clobber --repo "${{ github.repository }}"

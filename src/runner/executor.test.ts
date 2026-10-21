@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const resolveContainerRuntimeMock = vi.fn();
 const fetchActionMock = vi.fn();
 const fetchRepoFileMock = vi.fn();
+const isSeaMock = vi.fn(() => false);
 
 vi.mock('./container-runtime', async () => {
   const actual = await vi.importActual('./container-runtime');
@@ -23,6 +24,12 @@ vi.mock('./action-fetcher', async () => {
     fetchAction: (...args: unknown[]) => fetchActionMock(...args),
     fetchRepoFile: (...args: unknown[]) => fetchRepoFileMock(...args)
   };
+});
+
+vi.mock('./node-binary', async () => {
+  const actual =
+    await vi.importActual<typeof import('./node-binary')>('./node-binary');
+  return { ...actual, isSea: () => isSeaMock() };
 });
 
 import {
@@ -2988,6 +2995,72 @@ jobs:
         writeWorkflow('      - uses: some/js@v1\n')
       );
       expect(result.jobs[0].steps[0].output).toContain('leak=none');
+    });
+
+    describe('in the standalone binary (#51)', () => {
+      afterEach(() => isSeaMock.mockReset().mockReturnValue(false));
+
+      function writeJsAction(): void {
+        const actionDir = path.join(tempDir, 'js');
+        fs.mkdirSync(actionDir);
+        fs.writeFileSync(
+          path.join(actionDir, 'action.yml'),
+          'name: js\ndescription: d\nruns:\n  using: node20\n  main: index.js\n'
+        );
+        fs.writeFileSync(
+          path.join(actionDir, 'index.js'),
+          'console.log("js-ran")'
+        );
+        fetchActionMock.mockResolvedValueOnce(
+          path.join(actionDir, 'action.yml')
+        );
+      }
+
+      it.skipIf(process.platform === 'win32')(
+        'runs JavaScript actions with node from PATH, not process.execPath',
+        async () => {
+          isSeaMock.mockReturnValue(true);
+          writeJsAction();
+          const bin = path.join(tempDir, 'bin');
+          fs.mkdirSync(bin);
+          fs.writeFileSync(
+            path.join(bin, 'node'),
+            `#!/bin/sh\necho via-path-node\nexec "${process.execPath}" "$@"\n`,
+            { mode: 0o755 }
+          );
+          const result = await executeWorkflow(
+            writeWorkflow(
+              `      - uses: some/js@v1\n        env:\n          PATH: ${bin}\n`
+            ),
+            { containerRuntime: 'host' }
+          );
+          expect(result.success).toBe(true);
+          expect(result.jobs[0].steps[0].output).toContain('via-path-node');
+          expect(result.jobs[0].steps[0].output).toContain('js-ran');
+        }
+      );
+
+      it('fails the step with a clear error when no node is on PATH', async () => {
+        isSeaMock.mockReturnValue(true);
+        writeJsAction();
+        const empty = path.join(tempDir, 'empty');
+        fs.mkdirSync(empty);
+        const errorSpy = vi
+          .spyOn(console, 'error')
+          .mockImplementation(() => {});
+        const result = await executeWorkflow(
+          writeWorkflow(
+            `      - uses: some/js@v1\n        env:\n          PATH: ${JSON.stringify(empty)}\n`
+          ),
+          { containerRuntime: 'host' }
+        );
+        errorSpy.mockRestore();
+        expect(result.success).toBe(false);
+        expect(result.jobs[0].steps[0].error).toContain(
+          'JavaScript actions need Node.js on PATH when using the standalone binary'
+        );
+        expect(result.jobs[0].steps[0].output ?? '').not.toContain('js-ran');
+      });
     });
 
     it('passes --env values (and NAME from the shell) as the lowest-precedence env', async () => {

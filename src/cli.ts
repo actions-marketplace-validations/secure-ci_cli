@@ -75,22 +75,12 @@ import {
   resolveNetworkDisabled,
   CONFIG_KEYS
 } from './config';
+import { readVersion } from './version';
 import * as fs from 'fs';
 import * as path from 'path';
 
 /** Committed at the repo root, like package-lock.json / yarn.lock. */
 const LOCKFILE_NAME = 'secureci.lock';
-
-function readVersion(): string {
-  try {
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')
-    );
-    return String(pkg.version);
-  } catch {
-    return '0.0.0';
-  }
-}
 
 const program = new Command();
 const globalConfig = loadConfig();

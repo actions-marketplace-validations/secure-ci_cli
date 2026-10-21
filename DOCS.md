@@ -852,7 +852,7 @@ In container mode, env values (secrets included) never appear in the container c
 SecureCI supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps.
-- **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with the CLI's own Node.js binary, in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` of remote actions runs at job start, before any step, gated by `pre-if` (local actions, which usually come from the checkout, run it right before `main`); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.
+- **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with the CLI's own Node.js binary (with the [standalone binary](README.md#standalone-binary-no-nodejs-needed), the first `node` on the step's `PATH`, including one added by `actions/setup-node`; if there is none the step fails with "JavaScript actions need Node.js on PATH when using the standalone binary"), in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` of remote actions runs at job start, before any step, gated by `pre-if` (local actions, which usually come from the checkout, run it right before `main`); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.
 - **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it in its own container. Note: this is distinct from the job container that `--container-runtime` starts for `run:` steps and JavaScript actions.
 - **Local Actions** (`uses: ./path/to/action`): Resolved relative to the workspace (the current directory), using `action.yml` or `action.yaml`.
 - **`docker://` steps** (`uses: docker://alpine:3.20`): Run the image directly, with `with.args` as its arguments and `with.entrypoint` as its entrypoint.
@@ -878,6 +878,7 @@ src/
 ├── config.ts                 # ~/.secureci/config.yml
 ├── init.ts                   # `secureci init` workflow generator
 ├── index.ts                  # Library exports
+├── version.ts                # --version (embedded in the standalone binary)
 ├── parser/
 │   ├── workflow-parser.ts    # Parse workflow and action YAML
 │   ├── validator.ts          # Validate syntax
@@ -893,6 +894,7 @@ src/
 │   ├── steps.ts              # run: steps, on the host or in the job container
 │   ├── actions.ts            # uses: steps: dispatch, composite, built-ins, pre
 │   ├── node-action.ts        # JavaScript actions (pre/main/post)
+│   ├── node-binary.ts        # Which node runs JavaScript actions (standalone binary aware)
 │   ├── docker-action.ts      # Docker actions and docker:// steps
 │   ├── checkout.ts           # actions/checkout from the local working copy
 │   ├── builtin-actions.ts    # Local upload/download-artifact and cache

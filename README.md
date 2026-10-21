@@ -43,6 +43,45 @@ npx @secureci/cli --help
 Node.js 20+ is required. To build from source instead:
 `npm install && npm run build`.
 
+### Standalone binary (no Node.js needed)
+
+Each [release](https://github.com/secure-ci/cli/releases) has a single-file
+binary for Linux (x64, arm64), macOS (Intel, Apple silicon) and Windows (x64),
+a `SHA256SUMS` file, and a signed build-provenance attestation. Pick the asset
+for your platform: `secureci-linux-x64`, `secureci-linux-arm64`,
+`secureci-darwin-x64`, `secureci-darwin-arm64` or `secureci-win-x64.exe`.
+
+```bash
+# macOS / Linux (here: Linux x64)
+asset=secureci-linux-x64
+base=https://github.com/secure-ci/cli/releases/latest/download
+curl -fsSL -O "$base/$asset" -O "$base/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS   # macOS: shasum -a 256 --check --ignore-missing SHA256SUMS
+gh attestation verify "$asset" --repo secure-ci/cli   # optional: verify provenance
+chmod +x "$asset" && sudo mv "$asset" /usr/local/bin/secureci
+secureci --version
+```
+
+```powershell
+# Windows (PowerShell)
+$base = "https://github.com/secure-ci/cli/releases/latest/download"
+Invoke-WebRequest "$base/secureci-win-x64.exe" -OutFile secureci.exe
+Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS
+$expected = (Select-String -Path SHA256SUMS -Pattern "secureci-win-x64.exe").Line.Split(" ")[0]
+if ((Get-FileHash secureci.exe -Algorithm SHA256).Hash -ne $expected) { throw "Checksum mismatch" }
+gh attestation verify secureci.exe --repo secure-ci/cli   # optional: verify provenance
+.\secureci.exe --version
+```
+
+The binary bundles its own Node.js runtime, so it's large (~100 MB). JavaScript
+actions still need a `node` on `PATH` when they run on the host
+(`--container-runtime host`); in a job container they use the image's `node`.
+The macOS binaries are ad-hoc signed and the Windows binary is unsigned, so
+Gatekeeper or SmartScreen may ask you to confirm the first run (on macOS, a
+`curl` download isn't quarantined).
+
+Homebrew (coming): a `secure-ci/tap` formula is planned.
+
 ## First run
 
 ```bash
@@ -223,7 +262,9 @@ refactor while keeping tests green.
 Every pull request and push to `main` runs
 [`ci.yaml`](.github/workflows/ci.yaml): lint, `prettier --check`, tests with the
 coverage thresholds in `vitest.config.mts`, build, and SecureCI
-validating its own workflow.
+validating its own workflow. It also builds the standalone binary on each
+platform and smoke-tests it (`npm run build && npm run build:sea` builds one
+for your machine into `build/sea/`).
 
 Opt-in suites:
 
