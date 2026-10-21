@@ -19,9 +19,10 @@ A single CLI that understands GitHub Actions the way the runner does:
 - **Run workflows locally** — jobs in `needs:` order, matrix builds, reusable
   workflows, composite / JavaScript / Docker actions, and the full
   `${{ }}` / `if:` expression language.
-- **Validate** workflow and action files, and **check them against a pipeline
-  contract** (required/forbidden actions, ordering, minimum versions,
-  SHA-pinning rules).
+- **Validate** workflow and action files, flag **template injection**
+  (untrusted `${{ }}` input expanded into `run:` scripts), and **check them
+  against a pipeline contract** (required/forbidden actions, ordering, minimum
+  versions, SHA-pinning rules).
 - **Inventory** every action a workflow pulls in, resolve each tag to a commit
   SHA, and **catch supply-chain drift** when a tag quietly starts pointing
   somewhere new.

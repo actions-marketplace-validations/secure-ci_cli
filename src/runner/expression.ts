@@ -272,6 +272,57 @@ function star(target: unknown): FilteredArray {
   return new FilteredArray([]);
 }
 
+/**
+ * Data-flow analysis value (see expressionDataFlow): which context data
+ * may end up in a value, instead of the value itself.
+ */
+class Flow {
+  constructor(
+    /** Context paths whose value may be (part of) this value. */
+    readonly values: string[][] = [],
+    /** Context paths whose whole subtree may be (part of) it. */
+    readonly trees: string[][] = []
+  ) {}
+
+  /** Everything any of the items carry; non-Flow items carry nothing. */
+  static union(...items: unknown[]): Flow {
+    const flows = items.filter((i): i is Flow => i instanceof Flow);
+    return new Flow(
+      flows.flatMap((f) => f.values),
+      flows.flatMap((f) => f.trees)
+    );
+  }
+
+  member(key: string): Flow {
+    return new Flow(
+      this.values.map((p) => [...p, key]),
+      this.trees
+    );
+  }
+}
+
+/** Functions whose result never carries their arguments' text. */
+const OPAQUE_FUNCTIONS = new Set([
+  'success',
+  'failure',
+  'always',
+  'cancelled',
+  'contains',
+  'startswith',
+  'endswith',
+  'hashfiles'
+]);
+
+/** The data flow of a function call's result, given its arguments' flows. */
+function flowCall(name: string, args: unknown[]): unknown {
+  const lower = name.toLowerCase();
+  if (OPAQUE_FUNCTIONS.has(lower)) return false;
+  const all = Flow.union(...args);
+  if (lower === 'tojson') return new Flow([], [...all.values, ...all.trees]);
+  // format, join, fromJSON - and, conservatively, anything else.
+  return all;
+}
+
 function stepsContext(ctx: ExpressionContext): Record<string, unknown> {
   const steps: Record<string, unknown> = {};
   for (const [id, info] of Object.entries(ctx.steps)) {
@@ -422,6 +473,9 @@ function callFunction(
   }
 }
 
+/** The `*` filter in `x.*` / `x[*]`, as opposed to a `'*'` key. */
+const STAR = Symbol('*');
+
 /** What a validate-only parse may reference (see validateExpression). */
 interface ExpressionScope {
   contexts: Set<string>;
@@ -431,11 +485,15 @@ interface ExpressionScope {
 class Parser {
   private pos = 0;
 
-  /** With a scope, only check names and syntax; nothing is evaluated. */
+  /**
+   * With a scope, only check names and syntax; with `flow`, compute data
+   * flow (Flow values) instead. Either way nothing is evaluated.
+   */
   constructor(
     private tokens: Token[],
     private ctx: ExpressionContext,
-    private scope?: ExpressionScope
+    private scope?: ExpressionScope,
+    private flow = false
   ) {}
 
   private peek(): Token {
@@ -472,7 +530,11 @@ class Parser {
     while (this.isOp('||')) {
       this.next();
       const right = this.parseAnd();
-      left = toBoolean(unwrap(left)) ? left : right;
+      left = this.flow
+        ? Flow.union(left, right)
+        : toBoolean(unwrap(left))
+          ? left
+          : right;
     }
     return left;
   }
@@ -482,7 +544,11 @@ class Parser {
     while (this.isOp('&&')) {
       this.next();
       const right = this.parseEquality();
-      left = toBoolean(unwrap(left)) ? right : left;
+      left = this.flow
+        ? Flow.union(left, right)
+        : toBoolean(unwrap(left))
+          ? right
+          : left;
     }
     return left;
   }
@@ -532,9 +598,9 @@ class Parser {
         this.next();
         const part = this.next();
         if (part.type === 'star') {
-          value = star(value);
+          value = this.access(value, STAR);
         } else if (part.type === 'ident') {
-          value = member(value, part.value);
+          value = this.access(value, part.value);
         } else {
           throw new Error('Expected property name after .');
         }
@@ -542,16 +608,35 @@ class Parser {
         this.next();
         if (this.peek().type === 'star') {
           this.next();
-          value = star(value);
+          value = this.access(value, STAR);
         } else {
           const key = unwrap(this.parseOr());
-          value = member(value, typeof key === 'number' ? key : toText(key));
+          value = this.access(
+            value,
+            typeof key === 'number' || key instanceof Flow ? key : toText(key)
+          );
         }
         this.expect('rbracket');
       } else {
         return value;
       }
     }
+  }
+
+  /** `value.key`, `value[key]`, or `value.*` / `value[*]` for STAR. */
+  private access(
+    value: unknown,
+    key: string | number | Flow | typeof STAR
+  ): unknown {
+    if (this.flow) {
+      if (!(value instanceof Flow)) return undefined;
+      // `.*` and a computed key (`x[matrix.field]`) may be any key.
+      return value.member(
+        key === STAR || key instanceof Flow ? '*' : String(key).toLowerCase()
+      );
+    }
+    if (key === STAR) return star(value);
+    return member(value, key as string | number);
   }
 
   private parsePrimary(): unknown {
@@ -585,6 +670,7 @@ class Parser {
             checkCall(tok.value, args.length, this.scope.functions);
             return undefined;
           }
+          if (this.flow) return flowCall(tok.value, args);
           return callFunction(tok.value, args, this.ctx);
         }
         if (this.scope) {
@@ -593,6 +679,7 @@ class Parser {
           }
           return undefined;
         }
+        if (this.flow) return new Flow([[lower]]);
         return rootContext(lower, this.ctx);
       }
       default:
@@ -789,5 +876,49 @@ export function validateExpression(
     return undefined;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
+  }
+}
+
+/** Which context data may reach an expression's result. */
+export interface ExpressionDataFlow {
+  /**
+   * Context paths whose value may be substituted into the result, as
+   * lower-cased segments (`'*'` for `.*`, `[*]` or a computed key), e.g.
+   * `['github', 'event', 'issue', 'title']`.
+   */
+  values: string[][];
+  /**
+   * Context paths whose whole subtree may be serialized into the result,
+   * e.g. `['github', 'event']` for `toJSON(github.event)`.
+   */
+  trees: string[][];
+}
+
+/**
+ * Static data-flow analysis of one expression (with or without its `${{ }}`
+ * wrapper), without evaluating it: which context data can reach the
+ * result. Comparisons, `!` and functions returning a boolean or hash
+ * (contains, startsWith, endsWith, status functions, hashFiles) carry no
+ * data; `||`/`&&` carry both operands (they return one of them); format,
+ * join and fromJSON carry their arguments; toJSON carries its argument's
+ * whole subtree. Returns undefined for a syntax error.
+ */
+export function expressionDataFlow(
+  expr: string
+): ExpressionDataFlow | undefined {
+  let trimmed = expr.trim();
+  const wrapped = trimmed.match(/^\$\{\{([\s\S]*)\}\}$/);
+  if (wrapped) trimmed = wrapped[1].trim();
+  try {
+    const result = new Parser(
+      tokenize(trimmed),
+      createContext(),
+      undefined,
+      true
+    ).parse();
+    const flow = Flow.union(result);
+    return { values: flow.values, trees: flow.trees };
+  } catch {
+    return undefined;
   }
 }
