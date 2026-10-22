@@ -189,8 +189,10 @@ things to know:
 
 - **Linux containers only.** `windows-*` / `macos-*` jobs run in a Linux image
   with a warning.
-- **Matrix and reusable-workflow jobs run sequentially.** `max-parallel` is
-  accepted but has no effect.
+- **Jobs running in parallel share your working copy.** Each job has its own
+  container, but every job mounts the same directory, so jobs that write the
+  same files (e.g. `node_modules`) can collide; use `--parallel 1` to run jobs
+  one after another.
 - **`actions/checkout` of the current repo doesn't clone** — it uses your working
   copy as-is (so uncommitted changes are visible); `ref:`/`fetch-depth:` are
   ignored. Other repositories check out for real and need a token.

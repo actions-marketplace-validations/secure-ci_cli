@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger';
 import { RunOptions, StepResult, Step } from '../types';
-import { exec } from 'child_process';
+import { exec, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import {
   createContext,
@@ -34,6 +34,37 @@ import {
 import { executeAction } from './actions';
 
 const execAsync = promisify(exec);
+
+/**
+ * SIGKILL a process and all its descendants (found with `pgrep -P`), so a
+ * killed step's shell doesn't leave its commands running.
+ */
+export function killProcessTree(pid: number): void {
+  const tree: number[] = [];
+  const visit = (parent: number): void => {
+    tree.push(parent);
+    let children: string;
+    try {
+      children = execFileSync('pgrep', ['-P', String(parent)], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore']
+      });
+    } catch {
+      return; // no children (or no pgrep)
+    }
+    for (const child of children.split('\n').filter(Boolean)) {
+      visit(Number(child));
+    }
+  };
+  visit(pid);
+  for (const id of tree) {
+    try {
+      process.kill(id, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
+}
 
 /**
  * Execute a single step
@@ -122,8 +153,9 @@ export async function executeStep(
         step['working-directory'] ?? runtime.defaults.workingDirectory;
 
       const limit = effectiveTimeout(runtime);
+      let stopOnAbort: (() => void) | undefined;
       try {
-        const { stdout, stderr } = await execAsync(
+        const running = execAsync(
           shellCommandLine(shell.template, scriptPath),
           {
             timeout: limit.ms,
@@ -144,6 +176,15 @@ export async function executeStep(
             }
           }
         );
+        // A cancelled job (fail-fast) kills its running step, with
+        // everything the step started.
+        const child = running.child;
+        stopOnAbort = () => {
+          if (child.pid !== undefined) killProcessTree(child.pid);
+        };
+        if (runtime.signal?.aborted) stopOnAbort();
+        runtime.signal?.addEventListener('abort', stopOnAbort);
+        const { stdout, stderr } = await running;
 
         const { outputs } = finishStepOutput(stdout, files, runtime);
         if (stderr) {
@@ -166,7 +207,11 @@ export async function executeStep(
           stderr?: string;
           killed?: boolean;
         };
-        if (error.killed && limit.ms) error.message = limit.message;
+        if (runtime.signal?.aborted) {
+          error.message = 'The operation was canceled.';
+        } else if (error.killed && limit.ms) {
+          error.message = limit.message;
+        }
         logger.error(`Step failed: ${error.message}`);
 
         const { outputs } = finishStepOutput(error.stdout, files, runtime);
@@ -183,6 +228,9 @@ export async function executeStep(
           duration: Date.now() - startTime
         };
       } finally {
+        if (stopOnAbort) {
+          runtime.signal?.removeEventListener('abort', stopOnAbort);
+        }
         cleanupStepFiles(files);
       }
     }

@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as YAML from 'yaml';
 import type { ContainerRuntimePreference } from './runner/container-runtime';
+import { defaultParallelism, parseParallel } from './runner/scheduler';
 
 /**
  * Global SecureCI configuration, stored as YAML at `~/.secureci/config.yml`.
@@ -18,6 +19,8 @@ export interface CliConfig {
   'container-timeout'?: number;
   'container-memory'?: string;
   'allow-network'?: boolean;
+  /** Jobs running at once (`--parallel`). Default: the CPU count. */
+  parallel?: number;
   /**
    * Default files for `run --env-file` etc., used when the flag isn't given.
    * Relative paths resolve against the current directory. `config set`
@@ -96,12 +99,19 @@ export function getDefaultContainerRuntime(
   return value;
 }
 
+/** Resolve the effective `parallel`: config, else the CPU count. */
+export function getDefaultParallel(config: CliConfig = loadConfig()): number {
+  const value = config.parallel;
+  return value === undefined ? defaultParallelism() : parseParallel(value);
+}
+
 export const CONFIG_KEYS = [
   'container-runtime',
   'container-image',
   'container-timeout',
   'container-memory',
   'allow-network',
+  'parallel',
   'env-file',
   'secret-file',
   'input-file',
@@ -196,6 +206,8 @@ export function parseConfigValue(
         );
       }
       return rawValue === 'true';
+    case 'parallel':
+      return parseParallel(rawValue);
     case 'container-image':
     case 'container-memory':
       return rawValue;

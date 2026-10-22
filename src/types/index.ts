@@ -271,6 +271,11 @@ export interface RunOptions {
   offline?: boolean;
   /** `github.run_id`, shared by every job and called workflow of a run. */
   runId?: string;
+  /**
+   * Jobs (matrix combinations included) running at once (`--parallel`).
+   * Default: 1, one job after another.
+   */
+  parallel?: number;
 }
 
 export interface StepResult {
@@ -291,6 +296,8 @@ export interface JobResult {
   outputs?: Record<string, string>;
   /** Failed, but allowed to by job-level `continue-on-error`. */
   continueOnError?: boolean;
+  /** Cancelled while running (e.g. by `fail-fast` after a sibling failed). */
+  cancelled?: boolean;
   /** Markdown the steps wrote to `$GITHUB_STEP_SUMMARY`. */
   summary?: string;
   duration: number;

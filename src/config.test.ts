@@ -122,6 +122,16 @@ describe('config', () => {
       );
     });
 
+    it('parses parallel as a positive integer', async () => {
+      const { parseConfigValue } = await import('./config');
+      expect(parseConfigValue('parallel', '4')).toBe(4);
+      for (const bad of ['0', '-2', '1.5', 'many']) {
+        expect(() => parseConfigValue('parallel', bad)).toThrow(
+          /Invalid value "[^"]*" for parallel/
+        );
+      }
+    });
+
     it('passes container-image and container-memory through as strings', async () => {
       const { parseConfigValue } = await import('./config');
       expect(parseConfigValue('container-image', 'node:20-alpine')).toBe(
@@ -144,6 +154,22 @@ describe('config', () => {
           new RegExp(`${key}. Must be a file path`)
         );
       }
+    });
+  });
+
+  describe('getDefaultParallel', () => {
+    it('is the CPU count when unset', async () => {
+      const { getDefaultParallel } = await import('./config');
+      const { defaultParallelism } = await import('./runner/scheduler');
+      expect(getDefaultParallel({})).toBe(defaultParallelism());
+    });
+
+    it('prefers the config value, and rejects an invalid one', async () => {
+      const { getDefaultParallel } = await import('./config');
+      expect(getDefaultParallel({ parallel: 3 })).toBe(3);
+      expect(() => getDefaultParallel({ parallel: 0 })).toThrow(
+        /Invalid value "0" for parallel/
+      );
     });
   });
 

@@ -62,6 +62,8 @@ export interface JobRuntime {
   actionNames: Map<string, number>;
   /** The running step's limit from timeout-minutes (step or job). */
   stepTimeout?: { ms: number; message: string };
+  /** Aborted when the job is cancelled; kills a running host step. */
+  signal?: AbortSignal;
 }
 
 /** A per-job container that `run:` steps and JS actions are exec'd into. */
@@ -128,12 +130,11 @@ export function containerPathPrefix(runtime: JobRuntime): string {
 
 /**
  * Create the per-run scratch directory holding the event payload
- * (`$GITHUB_EVENT_PATH`) and `$RUNNER_TEMP`.
+ * (`$GITHUB_EVENT_PATH`) and each job's `$RUNNER_TEMP`.
  */
 export function createRunDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-run-'));
   fs.writeFileSync(path.join(dir, 'event.json'), '{}');
-  fs.mkdirSync(path.join(dir, 'tmp'));
   return dir;
 }
 
@@ -174,7 +175,8 @@ export function createJobRuntime(
     runnerEnv: buildRunnerEnv(github, {
       workspace: process.cwd(),
       eventPath,
-      tempDir: path.join(runDir, 'tmp'),
+      // Per job, so concurrent jobs don't share $RUNNER_TEMP.
+      tempDir: fs.mkdtempSync(path.join(runDir, 'tmp-')),
       toolCache: path.join(homeDir, '.secureci', 'toolcache')
     }),
     eventPath,

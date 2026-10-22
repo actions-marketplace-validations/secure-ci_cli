@@ -372,7 +372,35 @@ function writeRefIndex(dir: string, refs: Record<string, string>): void {
  * picked up. If the ref can't be resolved (offline, rate-limited), the
  * last commit cached for it is used. Returns the repository root.
  */
-async function fetchRepository(
+const inflight = new Map<string, Promise<string | null>>();
+
+/**
+ * fetchRepositoryOnce, shared by concurrent callers asking for the same
+ * repository and ref (jobs running in parallel), so it is downloaded and
+ * written into the cache once.
+ */
+function fetchRepository(
+  ref: ActionReference,
+  uses: string,
+  options: FetchActionOptions
+): Promise<string | null> {
+  const key = JSON.stringify([
+    repoCacheDir(ref),
+    ref.ref,
+    !!options.offline,
+    options.token === undefined ? 'discovered' : options.token
+  ]);
+  let pending = inflight.get(key);
+  if (!pending) {
+    pending = fetchRepositoryOnce(ref, uses, options).finally(() =>
+      inflight.delete(key)
+    );
+    inflight.set(key, pending);
+  }
+  return pending;
+}
+
+async function fetchRepositoryOnce(
   ref: ActionReference,
   uses: string,
   options: FetchActionOptions
@@ -440,8 +468,12 @@ async function fetchRepository(
     const [top] = fs.readdirSync(extractDir);
     if (!top) throw new Error('No files extracted from tarball');
 
-    fs.rmSync(target, { recursive: true, force: true });
-    fs.renameSync(path.join(extractDir, top), target);
+    // A commit's content never changes: keep a copy another job (asking
+    // by another ref) put there meanwhile, as it may be in use.
+    if (!sha || !fs.existsSync(target)) {
+      fs.rmSync(target, { recursive: true, force: true });
+      fs.renameSync(path.join(extractDir, top), target);
+    }
     if (sha) {
       writeRefIndex(dir, { ...readRefIndex(dir), [ref.ref]: sha });
     }

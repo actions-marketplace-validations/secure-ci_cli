@@ -34,6 +34,7 @@ introduction and install steps, see the [README](README.md).
 - [Workflow features](#workflow-features)
   - [Conditional execution (`if:`)](#conditional-execution-if)
   - [Job dependencies (`needs:`)](#job-dependencies-needs)
+  - [Parallel jobs (`--parallel`)](#parallel-jobs---parallel)
   - [Service containers (`jobs.<id>.services`)](#service-containers-jobsidservices)
   - [Artifacts and caching](#artifacts-and-caching)
   - [Matrix builds (`strategy.matrix`)](#matrix-builds-strategymatrix)
@@ -195,7 +196,7 @@ secureci config unset container-runtime        # revert to the built-in default 
 secureci config path                           # print the config file location
 ```
 
-Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`, `env-file`, `secret-file`, `input-file`, `var-file`, and `runner-images.<label>`.
+Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`, `parallel` (see [Parallel jobs](#parallel-jobs---parallel)), `env-file`, `secret-file`, `input-file`, `var-file`, and `runner-images.<label>`.
 
 `env-file`, `secret-file`, `input-file` and `var-file` are default files for the matching `run` flags ([Values from files](#values-from-files---env-file---secret-file---input-file---var-file)). `config set` stores one path; edit the file by hand for a list, read in order:
 
@@ -751,6 +752,29 @@ jobs:
     steps: [...]
 ```
 
+### Parallel jobs (`--parallel`)
+
+Like on GitHub, jobs run concurrently: a job starts as soon as every job it `needs:` is done, and matrix combinations run side by side.
+
+| Flag             | Description                                                                                                                                   |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--parallel <n>` | Run up to `n` jobs at once, counting each matrix combination as a job. Default: the number of CPUs. `1` runs jobs one after another, in order |
+
+```bash
+secureci run .github/workflows/ci.yml --parallel 4
+secureci run .github/workflows/ci.yml --parallel 1   # sequential
+secureci config set parallel 2                       # persist a default
+```
+
+- `if:`, skipping and failure propagation are the same as when running sequentially: a job whose dependency failed, was skipped or was cancelled is skipped unless its `if:` uses a status function such as `always()`.
+- `strategy.max-parallel` limits a matrix's combinations running at once, within the `--parallel` limit. The jobs of a called reusable workflow share the same limit.
+- `strategy.fail-fast` (default `true`): when a combination fails, the combinations of the same matrix that are still waiting don't start and those running are **cancelled**: the running step is killed, the job's containers and services are removed, and the remaining steps (and `post:` steps) don't run. A cancelled job is reported as `cancelled` (`"cancelled": true` in its result), and `needs.<id>.result` is `failure` for the matrix job. A failure allowed by job-level `continue-on-error` doesn't cancel anything.
+- Each job gets its own container, service network, `$RUNNER_TEMP`, step files and container env file. Artifacts and caches are shared by the run as on GitHub, and saving the same cache key from two jobs at once is safe (the first save wins). Remote actions needed by several jobs are downloaded once.
+- **Jobs share the working copy**: every job's container mounts the current directory (as does every job on the host). Jobs that write the same files at the same time, such as two matrix combinations both running `npm ci`, can interfere; run those with `--parallel 1`.
+- **Logs:** when more than one job can run at a time, every line is prefixed with its job's label, e.g. `[build (node: 20)] [INFO] Running: npm test` (a called workflow's jobs as `[call / build]`). Each job still logs its own step results and its `Job summary (<label>)`. With `--parallel 1`, or a single job, output has no prefixes and is the same as before.
+- The run's results list jobs in workflow order, whichever finished first.
+- On the host, a cancelled step's processes are killed with the step's shell; a JavaScript or Docker action that is running when its job is cancelled finishes first.
+
 ### Service containers (`jobs.<id>.services`)
 
 Sidecar containers such as databases and caches start before the job's steps and are removed when the job ends (also on failure or Ctrl-C):
@@ -773,12 +797,12 @@ These actions normally talk to GitHub's artifact and cache services, so the CLI 
 
 ### Matrix builds (`strategy.matrix`)
 
-A job runs once per matrix combination (sequentially), with `matrix.*` and `strategy.*` in its context and the combination in its name, e.g. `test (node: 20, os: linux)`:
+A job runs once per matrix combination (in parallel, see [Parallel jobs](#parallel-jobs---parallel)), with `matrix.*` and `strategy.*` in its context and the combination in its name, e.g. `test (node: 20, os: linux)`:
 
 - Combinations are expanded as on GitHub: the product of the axes, minus `exclude` matches (on all of an entry's keys), then `include` entries merged into every combination whose original values they don't change, or added as new combinations.
 - The matrix, or any axis, can be an expression, e.g. `matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}`.
-- `fail-fast` (default `true`) skips the remaining combinations after a failure. Job-level `continue-on-error` (e.g. `${{ matrix.experimental }}`) lets a combination fail without failing the job, its dependents or the run.
-- `max-parallel` is accepted but has no effect, since combinations run one after another.
+- `fail-fast` (default `true`) cancels the running combinations and skips those not yet started after a failure. Job-level `continue-on-error` (e.g. `${{ matrix.experimental }}`) lets a combination fail without failing the job, its dependents or the run, and without cancelling the others.
+- `max-parallel` limits how many combinations run at once (also capped by `--parallel`). Outputs of a matrix job (`needs.<id>.outputs`) are merged in combination order, so the last combination's value wins, whichever finished last.
 - `run --dry-run` lists each matrix job's combinations (or notes that the matrix is only known at run time), and, like `run`, shows only the `--job` job when one is given.
 
 #### Running a subset of combinations (`--matrix`)

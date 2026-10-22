@@ -7,7 +7,7 @@ behavior and every flag, see [DOCS.md](../../DOCS.md).
 
 The CLI parses GitHub Actions workflow/action YAML, validates it (optionally
 against a pipeline contract), and runs it locally — jobs in `needs:` order,
-matrix combinations, reusable workflows, and composite / JavaScript / Docker
+matrix combinations (concurrently, up to `--parallel`), reusable workflows, and composite / JavaScript / Docker
 actions, each job isolated in a container by default.
 
 Layering is one-directional: **CLI → parser → runner → utils**.
@@ -43,6 +43,7 @@ src/
 │   ├── dry-run.ts         # Dry-run mode
 │   ├── executor.ts        # Entry point: jobs in needs: order, matrix, reusable workflows
 │   ├── job-plan.ts        # Matrix expansion + needs: topological sort (pure)
+│   ├── scheduler.ts       # --parallel slots, job graph, matrix max-parallel/fail-fast (pure)
 │   ├── github-context.ts  # github context, event payload, typed inputs
 │   ├── job-runtime.ts     # Per-job state (JobRuntime), step files, post steps
 │   ├── job-container.ts   # Job container, runs-on→image mapping, services, cleanup
@@ -113,7 +114,11 @@ and exit codes live here. Keep command wiring thin; put logic in the layer below
 by concern:
 
 - **Planning:** `job-plan.ts` (matrix expansion, `needs:` topological sort — pure
-  and unit-tested in isolation).
+  and unit-tested in isolation) and `scheduler.ts` (concurrency: the global
+  `--parallel` slots, starting a job once its `needs:` are done, matrix
+  `max-parallel` and `fail-fast` cancellation via `AbortSignal` — tested with
+  fake jobs). Concurrent jobs' log lines are told apart by the logger's
+  `withJob()` prefix (`AsyncLocalStorage`).
 - **Context:** `github-context.ts` (the `github` context, event payload, typed
   inputs).
 - **Per-job:** `job-runtime.ts` (state, step files, post steps) and

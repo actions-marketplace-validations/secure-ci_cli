@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'async_hooks';
 import { colors } from './ansi';
 
 export enum LogLevel {
@@ -12,6 +13,9 @@ class Logger {
   private secrets: Set<string> = new Set();
 
   private beforeWrite?: () => void;
+
+  /** The labels of the job whose code is logging (see withJob). */
+  private readonly job = new AsyncLocalStorage<string[]>();
 
   setLevel(level: LogLevel): void {
     this.level = level;
@@ -56,6 +60,33 @@ class Logger {
     return masked;
   }
 
+  /**
+   * Run `fn` with every message it logs (across awaits, and in anything
+   * it starts) prefixed with `[label]`, so concurrent jobs' lines can be
+   * told apart. Nested calls (a called workflow's jobs) join the labels;
+   * with `replace`, `label` takes the place of the innermost one (a matrix
+   * combination's label instead of its job's).
+   */
+  withJob<T>(label: string, fn: () => Promise<T>, replace = false): Promise<T> {
+    const outer = this.job.getStore() ?? [];
+    return this.job.run([...(replace ? outer.slice(0, -1) : outer), label], fn);
+  }
+
+  /**
+   * `head` and the masked `message`, each non-empty line prefixed with the
+   * job label inside withJob.
+   */
+  private format(head: string, message: string): string {
+    const labels = this.job.getStore();
+    const masked = head + this.mask(message);
+    if (!labels) return masked;
+    const prefix = `[${this.mask(labels.join(' / '))}] `;
+    return masked
+      .split('\n')
+      .map((line) => (line ? prefix + line : line))
+      .join('\n');
+  }
+
   private maskArg(arg: unknown): unknown {
     return typeof arg === 'string' ? this.mask(arg) : arg;
   }
@@ -64,7 +95,7 @@ class Logger {
     if (this.level <= LogLevel.DEBUG) {
       this.beforeWrite?.();
       console.log(
-        colors.gray(`[DEBUG] ${this.mask(message)}`),
+        colors.gray(this.format('[DEBUG] ', message)),
         ...args.map((a) => this.maskArg(a))
       );
     }
@@ -74,7 +105,7 @@ class Logger {
     if (this.level <= LogLevel.INFO) {
       this.beforeWrite?.();
       console.log(
-        colors.blue(`[INFO] ${this.mask(message)}`),
+        colors.blue(this.format('[INFO] ', message)),
         ...args.map((a) => this.maskArg(a))
       );
     }
@@ -84,7 +115,7 @@ class Logger {
     if (this.level <= LogLevel.INFO) {
       this.beforeWrite?.();
       console.log(
-        colors.green(`✓ ${this.mask(message)}`),
+        colors.green(this.format('✓ ', message)),
         ...args.map((a) => this.maskArg(a))
       );
     }
@@ -94,7 +125,7 @@ class Logger {
     if (this.level <= LogLevel.WARN) {
       this.beforeWrite?.();
       console.warn(
-        colors.yellow(`[WARN] ${this.mask(message)}`),
+        colors.yellow(this.format('[WARN] ', message)),
         ...args.map((a) => this.maskArg(a))
       );
     }
@@ -104,7 +135,7 @@ class Logger {
     if (this.level <= LogLevel.ERROR) {
       this.beforeWrite?.();
       console.error(
-        colors.red(`[ERROR] ${this.mask(message)}`),
+        colors.red(this.format('[ERROR] ', message)),
         ...args.map((a) => this.maskArg(a))
       );
     }
@@ -112,14 +143,14 @@ class Logger {
 
   step(message: string): void {
     this.beforeWrite?.();
-    console.log(colors.cyan(`\n→ ${this.mask(message)}`));
+    console.log(colors.cyan(`\n${this.format('→ ', message)}`));
   }
 
   result(message: string, success: boolean): void {
     const icon = success ? '✓' : '✗';
     const color = success ? colors.green : colors.red;
     this.beforeWrite?.();
-    console.log(color(`${icon} ${this.mask(message)}`));
+    console.log(color(this.format(`${icon} `, message)));
   }
 }
 

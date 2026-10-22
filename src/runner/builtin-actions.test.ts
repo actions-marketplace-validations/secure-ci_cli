@@ -8,6 +8,7 @@ import {
   containerFileSystem,
   downloadArtifact,
   hostFileSystem,
+  runCacheAction,
   uploadArtifact
 } from './builtin-actions';
 
@@ -224,6 +225,53 @@ describe('builtin-actions', () => {
         'run1'
       );
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe('concurrent jobs (#49)', () => {
+    let home: string;
+    let savedHome: string | undefined;
+    beforeEach(() => {
+      home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-cchome-'));
+      savedHome = process.env.HOME;
+      process.env.HOME = home;
+    });
+    afterEach(() => {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    it('lets two jobs save the same cache key at once', async () => {
+      const save = () =>
+        runCacheAction(
+          'cache-save',
+          hostFileSystem(work),
+          { key: 'deps-1', path: 'dist' },
+          'owner/repo'
+        );
+      const results = await Promise.all([save(), save()]);
+      expect(results.map((r) => r.success)).toEqual([true, true]);
+      const restored = await runCacheAction(
+        'cache-restore',
+        hostFileSystem(work),
+        { key: 'deps-1', path: 'dist', 'lookup-only': 'true' },
+        'owner/repo'
+      );
+      expect(restored.outputs?.['cache-hit']).toBe('true');
+      // No staging directories are left behind.
+      const leftovers = (dir: string): string[] =>
+        fs
+          .readdirSync(dir, { withFileTypes: true })
+          .flatMap((e) =>
+            e.isDirectory()
+              ? [
+                  ...(e.name.includes('.tmp-') ? [e.name] : []),
+                  ...leftovers(path.join(dir, e.name))
+                ]
+              : []
+          );
+      expect(leftovers(path.join(home, '.secureci'))).toEqual([]);
     });
   });
 });

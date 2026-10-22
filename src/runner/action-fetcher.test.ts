@@ -332,6 +332,25 @@ describe('Action Fetcher', () => {
       expect(requests.every((r) => r.auth === 'Bearer tok')).toBe(true);
     });
 
+    it('downloads once when concurrent jobs fetch the same action (#49)', async () => {
+      handler = github({ v1: SHA1 }, { [SHA1]: tarball() });
+
+      const results = await Promise.all([
+        fetchAction('org/act@v1', { token: 'tok' }),
+        fetchAction('org/act/sub@v1', { token: 'tok' }),
+        fetchAction('org/act@v1', { token: 'tok' })
+      ]);
+
+      expect(results).toEqual([
+        path.join(repoCache(), SHA1, 'action.yml'),
+        path.join(repoCache(), SHA1, 'sub', 'action.yaml'),
+        path.join(repoCache(), SHA1, 'action.yml')
+      ]);
+      expect(
+        requests.filter((r) => r.url.includes('/tarball/')).map((r) => r.url)
+      ).toEqual([`/api/repos/org/act/tarball/${SHA1}`]);
+    });
+
     it('re-downloads when a moving ref points at a new commit, and only then', async () => {
       const shaFor: Record<string, string> = { main: SHA1 };
       handler = github(shaFor, {

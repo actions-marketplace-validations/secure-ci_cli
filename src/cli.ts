@@ -73,8 +73,10 @@ import {
   setConfigValue,
   unsetConfigValue,
   resolveNetworkDisabled,
+  getDefaultParallel,
   CONFIG_KEYS
 } from './config';
+import { parseParallel } from './runner/scheduler';
 import { readVersion } from './version';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -94,6 +96,12 @@ try {
 } catch (error) {
   configError = error instanceof Error ? error.message : String(error);
   defaultContainerRuntime = 'docker';
+}
+let defaultParallel = 1;
+try {
+  defaultParallel = getDefaultParallel(globalConfig);
+} catch (error) {
+  configError ??= error instanceof Error ? error.message : String(error);
 }
 
 program
@@ -208,6 +216,11 @@ program
     '--allow-network',
     'Turn on container network access, overriding allow-network: false in the config'
   )
+  .option(
+    '--parallel <n>',
+    'Run up to this many jobs (and matrix combinations) at once; 1 runs them one after another. Default: the number of CPUs. Config: parallel',
+    String(defaultParallel)
+  )
   .action(async (file: string, options) => {
     if (configError) {
       logger.error(configError);
@@ -267,6 +280,7 @@ program
         configFiles: globalConfig['env-file'],
         fromEnv: process.env
       });
+      const parallel = parseParallel(options.parallel);
 
       const result = await executeWorkflow(file, {
         dryRun: false,
@@ -292,7 +306,8 @@ program
         networkDisabled: resolveNetworkDisabled(
           { network: options.network, allowNetwork: options.allowNetwork },
           globalConfig
-        )
+        ),
+        parallel
       });
 
       if (!result.success) {
