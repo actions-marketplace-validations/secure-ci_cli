@@ -1,0 +1,9 @@
+name: JS greeting
+description: A local JavaScript action, for the standalone-binary smoke test
+inputs:
+  who:
+    description: Who to greet
+    default: world
+runs:
+  using: node20
+  main: index.js

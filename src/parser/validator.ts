@@ -7,6 +7,8 @@ import {
 } from '../types';
 import { validateExpression } from '../runner/expression';
 import { actionInjectionErrors, workflowInjectionErrors } from './injection';
+import { workflowPermissionErrors } from './permissions';
+import { dangerousTriggerErrors } from './dangerous-triggers';
 
 /**
  * Invalid `if:` expressions in a workflow: syntax errors, or contexts and
@@ -139,6 +141,8 @@ export function validateWorkflow(filePath: string): ValidationResult {
 
     errors.push(...workflowExpressionErrors(workflow));
     errors.push(...workflowInjectionErrors(workflow, filePath));
+    errors.push(...workflowPermissionErrors(workflow));
+    errors.push(...dangerousTriggerErrors(workflow));
   } catch (error) {
     errors.push({
       path: 'root',
@@ -148,8 +152,33 @@ export function validateWorkflow(filePath: string): ValidationResult {
   }
 
   return {
-    valid: errors.length === 0,
+    valid: errors.every((e) => e.severity !== 'error'),
     errors
+  };
+}
+
+/**
+ * Combine validation results (e.g. syntax checks and a contract). A warning
+ * is dropped when an error with the same rule and path supersedes it, such
+ * as a default permissions warning the contract turns into an error.
+ */
+export function mergeValidationResults(
+  ...results: ValidationResult[]
+): ValidationResult {
+  const all = results.flatMap((r) => r.errors);
+  const superseding = new Set(
+    all
+      .filter((e) => e.severity === 'error' && e.rule)
+      .map((e) => `${e.rule}\0${e.path}`)
+  );
+  return {
+    valid: results.every((r) => r.valid),
+    errors: all.filter(
+      (e) =>
+        e.severity !== 'warning' ||
+        !e.rule ||
+        !superseding.has(`${e.rule}\0${e.path}`)
+    )
   };
 }
 

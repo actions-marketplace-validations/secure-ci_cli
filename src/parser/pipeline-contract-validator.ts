@@ -11,9 +11,11 @@ import {
 } from '../types';
 import { topologicalJobOrder } from '../runner/job-plan';
 import { parseFile } from './workflow-parser';
+import { forbiddenTriggerErrors } from './dangerous-triggers';
 import { repositoryRoot } from '../utils/repository';
 import { fetchAction, fetchRepoFile } from '../runner/action-fetcher';
 import { findLockfile, readLockfile } from '../github-lockfile';
+import { contractPermissionErrors } from './permissions';
 
 /**
  * Which composite actions / reusable workflows to look inside: none, local
@@ -65,7 +67,7 @@ interface PipelineGraph {
  * Composite actions (`uses: ./path`) and reusable workflows
  * (`jobs.<id>.uses: ./path.yml`) are resolved recursively, so wrapping an
  * action doesn't hide it: local ones by default, remote ones too with
- * `recurse: 'all'`. Ordering follows
+ * `recurse: 'all'` (`offline`: only from the cache). Ordering follows
  * what GitHub guarantees: steps of a job run in order, and a job runs after
  * the jobs it (transitively) `needs:`; jobs with no such relationship may
  * run in parallel, so neither is "before" the other.
@@ -73,9 +75,13 @@ interface PipelineGraph {
 export async function validatePipelineContract(
   parsed: ParsedWorkflow,
   spec: PipelineContractSpec,
-  options: { recurse?: ContractRecurse } = {}
+  options: { recurse?: ContractRecurse; offline?: boolean } = {}
 ): Promise<ValidationResult> {
-  const graph = await buildGraph(parsed, options.recurse ?? 'local');
+  const graph = await buildGraph(
+    parsed,
+    options.recurse ?? 'local',
+    options.offline ?? false
+  );
   const { sequence, nodes } = graph;
   const errors: ValidationError[] = [...graph.errors];
   const ordering = spec.ordering ?? 'relative';
@@ -246,6 +252,18 @@ export async function validatePipelineContract(
     errors.push(...checkLockfile(parsed, sequence.filter(isRemote)));
   }
 
+  // The workflow file's own permissions; called workflows are validated as
+  // files of their own.
+  if (spec.permissions) {
+    errors.push(...contractPermissionErrors(parsed.file, spec.permissions));
+  }
+
+  // Only the workflow's own on: matters: a called reusable workflow runs
+  // under its caller's event.
+  if (spec.forbiddenTriggers) {
+    errors.push(...forbiddenTriggerErrors(parsed.file, spec.forbiddenTriggers));
+  }
+
   return {
     valid: errors.every((e) => e.severity !== 'error'),
     errors
@@ -319,7 +337,8 @@ function needsTransitively(
 
 async function buildGraph(
   parsed: ParsedWorkflow,
-  recurse: ContractRecurse
+  recurse: ContractRecurse,
+  offline: boolean
 ): Promise<PipelineGraph> {
   const graph: PipelineGraph = { sequence: [], nodes: new Map(), errors: [] };
   const root = repositoryRoot(parsed.path);
@@ -366,7 +385,9 @@ async function buildGraph(
     }
     if (recurse !== 'all' || uses.startsWith('docker://')) return undefined;
     const file =
-      kind === 'action' ? await fetchAction(uses) : await fetchRepoFile(uses);
+      kind === 'action'
+        ? await fetchAction(uses, { offline })
+        : await fetchRepoFile(uses, { offline });
     if (!file) {
       graph.errors.push({
         path: at,

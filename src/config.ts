@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as YAML from 'yaml';
 import type { ContainerRuntimePreference } from './runner/container-runtime';
+import { defaultParallelism, parseParallel } from './runner/scheduler';
 
 /**
  * Global SecureCI configuration, stored as YAML at `~/.secureci/config.yml`.
@@ -18,6 +19,17 @@ export interface CliConfig {
   'container-timeout'?: number;
   'container-memory'?: string;
   'allow-network'?: boolean;
+  /** Jobs running at once (`--parallel`). Default: the CPU count. */
+  parallel?: number;
+  /**
+   * Default files for `run --env-file` etc., used when the flag isn't given.
+   * Relative paths resolve against the current directory. `config set`
+   * stores one path; a YAML list in the file is read in order.
+   */
+  'env-file'?: string | string[];
+  'secret-file'?: string | string[];
+  'input-file'?: string | string[];
+  'var-file'?: string | string[];
   /** `runs-on` label -> container image, over the built-in mapping. */
   'runner-images'?: Record<string, string>;
 }
@@ -87,12 +99,23 @@ export function getDefaultContainerRuntime(
   return value;
 }
 
+/** Resolve the effective `parallel`: config, else the CPU count. */
+export function getDefaultParallel(config: CliConfig = loadConfig()): number {
+  const value = config.parallel;
+  return value === undefined ? defaultParallelism() : parseParallel(value);
+}
+
 export const CONFIG_KEYS = [
   'container-runtime',
   'container-image',
   'container-timeout',
   'container-memory',
-  'allow-network'
+  'allow-network',
+  'parallel',
+  'env-file',
+  'secret-file',
+  'input-file',
+  'var-file'
 ] as const;
 
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
@@ -183,8 +206,18 @@ export function parseConfigValue(
         );
       }
       return rawValue === 'true';
+    case 'parallel':
+      return parseParallel(rawValue);
     case 'container-image':
     case 'container-memory':
+      return rawValue;
+    case 'env-file':
+    case 'secret-file':
+    case 'input-file':
+    case 'var-file':
+      if (rawValue === '') {
+        throw new Error(`Invalid value "" for ${key}. Must be a file path.`);
+      }
       return rawValue;
   }
 }

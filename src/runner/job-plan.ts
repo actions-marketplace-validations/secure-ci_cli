@@ -22,9 +22,7 @@ export function sameValue(a: unknown, b: unknown): boolean {
 /** `key: value, ...` for a matrix combination's job label. */
 export function matrixLabel(values: Record<string, unknown>): string {
   return Object.entries(values)
-    .map(
-      ([k, v]) => `${k}: ${v && typeof v === 'object' ? JSON.stringify(v) : v}`
-    )
+    .map(([k, v]) => `${k}: ${matrixValueText(v)}`)
     .join(', ');
 }
 
@@ -122,6 +120,96 @@ export function expandMatrix(
   }
   combinations.push(...added);
   return combinations.length ? combinations : [{}];
+}
+
+/**
+ * `--matrix key:value` filters: key -> accepted values (as text). Repeating
+ * a key accepts any of its values.
+ */
+export type MatrixFilter = Record<string, string[]>;
+
+/**
+ * Parse repeatable `--matrix key:value` arguments. Splits on the first `:`
+ * only, so values may contain colons (`image:node:20-alpine`).
+ */
+export function parseMatrixFilter(
+  pairs: string | string[] | undefined
+): MatrixFilter {
+  const filter: MatrixFilter = {};
+  for (const pair of pairs === undefined ? [] : [pairs].flat()) {
+    const separator = pair.indexOf(':');
+    if (separator <= 0) {
+      throw new Error(
+        `Invalid --matrix argument "${pair}": expected key:value`
+      );
+    }
+    const key = pair.slice(0, separator);
+    const value = pair.slice(separator + 1);
+    const values = (filter[key] ??= []);
+    if (!values.includes(value)) values.push(value);
+  }
+  return filter;
+}
+
+/** A matrix value as text, the way it appears in the job name. */
+export function matrixValueText(value: unknown): string {
+  return value && typeof value === 'object'
+    ? JSON.stringify(value)
+    : String(value);
+}
+
+export interface MatrixSelection {
+  /** Filter keys this matrix defines (the ones that were applied). */
+  keys: string[];
+  /** Matching combinations with their index in the full expansion. */
+  matches: Array<{ index: number; values: Record<string, unknown> }>;
+}
+
+/**
+ * Keep the combinations whose value for every filter key the matrix
+ * defines is one of the accepted values (compared as text). Keys the
+ * matrix doesn't define don't apply, so jobs without a matrix are
+ * unaffected; a combination lacking an applied key doesn't match.
+ */
+export function filterMatrix(
+  combinations: Array<Record<string, unknown>>,
+  filter: MatrixFilter
+): MatrixSelection {
+  const keys = Object.keys(filter).filter((key) =>
+    combinations.some((combo) => key in combo)
+  );
+  const matches = combinations
+    .map((values, index) => ({ index, values }))
+    .filter(({ values }) =>
+      keys.every(
+        (key) =>
+          key in values && filter[key].includes(matrixValueText(values[key]))
+      )
+    );
+  return { keys, matches };
+}
+
+/** The warning for a matrix job none of whose combinations match. */
+export function noMatrixMatchMessage(
+  jobId: string,
+  filter: MatrixFilter,
+  combinations: Array<Record<string, unknown>>
+): string {
+  const wanted = Object.entries(filter)
+    .flatMap(([key, values]) => values.map((value) => `${key}:${value}`))
+    .join(', ');
+  return [
+    `No matrix combination of job "${jobId}" matches --matrix ${wanted}; skipping it. Available combinations:`,
+    ...combinations.map((combo) => `  ${matrixLabel(combo)}`)
+  ].join('\n');
+}
+
+/** Filter keys that no expanded matrix defined. */
+export function unknownMatrixKeys(
+  filter: MatrixFilter,
+  definedKeys: Set<string>
+): string[] {
+  return Object.keys(filter).filter((key) => !definedKeys.has(key));
 }
 
 /**

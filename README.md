@@ -20,9 +20,10 @@ A single CLI that understands GitHub Actions the way the runner does:
   workflows, composite / JavaScript / Docker actions, and the full
   `${{ }}` / `if:` expression language.
 - **Validate** workflow and action files, flag **template injection**
-  (untrusted `${{ }}` input expanded into `run:` scripts), and **check them
-  against a pipeline contract** (required/forbidden actions, ordering, minimum
-  versions, SHA-pinning rules).
+  (untrusted `${{ }}` input expanded into `run:` scripts) and over-broad
+  `GITHUB_TOKEN` permissions, and **check them against a pipeline contract**
+  (required/forbidden actions, ordering, minimum versions, SHA-pinning and
+  permissions rules).
 - **Inventory** every action a workflow pulls in, resolve each tag to a commit
   SHA, and **catch supply-chain drift** when a tag quietly starts pointing
   somewhere new.
@@ -42,6 +43,45 @@ npx @secureci/cli --help
 Node.js 20+ is required. To build from source instead:
 `npm install && npm run build`.
 
+### Standalone binary (no Node.js needed)
+
+Each [release](https://github.com/secure-ci/cli/releases) has a single-file
+binary for Linux (x64, arm64), macOS (Intel, Apple silicon) and Windows (x64),
+a `SHA256SUMS` file, and a signed build-provenance attestation. Pick the asset
+for your platform: `secureci-linux-x64`, `secureci-linux-arm64`,
+`secureci-darwin-x64`, `secureci-darwin-arm64` or `secureci-win-x64.exe`.
+
+```bash
+# macOS / Linux (here: Linux x64)
+asset=secureci-linux-x64
+base=https://github.com/secure-ci/cli/releases/latest/download
+curl -fsSL -O "$base/$asset" -O "$base/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS   # macOS: shasum -a 256 --check --ignore-missing SHA256SUMS
+gh attestation verify "$asset" --repo secure-ci/cli   # optional: verify provenance
+chmod +x "$asset" && sudo mv "$asset" /usr/local/bin/secureci
+secureci --version
+```
+
+```powershell
+# Windows (PowerShell)
+$base = "https://github.com/secure-ci/cli/releases/latest/download"
+Invoke-WebRequest "$base/secureci-win-x64.exe" -OutFile secureci.exe
+Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS
+$expected = (Select-String -Path SHA256SUMS -Pattern "secureci-win-x64.exe").Line.Split(" ")[0]
+if ((Get-FileHash secureci.exe -Algorithm SHA256).Hash -ne $expected) { throw "Checksum mismatch" }
+gh attestation verify secureci.exe --repo secure-ci/cli   # optional: verify provenance
+.\secureci.exe --version
+```
+
+The binary bundles its own Node.js runtime, so it's large (~100 MB). JavaScript
+actions still need a `node` on `PATH` when they run on the host
+(`--container-runtime host`); in a job container they use the image's `node`.
+The macOS binaries are ad-hoc signed and the Windows binary is unsigned, so
+Gatekeeper or SmartScreen may ask you to confirm the first run (on macOS, a
+`curl` download isn't quarantined).
+
+Homebrew (coming): a `secure-ci/tap` formula is planned.
+
 ## First run
 
 ```bash
@@ -60,6 +100,9 @@ secureci init workflow
 # Lock the actions you use and catch supply-chain drift (commit secureci.lock)
 secureci inventory            # bootstraps secureci.lock, then drift-checks
 secureci inventory --check    # fail on drift (use in CI)
+
+# Pin action tags to commit SHAs in place (keeps `# v4` for Dependabot/Renovate)
+secureci pin
 ```
 
 ## Where it shines
@@ -73,7 +116,13 @@ secureci inventory --check    # fail on drift (use in CI)
 - **Supply-chain visibility** — [`secureci inventory`](DOCS.md#action-inventory-and-drift-secureci-inventory)
   with a committed lockfile turns a silently moved action tag into a failing
   check, including tags inside the actions you use, and catches a locked
-  repository that was deleted and re-created.
+  repository that was deleted and re-created, and
+  [`secureci pin`](DOCS.md#pin-actions-to-commit-shas-secureci-pin) rewrites
+  action tags to commit SHAs in place.
+- **Known vulnerabilities** — `inventory` and `validate` flag actions with
+  published [security advisories](DOCS.md#known-security-advisories) (for
+  example GHSA-mrrh-fwg8-r2c3 in `tj-actions/changed-files`), using the GitHub
+  Advisory Database.
 - **Machine-readable output** — `--format json|sarif` drops straight into CI and
   GitHub code scanning.
 - **Audit evidence** — the contract, `secureci.lock` and reports are plain files
@@ -112,6 +161,9 @@ secureci run .github/workflows/ci.yml --job build --input ref=main --var ENV=sta
 # Pass a secret by name (value read from your environment, not the command line)
 secureci run .github/workflows/deploy.yml --secret TOKEN
 
+# Read env vars, secrets, inputs and variables from .env-style files
+secureci run .github/workflows/deploy.yml --env-file .env --secret-file .secrets
+
 # Validate against a central pipeline contract, recursing into called workflows
 secureci validate .github/workflows/deploy.yml \
   --contract contracts/platform-standard.yml --contract-recurse all
@@ -137,8 +189,10 @@ things to know:
 
 - **Linux containers only.** `windows-*` / `macos-*` jobs run in a Linux image
   with a warning.
-- **Matrix and reusable-workflow jobs run sequentially.** `max-parallel` is
-  accepted but has no effect.
+- **Jobs running in parallel share your working copy.** Each job has its own
+  container, but every job mounts the same directory, so jobs that write the
+  same files (e.g. `node_modules`) can collide; use `--parallel 1` to run jobs
+  one after another.
 - **`actions/checkout` of the current repo doesn't clone** — it uses your working
   copy as-is (so uncommitted changes are visible); `ref:`/`fetch-depth:` are
   ignored. Other repositories check out for real and need a token.
@@ -165,10 +219,10 @@ The exact scope of each is documented in
 - **No ambient environment or secrets.** On the host, steps get only a minimal
   allowlist plus the runner's `GITHUB_*`/`RUNNER_*` vars and the workflow's own
   `env:`; everything else is passed explicitly.
-- **Secret masking everywhere.** Values from `--secret` or `::add-mask::` are
-  redacted in all output, and in container mode never appear on the client
-  command line (passed via a `0600` env file). Prefer `--secret NAME` so the
-  value stays out of your shell history too.
+- **Secret masking everywhere.** Values from `--secret`, `--secret-file` or
+  `::add-mask::` are redacted in all output, and in container mode never appear
+  on the client command line (passed via a `0600` env file). Prefer
+  `--secret NAME` so the value stays out of your shell history too.
 - **Tokens are handled carefully** — sent only to the GitHub host in
   `GITHUB_SERVER_URL` / `GITHUB_API_URL` (github.com by default), never passed
   to actions, and masked in logs.
@@ -210,7 +264,9 @@ refactor while keeping tests green.
 Every pull request and push to `main` runs
 [`ci.yaml`](.github/workflows/ci.yaml): lint, `prettier --check`, tests with the
 coverage thresholds in `vitest.config.mts`, build, and SecureCI
-validating its own workflow.
+validating its own workflow. It also builds the standalone binary on each
+platform and smoke-tests it (`npm run build && npm run build:sea` builds one
+for your machine into `build/sea/`).
 
 Opt-in suites:
 

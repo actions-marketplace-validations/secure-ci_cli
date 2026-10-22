@@ -90,14 +90,19 @@ export function _resetGithubTokenForTests(): void {
   discoveredToken = undefined;
 }
 
-function serverUrl(): string {
+/** The GitHub server ($GITHUB_SERVER_URL, default https://github.com). */
+export function serverUrl(): string {
   return (process.env.GITHUB_SERVER_URL || 'https://github.com').replace(
     /\/+$/,
     ''
   );
 }
 
-function apiUrl(): string {
+/**
+ * The GitHub REST API base: $GITHUB_API_URL, else api.github.com, or
+ * `<server>/api/v3` for GitHub Enterprise Server.
+ */
+export function apiUrl(): string {
   if (process.env.GITHUB_API_URL) {
     return process.env.GITHUB_API_URL.replace(/\/+$/, '');
   }
@@ -149,8 +154,55 @@ export async function lsRemoteSha(
   );
 }
 
-/** GET a small text response (the API commit lookup). */
-function getText(
+/**
+ * Tag name -> commit SHA from `git ls-remote --tags` output. An annotated
+ * tag's peeled entry (`refs/tags/x^{}`) wins, so every SHA is a commit.
+ */
+export function parseLsRemoteTags(output: string): Map<string, string> {
+  const tags = new Map<string, string>();
+  const peeled = new Set<string>();
+  for (const line of output.split('\n')) {
+    const [sha, ref] = line.trim().split(/\s+/);
+    if (!sha || !FULL_SHA.test(sha) || !ref?.startsWith('refs/tags/')) continue;
+    let name = ref.slice('refs/tags/'.length);
+    const isPeeled = name.endsWith('^{}');
+    if (isPeeled) name = name.slice(0, -3);
+    if (isPeeled || !peeled.has(name)) tags.set(name, sha.toLowerCase());
+    if (isPeeled) peeled.add(name);
+  }
+  return tags;
+}
+
+/**
+ * Every tag of the repository at `url` and the commit it points at, via
+ * anonymous `git ls-remote --tags` (no API rate limit), or undefined if
+ * the repository can't be read.
+ */
+export async function lsRemoteTags(
+  url: string
+): Promise<Map<string, string> | undefined> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['ls-remote', '--tags', url],
+      {
+        encoding: 'utf8',
+        timeout: 15000,
+        maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+      }
+    );
+    return parseLsRemoteTags(stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * GET a small text response (API lookups). Rejects on a non-200 status
+ * with an error carrying `status`.
+ */
+export function getText(
   url: string,
   headers: Record<string, string>,
   timeoutMs: number
@@ -320,7 +372,35 @@ function writeRefIndex(dir: string, refs: Record<string, string>): void {
  * picked up. If the ref can't be resolved (offline, rate-limited), the
  * last commit cached for it is used. Returns the repository root.
  */
-async function fetchRepository(
+const inflight = new Map<string, Promise<string | null>>();
+
+/**
+ * fetchRepositoryOnce, shared by concurrent callers asking for the same
+ * repository and ref (jobs running in parallel), so it is downloaded and
+ * written into the cache once.
+ */
+function fetchRepository(
+  ref: ActionReference,
+  uses: string,
+  options: FetchActionOptions
+): Promise<string | null> {
+  const key = JSON.stringify([
+    repoCacheDir(ref),
+    ref.ref,
+    !!options.offline,
+    options.token === undefined ? 'discovered' : options.token
+  ]);
+  let pending = inflight.get(key);
+  if (!pending) {
+    pending = fetchRepositoryOnce(ref, uses, options).finally(() =>
+      inflight.delete(key)
+    );
+    inflight.set(key, pending);
+  }
+  return pending;
+}
+
+async function fetchRepositoryOnce(
   ref: ActionReference,
   uses: string,
   options: FetchActionOptions
@@ -388,8 +468,12 @@ async function fetchRepository(
     const [top] = fs.readdirSync(extractDir);
     if (!top) throw new Error('No files extracted from tarball');
 
-    fs.rmSync(target, { recursive: true, force: true });
-    fs.renameSync(path.join(extractDir, top), target);
+    // A commit's content never changes: keep a copy another job (asking
+    // by another ref) put there meanwhile, as it may be in use.
+    if (!sha || !fs.existsSync(target)) {
+      fs.rmSync(target, { recursive: true, force: true });
+      fs.renameSync(path.join(extractDir, top), target);
+    }
     if (sha) {
       writeRefIndex(dir, { ...readRefIndex(dir), [ref.ref]: sha });
     }
@@ -471,6 +555,22 @@ export function clearActionCache(): void {
     fs.rmSync(cacheDir, { recursive: true, force: true });
     logger.info('Action cache cleared');
   }
+}
+
+/**
+ * The commit a ref resolved to when it was last downloaded into the action
+ * cache, without touching the network (for offline use), or undefined when
+ * that commit isn't cached. An already-pinned SHA is returned as is. For a
+ * moving ref (`@main`) this is the last commit seen, not necessarily the
+ * current one.
+ */
+export function cachedActionSha(uses: string): string | undefined {
+  const ref = parseActionReference(uses);
+  if (!ref) return undefined;
+  if (FULL_SHA.test(ref.ref)) return ref.ref.toLowerCase();
+  const dir = repoCacheDir(ref);
+  const sha = readRefIndex(dir)[ref.ref];
+  return sha && fs.existsSync(path.join(dir, sha)) ? sha : undefined;
 }
 
 /**

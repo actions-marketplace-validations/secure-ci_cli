@@ -9,7 +9,8 @@ export interface InitWorkflowOptions {
   contract?: string;
   /**
    * Upload the SARIF report to GitHub code scanning. Defaults to true, which
-   * also requests the `security-events: write` permission the upload needs.
+   * also requests the `security-events: write` permission the upload needs
+   * (on the job).
    */
   upload?: boolean;
 }
@@ -20,7 +21,7 @@ export interface InitWorkflowOptions {
  * the release tag matching this CLI's version.
  *
  * The output is deterministic for a given set of options, so it can be
- * regenerated and diffed. With uploads on (the default) the workflow asks for
+ * regenerated and diffed. With uploads on (the default) the job asks for
  * `security-events: write` and lets the action upload SARIF; with uploads off
  * it keeps `contents: read` only and passes `upload-sarif: false`.
  */
@@ -37,15 +38,23 @@ export function renderInitWorkflow(options: InitWorkflowOptions): string {
     '  - pull_request',
     '',
     'permissions:',
-    '  contents: read'
-  ];
-  if (upload) lines.push('  security-events: write');
-
-  lines.push(
+    '  contents: read',
     '',
     'jobs:',
     '  secureci:',
-    '    runs-on: ubuntu-latest',
+    '    runs-on: ubuntu-latest'
+  ];
+  // Write scopes belong on the job, not the workflow. Job-level permissions
+  // replace the top-level ones, so contents: read is repeated for checkout.
+  if (upload) {
+    lines.push(
+      '    permissions:',
+      '      contents: read',
+      '      security-events: write'
+    );
+  }
+
+  lines.push(
     '    steps:',
     '      - uses: actions/checkout@v4',
     `      - uses: secure-ci/cli@v${options.version}`

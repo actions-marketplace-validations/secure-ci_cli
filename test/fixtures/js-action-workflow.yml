@@ -1,0 +1,12 @@
+name: Local JavaScript action
+
+on: push
+
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Greet
+        uses: ./test/fixtures/js-action
+        with:
+          who: secureci

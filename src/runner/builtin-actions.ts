@@ -562,8 +562,8 @@ async function saveCache(
         'Path Validation Error: Path(s) specified in the action for caching do(es) not exist, hence no cache is being saved.'
     };
   }
-  const staging = `${dir}.tmp-${process.pid}`;
-  fs.rmSync(staging, { recursive: true, force: true });
+  // Unique per save: jobs running at once may save the same key.
+  const staging = `${dir}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
   for (const file of files) {
     copyFile(
       file.host,
@@ -579,7 +579,16 @@ async function saveCache(
     JSON.stringify({ key, version, created: Date.now() })
   );
   fs.mkdirSync(path.dirname(dir), { recursive: true });
-  fs.renameSync(staging, dir);
+  try {
+    fs.renameSync(staging, dir);
+  } catch (error) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    // Another job saved this key meanwhile; cache entries are immutable.
+    if (fs.existsSync(path.join(dir, 'meta.json'))) {
+      return ok(`Cache for key "${key}" already exists; not saving`);
+    }
+    throw error;
+  }
   return ok(`Cache saved with key: ${key} (${files.length} file(s))`);
 }
 

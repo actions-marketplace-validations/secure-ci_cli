@@ -9,12 +9,24 @@
 export interface WorkflowFile {
   name: string;
   on: WorkflowTrigger;
+  /** Default GITHUB_TOKEN permissions for every job. */
+  permissions?: Permissions;
   env?: Record<string, string>;
   defaults?: WorkflowDefaults;
   jobs: Record<string, Job>;
 }
 
 export type WorkflowTrigger = string | string[] | Record<string, unknown>;
+
+/** Access a GITHUB_TOKEN permission scope grants. */
+export type PermissionLevel = 'read' | 'write' | 'none';
+
+/**
+ * `permissions:` at the workflow or job level: a shorthand for every scope,
+ * or scope -> level (unlisted scopes get `none`).
+ */
+export type Permissions =
+  'read-all' | 'write-all' | Partial<Record<string, PermissionLevel>>;
 
 export interface WorkflowDefaults {
   run?: {
@@ -31,6 +43,8 @@ export interface Job {
   secrets?: Record<string, string> | 'inherit';
   needs?: string | string[];
   if?: string | boolean;
+  /** GITHUB_TOKEN permissions for this job; replaces the workflow's. */
+  permissions?: Permissions;
   env?: Record<string, string>;
   defaults?: WorkflowDefaults;
   steps?: Step[];
@@ -150,6 +164,8 @@ export interface PipelineContractSpec {
   };
   /** If set, every remote action's owner must be in this list. */
   allowedOwners?: string[];
+  /** `forbidden-triggers`: events (e.g. pull_request_target) no workflow may use. */
+  forbiddenTriggers?: string[];
   /**
    * Require a committed lockfile (secureci.lock, or GitHub's actions.lock)
    * listing every remote action and reusable workflow used.
@@ -157,6 +173,26 @@ export interface PipelineContractSpec {
   lockfile?: {
     required?: boolean;
   };
+  /** GITHUB_TOKEN permissions policy. */
+  permissions?: PermissionsPolicy;
+  /**
+   * Known security advisories (`secureci/vulnerable-action`): findings at
+   * or above `failOn` are errors, the rest warnings. Default: high.
+   */
+  advisories?: {
+    failOn?: 'critical' | 'high' | 'medium' | 'low';
+  };
+}
+
+/** Contract `permissions:` policy; violations are errors. */
+export interface PermissionsPolicy {
+  /** Every workflow (or every job) must declare `permissions:`. */
+  required?: boolean;
+  /**
+   * Ceiling for workflow-level permissions (unlisted scopes: `none`); write
+   * scopes beyond it must be granted per job.
+   */
+  max?: Record<string, PermissionLevel>;
 }
 
 export interface PipelineContractEntry {
@@ -195,6 +231,11 @@ export interface RunOptions {
   inputs?: Record<string, string>;
   secrets?: Record<string, string>;
   job?: string;
+  /**
+   * `--matrix key:value` filters: run only the matrix combinations whose
+   * value (as text) for each key is one of the given ones.
+   */
+  matrix?: Record<string, string[]>;
   verbose?: boolean;
   /** Container runtime to use for isolating `run:` steps. Default: 'docker'. */
   containerRuntime?: 'auto' | 'docker' | 'podman' | 'containerd' | 'host';
@@ -230,6 +271,11 @@ export interface RunOptions {
   offline?: boolean;
   /** `github.run_id`, shared by every job and called workflow of a run. */
   runId?: string;
+  /**
+   * Jobs (matrix combinations included) running at once (`--parallel`).
+   * Default: 1, one job after another.
+   */
+  parallel?: number;
 }
 
 export interface StepResult {
@@ -250,6 +296,8 @@ export interface JobResult {
   outputs?: Record<string, string>;
   /** Failed, but allowed to by job-level `continue-on-error`. */
   continueOnError?: boolean;
+  /** Cancelled while running (e.g. by `fail-fast` after a sibling failed). */
+  cancelled?: boolean;
   /** Markdown the steps wrote to `$GITHUB_STEP_SUMMARY`. */
   summary?: string;
   duration: number;

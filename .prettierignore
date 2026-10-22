@@ -1,0 +1,2 @@
+# Fixtures whose exact (non-Prettier) formatting is what the tests check.
+test/fixtures/pin/

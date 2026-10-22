@@ -679,7 +679,9 @@ describe('validatePipelineContract', () => {
         forbidden,
         { recurse: 'all' }
       );
-      expect(fetchActionMock).toHaveBeenCalledWith('org/wrap@v1');
+      expect(fetchActionMock).toHaveBeenCalledWith('org/wrap@v1', {
+        offline: false
+      });
       expect(result.errors).toEqual([
         expect.objectContaining({
           path: 'jobs.build.steps[0] > org/wrap@v1 > steps[0]',
@@ -719,6 +721,26 @@ describe('validatePipelineContract', () => {
           path: 'jobs.release > org/shared/.github/workflows/outer.yml@v1 > jobs.inner > ./.github/workflows/inner.yml > jobs.ship.steps[0]'
         })
       ]);
+    });
+
+    it('with recurse: all and offline, reads remote refs only from the cache', async () => {
+      fetchActionMock.mockResolvedValueOnce(null);
+      fetchRepoFileMock.mockResolvedValueOnce(null);
+      await validatePipelineContract(
+        caller({
+          ...wrapperJob,
+          release: { uses: 'org/shared/.github/workflows/outer.yml@v1' }
+        } as ParsedWorkflow['file']['jobs']),
+        forbidden,
+        { recurse: 'all', offline: true }
+      );
+      expect(fetchActionMock).toHaveBeenCalledWith('org/wrap@v1', {
+        offline: true
+      });
+      expect(fetchRepoFileMock).toHaveBeenCalledWith(
+        'org/shared/.github/workflows/outer.yml@v1',
+        { offline: true }
+      );
     });
 
     it('warns when a remote ref cannot be fetched', async () => {
@@ -914,6 +936,41 @@ describe('validatePipelineContract', () => {
       }
     });
   });
+
+  describe('forbidden-triggers (#46)', () => {
+    const steps = [{ run: 'echo hi' }];
+
+    it('errors once per forbidden trigger the workflow uses', async () => {
+      const result = await validatePipelineContract(
+        {
+          type: 'workflow',
+          path: '/tmp/workflow.yml',
+          file: {
+            name: 'PR',
+            on: { pull_request_target: null, workflow_run: null },
+            jobs: { a: { 'runs-on': 'ubuntu-latest', steps } }
+          }
+        },
+        { forbiddenTriggers: ['pull_request_target', 'schedule'] }
+      );
+      expect(result.valid).toBe(false);
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          path: 'on.pull_request_target',
+          severity: 'error',
+          rule: 'secureci/contract'
+        })
+      ]);
+    });
+
+    it('passes when the workflow uses none of them', async () => {
+      const result = await validatePipelineContract(
+        workflow({ a: { 'runs-on': 'ubuntu-latest', steps } }),
+        { forbiddenTriggers: ['pull_request_target'] }
+      );
+      expect(result).toEqual({ valid: true, errors: [] });
+    });
+  });
 });
 
 describe('lockfile.required', () => {
@@ -1005,5 +1062,47 @@ describe('lockfile.required', () => {
     expect(errs).toHaveLength(1);
     expect(errs[0].path).toBe('lockfile');
     expect(errs[0].message).toMatch(/Could not read secureci.lock/);
+  });
+});
+
+describe('permissions policy (#45)', () => {
+  const steps = [{ run: 'echo ok' }];
+
+  it('reports contract permission violations as errors', async () => {
+    const result = await validatePipelineContract(
+      workflow({ build: { 'runs-on': 'x', steps } }),
+      { permissions: { required: true } },
+      { recurse: 'none' }
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        path: 'permissions',
+        severity: 'error',
+        rule: 'secureci/permissions'
+      })
+    ]);
+  });
+
+  it('enforces the top-level ceiling', async () => {
+    const wf = workflow({ build: { 'runs-on': 'x', steps } });
+    wf.file.permissions = { contents: 'write' };
+    const result = await validatePipelineContract(
+      wf,
+      { permissions: { max: { contents: 'read' } } },
+      { recurse: 'none' }
+    );
+    expect(result.errors.map((e) => [e.path, e.severity])).toEqual([
+      ['permissions.contents', 'error']
+    ]);
+  });
+
+  it('adds no permission findings without a permissions policy', async () => {
+    const result = await validatePipelineContract(
+      workflow({ build: { 'runs-on': 'x', steps } }),
+      {},
+      { recurse: 'none' }
+    );
+    expect(result.errors).toEqual([]);
   });
 });

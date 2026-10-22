@@ -1,0 +1,26 @@
+# Fixture for `secureci pin`: formatting and comments must survive.
+name: Pin fixture
+on: push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111 # v4
+      - name: Setup node   # a step comment
+        uses: 'actions/setup-node@2222222222222222222222222222222222222222' # v4.1.0
+        with:
+          node-version: 20
+      - uses: "github/codeql-action/init@3333333333333333333333333333333333333333" # v3
+      - uses: org/scan@4444444444444444444444444444444444444444 # v1 - needed for the audit
+      -   uses:   org/deploy@5555555555555555555555555555555555555555 # main
+      - uses: actions/cache@0123456789abcdef0123456789abcdef01234567 # v4
+      - uses: docker://alpine:3.20
+      - uses: ./.github/actions/local
+      - uses: trusted/tool@v2
+      - uses: gone/away@v1
+      - {uses: actions/upload-artifact@6666666666666666666666666666666666666666, with: {name: out}} # v4
+      - run: |
+          echo "uses: actions/checkout@v4 is just text here"
+  call:
+    uses: org/workflows/.github/workflows/build.yml@7777777777777777777777777777777777777777 # v1

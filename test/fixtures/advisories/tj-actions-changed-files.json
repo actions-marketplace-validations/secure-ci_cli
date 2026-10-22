@@ -1,0 +1,46 @@
+[
+  {
+    "ghsa_id": "GHSA-mrrh-fwg8-r2c3",
+    "cve_id": "CVE-2025-30066",
+    "url": "https://api.github.com/advisories/GHSA-mrrh-fwg8-r2c3",
+    "html_url": "https://github.com/advisories/GHSA-mrrh-fwg8-r2c3",
+    "summary": "tj-actions changed-files through 45.0.7 allows remote attackers to discover secrets by reading actions logs.",
+    "type": "reviewed",
+    "severity": "high",
+    "published_at": "2025-03-15T06:30:34Z",
+    "withdrawn_at": null,
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "actions",
+          "name": "tj-actions/changed-files"
+        },
+        "vulnerable_version_range": "< 46.0.1",
+        "first_patched_version": "46.0.1",
+        "vulnerable_functions": []
+      }
+    ]
+  },
+  {
+    "ghsa_id": "GHSA-mcph-m25j-8j63",
+    "cve_id": "CVE-2023-51664",
+    "url": "https://api.github.com/advisories/GHSA-mcph-m25j-8j63",
+    "html_url": "https://github.com/advisories/GHSA-mcph-m25j-8j63",
+    "summary": "tj-actions/changed-files has Potential Actions command injection in output filenames",
+    "type": "reviewed",
+    "severity": "medium",
+    "published_at": "2023-12-22T17:48:18Z",
+    "withdrawn_at": null,
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "actions",
+          "name": "tj-actions/changed-files"
+        },
+        "vulnerable_version_range": "< 41.0.0",
+        "first_patched_version": "41.0.0",
+        "vulnerable_functions": []
+      }
+    ]
+  }
+]

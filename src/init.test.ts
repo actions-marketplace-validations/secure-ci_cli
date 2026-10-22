@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as YAML from 'yaml';
 import { renderInitWorkflow } from './init';
+import { validateWorkflow } from './parser/validator';
 
 describe('renderInitWorkflow', () => {
   it('produces a valid workflow using the SecureCI action', () => {
@@ -15,9 +19,15 @@ describe('renderInitWorkflow', () => {
     expect(steps[1].uses).toBe('secure-ci/cli@v1.2.3');
   });
 
-  it('requests security-events: write and uploads SARIF by default', () => {
+  it('requests security-events: write on the job and uploads SARIF by default', () => {
     const doc = YAML.parse(renderInitWorkflow({ version: '1.2.3' }));
-    expect(doc.permissions['security-events']).toBe('write');
+    // Write scopes go on the job, not the workflow (#45). Job-level
+    // permissions replace the top-level ones, so contents: read is repeated.
+    expect(doc.permissions).toEqual({ contents: 'read' });
+    expect(doc.jobs.secureci.permissions).toEqual({
+      contents: 'read',
+      'security-events': 'write'
+    });
     expect(doc.jobs.secureci.steps[1].with?.['upload-sarif']).toBeUndefined();
   });
 
@@ -25,8 +35,8 @@ describe('renderInitWorkflow', () => {
     const doc = YAML.parse(
       renderInitWorkflow({ version: '1.2.3', upload: false })
     );
-    expect(doc.permissions['security-events']).toBeUndefined();
-    expect(doc.permissions.contents).toBe('read');
+    expect(doc.permissions).toEqual({ contents: 'read' });
+    expect(doc.jobs.secureci.permissions).toBeUndefined();
     expect(doc.jobs.secureci.steps[1].with['upload-sarif']).toBe(false);
   });
 
@@ -47,4 +57,21 @@ describe('renderInitWorkflow', () => {
       renderInitWorkflow({ version: '1.2.3', contract: 'c.yml' })
     );
   });
+
+  it.each([true, false])(
+    'passes secureci validate with no findings (upload: %s)',
+    (upload) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-init-'));
+      const file = path.join(dir, 'secureci.yml');
+      try {
+        fs.writeFileSync(
+          file,
+          renderInitWorkflow({ version: '1.2.3', upload })
+        );
+        expect(validateWorkflow(file)).toEqual({ valid: true, errors: [] });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  );
 });

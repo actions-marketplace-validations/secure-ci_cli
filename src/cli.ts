@@ -2,11 +2,13 @@
 
 import { Command, Option } from 'commander';
 import { dryRun } from './runner/dry-run';
+import { MatrixFilter, parseMatrixFilter } from './runner/job-plan';
 import { executeWorkflow } from './runner/executor';
 import {
   clearActionCache,
   fetchAction,
   fetchRepoFile,
+  cachedActionSha,
   getActionCacheDir,
   githubToken,
   repoExists,
@@ -15,7 +17,11 @@ import {
 } from './runner/action-fetcher';
 import { Progress } from './utils/progress';
 import { resolveContractSource } from './contract-source';
-import { validateWorkflow, validateAction } from './parser/validator';
+import {
+  mergeValidationResults,
+  validateWorkflow,
+  validateAction
+} from './parser/validator';
 import { parseFile } from './parser/workflow-parser';
 import { parsePipelineContract } from './parser/pipeline-contract-parser';
 import {
@@ -29,6 +35,16 @@ import {
   ReportFormat
 } from './report';
 import { renderInitWorkflow } from './init';
+import { localPinTargets, pinContent } from './pin';
+import {
+  AdvisoryChecker,
+  AdvisoryReport,
+  checkFileAdvisories,
+  describeReport,
+  FailOn,
+  mergeReports,
+  targetsFromInventory
+} from './advisories';
 import {
   addTransitive,
   buildInventory,
@@ -45,7 +61,7 @@ import {
 } from './github-lockfile';
 import type { ValidationResult } from './types';
 import { logger, LogLevel } from './utils/logger';
-import { parseKeyValuePairs } from './utils/key-value';
+import { loadKeyValues } from './utils/env-file';
 import {
   loadConfig,
   saveConfig,
@@ -57,24 +73,16 @@ import {
   setConfigValue,
   unsetConfigValue,
   resolveNetworkDisabled,
+  getDefaultParallel,
   CONFIG_KEYS
 } from './config';
+import { parseParallel } from './runner/scheduler';
+import { readVersion } from './version';
 import * as fs from 'fs';
 import * as path from 'path';
 
 /** Committed at the repo root, like package-lock.json / yarn.lock. */
 const LOCKFILE_NAME = 'secureci.lock';
-
-function readVersion(): string {
-  try {
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')
-    );
-    return String(pkg.version);
-  } catch {
-    return '0.0.0';
-  }
-}
 
 const program = new Command();
 const globalConfig = loadConfig();
@@ -88,6 +96,12 @@ try {
 } catch (error) {
   configError = error instanceof Error ? error.message : String(error);
   defaultContainerRuntime = 'docker';
+}
+let defaultParallel = 1;
+try {
+  defaultParallel = getDefaultParallel(globalConfig);
+} catch (error) {
+  configError ??= error instanceof Error ? error.message : String(error);
 }
 
 program
@@ -137,6 +151,22 @@ program
     'Set a configuration variable for the vars context. Repeatable'
   )
   .option(
+    '--env-file <file...>',
+    'Read --env values from a .env-style file. Repeatable; later files win, --env wins over files. Config: env-file'
+  )
+  .option(
+    '--secret-file <file...>',
+    'Read --secret values from a .env-style file; every value is masked. Repeatable; later files win, --secret wins over files. Config: secret-file'
+  )
+  .option(
+    '--input-file <file...>',
+    'Read --input values from a .env-style file. Repeatable; later files win, --input wins over files. Config: input-file'
+  )
+  .option(
+    '--var-file <file...>',
+    'Read --var values from a .env-style file. Repeatable; later files win, --var wins over files. Config: var-file'
+  )
+  .option(
     '--event-path <file>',
     'Read the event payload (github.event, $GITHUB_EVENT_PATH) from a JSON file'
   )
@@ -145,6 +175,10 @@ program
     'Set github.event_name. Default: $GITHUB_EVENT_NAME, else workflow_dispatch if declared, else the first trigger'
   )
   .option('-j, --job <name>', 'Run only this job')
+  .option(
+    '--matrix <key:value...>',
+    'Run only the matrix combinations whose key has this value (as shown in the job name). Repeat for more keys (all must match) or values (any matches)'
+  )
   .option(
     '--offline',
     'Use only cached remote actions and workflows; never download'
@@ -182,6 +216,11 @@ program
     '--allow-network',
     'Turn on container network access, overriding allow-network: false in the config'
   )
+  .option(
+    '--parallel <n>',
+    'Run up to this many jobs (and matrix combinations) at once; 1 runs them one after another. Default: the number of CPUs. Config: parallel',
+    String(defaultParallel)
+  )
   .action(async (file: string, options) => {
     if (configError) {
       logger.error(configError);
@@ -189,8 +228,16 @@ program
     }
     requireFile(file);
 
+    let matrix: MatrixFilter;
+    try {
+      matrix = parseMatrixFilter(options.matrix);
+    } catch (error) {
+      logger.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+
     if (options.dryRun) {
-      const result = dryRun(file);
+      const result = dryRun(file, { job: options.job, matrix });
       if (!result.success) {
         process.exit(1);
       }
@@ -202,15 +249,38 @@ program
     );
 
     try {
-      const inputs = parseKeyValuePairs(options.input, '--input');
-      const secrets = parseKeyValuePairs(options.secret, '--secret', {
-        redact: true,
+      const inputs = loadKeyValues({
+        flagName: '--input',
+        fileFlagName: '--input-file',
+        pairs: options.input,
+        files: options.inputFile,
+        configFiles: globalConfig['input-file']
+      });
+      const secrets = loadKeyValues({
+        flagName: '--secret',
+        fileFlagName: '--secret-file',
+        pairs: options.secret,
+        files: options.secretFile,
+        configFiles: globalConfig['secret-file'],
+        secret: true,
         fromEnv: process.env
       });
-      const vars = parseKeyValuePairs(options.var, '--var');
-      const env = parseKeyValuePairs(options.env, '--env', {
+      const vars = loadKeyValues({
+        flagName: '--var',
+        fileFlagName: '--var-file',
+        pairs: options.var,
+        files: options.varFile,
+        configFiles: globalConfig['var-file']
+      });
+      const env = loadKeyValues({
+        flagName: '--env',
+        fileFlagName: '--env-file',
+        pairs: options.env,
+        files: options.envFile,
+        configFiles: globalConfig['env-file'],
         fromEnv: process.env
       });
+      const parallel = parseParallel(options.parallel);
 
       const result = await executeWorkflow(file, {
         dryRun: false,
@@ -221,6 +291,7 @@ program
         eventPath: options.eventPath,
         eventName: options.eventName,
         job: options.job,
+        matrix,
         localCheckout: options.localCheckout,
         offline: options.offline,
         verbose: program.opts().verbose,
@@ -235,7 +306,8 @@ program
         networkDisabled: resolveNetworkDisabled(
           { network: options.network, allowNetwork: options.allowNetwork },
           globalConfig
-        )
+        ),
+        parallel
       });
 
       if (!result.success) {
@@ -275,6 +347,10 @@ program
       .choices(['text', 'json', 'sarif'])
       .default('text')
   )
+  .option(
+    '--offline',
+    'Do not use the network: skip the security advisory lookup (cached advisories are still used), and read remote contracts and actions only from the cache'
+  )
   .action(
     async (
       files: string[],
@@ -282,6 +358,7 @@ program
         contract?: string;
         contractRecurse: ContractRecurse;
         format: ReportFormat;
+        offline?: boolean;
       }
     ) => {
       files.forEach(requireFile);
@@ -289,7 +366,8 @@ program
         files,
         options.contract,
         options.contractRecurse,
-        options.format
+        options.format,
+        options.offline ?? false
       );
     }
   );
@@ -305,7 +383,7 @@ program
   )
   .option(
     '--offline',
-    'Do not resolve tags to commit SHAs over the network (already-pinned refs still resolve)'
+    'Do not resolve tags to commit SHAs or query security advisories over the network (already-pinned refs still resolve; cached advisories are used)'
   )
   .option(
     '--dry-run',
@@ -323,6 +401,35 @@ program
   .option('--compare', `Alias of --check`)
   .action(async (files: string[], options) => {
     await runInventory(files, options);
+  });
+
+program
+  .command('pin')
+  .description(
+    'Pin action and reusable-workflow tags to commit SHAs in place (`owner/repo@<sha> # v4`), keeping formatting and comments'
+  )
+  .argument(
+    '[file...]',
+    'Workflow or action files (default: every file in .github/workflows, plus the local actions and reusable workflows they use)'
+  )
+  .option(
+    '--check',
+    'Change nothing; exit non-zero if any reference would be pinned or cannot be resolved (for CI)'
+  )
+  .option(
+    '-c, --contract <file>',
+    "Leave the owners/actions in this pipeline contract's pins.allow on their tags"
+  )
+  .option(
+    '--offline',
+    'Do not use the network: only refs already in the action cache resolve; others are reported, not changed'
+  )
+  .option(
+    '--update-lock',
+    `Afterwards, write ./${LOCKFILE_NAME} from the pinned workflows (as \`inventory --update-lock\`)`
+  )
+  .action(async (files: string[], options) => {
+    await runPin(files, options);
   });
 
 program
@@ -551,6 +658,24 @@ async function runInventory(
     );
     if (identity && action.resolvedSha) Object.assign(action, identity);
   }
+
+  // 4. Known security advisories for every action, direct and transitive.
+  const repoCount = new Set(
+    actions.map((a) => `${a.owner}/${a.repo}`.toLowerCase())
+  ).size;
+  const advising = new Progress(
+    'Checking security advisories',
+    online ? repoCount : 0
+  );
+  const advisoryReport: AdvisoryReport = await new AdvisoryChecker({
+    offline: !online,
+    onLookup: (repo) => {
+      if (online) advising.tick(repo);
+    }
+  }).check(targetsFromInventory(actions));
+  advising.done(
+    `Checked security advisories for ${repoCount} repositor${repoCount === 1 ? 'y' : 'ies'}`
+  );
   logger.setLevel(level);
 
   const current: Record<string, LockEntry> = {};
@@ -567,8 +692,28 @@ async function runInventory(
   // --dry-run: print the resolved inventory as JSON, touching nothing.
   if (options.dryRun) {
     // eslint-disable-next-line no-console
-    console.log(JSON.stringify({ actions }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          actions,
+          advisories: advisoryReport.findings,
+          advisoryUnknownVersions: advisoryReport.unknownVersions
+        },
+        null,
+        2
+      )
+    );
+    // The findings are in the JSON; say on stderr what wasn't checked.
+    describeReport(advisoryReport)
+      .filter((line) => line.kind === 'note' && line.level === 'warn')
+      .forEach((line) => logger.warn(line.text));
     return;
+  }
+
+  // Advisories are reported, but don't change the exit code here: gate on
+  // them with `secureci validate` (rule secureci/vulnerable-action).
+  for (const line of describeReport(advisoryReport)) {
+    logger[line.level](line.text);
   }
 
   // Used references that couldn't be resolved to a commit now.
@@ -666,11 +811,158 @@ async function runInventory(
   logger.success(`No action drift against ${lockName}.`);
 }
 
+async function runPin(
+  files: string[],
+  options: {
+    check?: boolean;
+    contract?: string;
+    offline?: boolean;
+    updateLock?: boolean;
+  }
+): Promise<void> {
+  if (options.check && options.updateLock) {
+    logger.error('Use either --update-lock or --check, not both.');
+    process.exit(1);
+  }
+  const given = files.length > 0 ? files : defaultWorkflowFiles();
+  if (given.length === 0) {
+    logger.error('No workflow files given and none found in .github/workflows');
+    process.exit(1);
+  }
+  given.forEach(requireFile);
+  // Explicit files are pinned as given; the default run covers the whole
+  // repository, including local actions the workflows use.
+  const targets = files.length > 0 ? given : localPinTargets(given);
+
+  let allow: string[] = [];
+  if (options.contract) {
+    try {
+      const source = await resolveContractSource(options.contract, {
+        fetchFile: (uses) => fetchRepoFile(uses, { offline: options.offline }),
+        resolveSha: (uses) =>
+          options.offline
+            ? Promise.resolve(cachedActionSha(uses))
+            : resolveActionSha(uses),
+        warn: (message) => logger.warn(message)
+      });
+      allow = parsePipelineContract(source.file).pins?.allow ?? [];
+    } catch (error) {
+      logger.error(
+        `Could not read contract ${options.contract}: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+      process.exit(1);
+    }
+  }
+
+  // Each distinct reference is resolved once, across all files.
+  const resolving = new Progress('Resolving tags', 0);
+  const resolved = new Map<string, Promise<string | undefined>>();
+  const resolve = (uses: string): Promise<string | undefined> => {
+    let sha = resolved.get(uses);
+    if (!sha) {
+      if (options.offline) {
+        sha = Promise.resolve(cachedActionSha(uses));
+      } else {
+        resolving.grow();
+        resolving.tick(uses);
+        sha = resolveActionSha(uses);
+      }
+      resolved.set(uses, sha);
+    }
+    return sha;
+  };
+
+  const display = (file: string) =>
+    path.relative(process.cwd(), path.resolve(file)) || file;
+  let changes = 0;
+  let changedFiles = 0;
+  let unresolved = 0;
+  let unreadable = false;
+  const report = options.check
+    ? (m: string) => logger.error(m)
+    : (m: string) => logger.warn(m);
+  for (const file of targets) {
+    const name = display(file);
+    let result;
+    try {
+      result = await pinContent(fs.readFileSync(file, 'utf-8'), resolve, {
+        allow
+      });
+    } catch (error) {
+      logger.error(
+        `Could not read ${name}: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+      unreadable = true;
+      continue;
+    }
+    for (const a of result.allowed) {
+      logger.info(`${name}:${a.line} ${a.uses} left on its tag (pins.allow)`);
+    }
+    for (const c of result.changes) {
+      logger.info(
+        `${name}:${c.line} ${c.uses} -> ${c.sha.slice(0, 12)} (${c.ref})`
+      );
+    }
+    for (const u of result.unresolved) {
+      report(
+        `${name}:${u.line} ${u.uses} ${u.reason}` +
+          (options.offline && u.reason.startsWith('could not')
+            ? ' (offline: only refs in the action cache resolve)'
+            : '') +
+          '; left unchanged'
+      );
+    }
+    changes += result.changes.length;
+    unresolved += result.unresolved.length;
+    if (result.changes.length > 0) {
+      changedFiles++;
+      if (!options.check) fs.writeFileSync(file, result.content);
+    }
+  }
+  resolving.done(`Resolved ${resolved.size} reference(s)`);
+
+  const fileCount = `${changedFiles} file(s)`;
+  const unresolvedHint = options.offline
+    ? ''
+    : ` (check that each repository and ref exists${githubToken() ? '' : '; set GITHUB_TOKEN for private repositories'})`;
+  if (options.check) {
+    if (changes > 0) {
+      logger.error(
+        `${changes} reference(s) would be pinned in ${fileCount}. Run \`secureci pin\` to pin them.`
+      );
+    }
+    if (unresolved > 0) {
+      logger.error(
+        `${unresolved} reference(s) could not be resolved${unresolvedHint}.`
+      );
+    }
+    if (changes > 0 || unresolved > 0 || unreadable) process.exit(1);
+    logger.success('Nothing to pin: every remote reference is pinned.');
+    return;
+  }
+  if (changes > 0) {
+    logger.success(`Pinned ${changes} reference(s) in ${fileCount}.`);
+  } else if (unresolved === 0) {
+    logger.success('Nothing to pin: every remote reference is pinned.');
+  }
+  if (unresolved > 0) {
+    logger.warn(
+      `${unresolved} reference(s) could not be resolved and were left unchanged${unresolvedHint}.`
+    );
+  }
+  if (unreadable) process.exit(1);
+  if (options.updateLock) {
+    await runInventory(files, { offline: options.offline, updateLock: true });
+  }
+}
+
 async function validateOneFile(
   filePath: string,
   contractFile: string | undefined,
   recurse: ContractRecurse,
-  say: (fn: () => void) => void
+  say: (fn: () => void) => void,
+  advisories: { checker: AdvisoryChecker; reports: AdvisoryReport[] },
+  offline: boolean
 ): Promise<ValidationResult> {
   const parsed = parseFile(filePath);
   let result: ValidationResult;
@@ -683,6 +975,7 @@ async function validateOneFile(
     say(() => logger.info(`Validating action: ${filePath}`));
   }
 
+  let failOn: FailOn | undefined;
   if (contractFile) {
     say(() =>
       logger.info(`Validating against pipeline contract: ${contractFile}`)
@@ -702,23 +995,34 @@ async function validateOneFile(
       };
     } else {
       const spec = parsePipelineContract(contractFile);
+      failOn = spec.advisories?.failOn;
       const contractResult = await validatePipelineContract(parsed, spec, {
-        recurse
+        recurse,
+        offline
       });
-      result = {
-        valid: result.valid && contractResult.valid,
-        errors: [...result.errors, ...contractResult.errors]
-      };
+      result = mergeValidationResults(result, contractResult);
     }
   }
-  return result;
+
+  // Known security advisories for the file's own uses: references.
+  const { errors, report } = await checkFileAdvisories(
+    parsed,
+    advisories.checker,
+    failOn
+  );
+  advisories.reports.push(report);
+  return {
+    valid: result.valid && errors.every((e) => e.severity !== 'error'),
+    errors: [...result.errors, ...errors]
+  };
 }
 
 async function validateFiles(
   files: string[],
-  contractFile?: string,
-  recurse: ContractRecurse = 'local',
-  format: ReportFormat = 'text'
+  contractFile: string | undefined,
+  recurse: ContractRecurse,
+  format: ReportFormat,
+  offline: boolean
 ): Promise<void> {
   // Only text mode narrates; json/sarif write nothing but the report to
   // stdout, so the output is pipeable.
@@ -735,8 +1039,9 @@ async function validateFiles(
   if (contractFile) {
     try {
       const source = await resolveContractSource(contractFile, {
-        fetchFile: (uses) => fetchRepoFile(uses),
-        resolveSha: (uses) => resolveActionSha(uses),
+        fetchFile: (uses) => fetchRepoFile(uses, { offline }),
+        resolveSha: async (uses) =>
+          offline ? undefined : resolveActionSha(uses),
         warn: (message) => logger.warn(message)
       });
       contractPath = source.file;
@@ -761,6 +1066,11 @@ async function validateFiles(
     }
   }
 
+  // One lookup per repository across all files (and a 24h disk cache).
+  const advisories = {
+    checker: new AdvisoryChecker({ offline }),
+    reports: [] as AdvisoryReport[]
+  };
   const entries: ReportEntry[] = [];
   for (const filePath of files) {
     try {
@@ -769,7 +1079,9 @@ async function validateFiles(
         filePath,
         contractPath,
         recurse,
-        say
+        say,
+        advisories,
+        offline
       );
       entries.push({ file: filePath, result });
     } catch (error) {
@@ -790,6 +1102,14 @@ async function validateFiles(
   }
 
   const allValid = entries.every((e) => e.result.valid);
+
+  // What couldn't be checked, once for all files: warnings on stderr, and
+  // (text mode only) unknown versions as info. Findings are in the results.
+  for (const line of describeReport(mergeReports(advisories.reports))) {
+    if (line.kind !== 'note') continue;
+    if (line.level === 'warn') logger.warn(line.text);
+    else say(() => logger.info(line.text));
+  }
 
   if (quiet) {
     // eslint-disable-next-line no-console
