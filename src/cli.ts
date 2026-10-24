@@ -1119,20 +1119,12 @@ async function validateFiles(
   }
 
   for (const { file, result } of entries) {
-    if (result.valid) {
-      logger.success(`Validation passed: ${file}`);
-      result.errors.forEach((error) =>
-        logger.warn(
-          `  [${error.severity.toUpperCase()}] ${error.path}: ${error.message}`
-        )
-      );
-    } else {
-      logger.error(`Validation failed: ${file}`);
-      result.errors.forEach((error) =>
-        logger.error(
-          `  [${error.severity.toUpperCase()}] ${error.path}: ${error.message}`
-        )
-      );
+    if (result.valid) logger.success(`Validation passed: ${file}`);
+    else logger.error(`Validation failed: ${file}`);
+    for (const error of result.errors) {
+      const line = `  [${error.severity.toUpperCase()}] ${error.path}: ${error.message}`;
+      if (error.severity === 'warning') logger.warn(line);
+      else logger.error(line);
     }
   }
   if (!allValid) process.exit(1);

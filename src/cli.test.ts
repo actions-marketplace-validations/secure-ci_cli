@@ -98,6 +98,31 @@ describe('secureci validate --contract', () => {
     expect(result.stdout).toContain('Validation passed');
   });
 
+  it('prints warnings at warn level even when a file fails validation', () => {
+    const file = write(
+      'failing-with-warning.yml',
+      [
+        'name: Mixed',
+        'on: pull_request_target',
+        'permissions: {}',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: echo "${{ github.event.pull_request.title }}"'
+      ].join('\n')
+    );
+
+    const result = run(['validate', file, '--offline']);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('[ERROR]   [ERROR] jobs.a.steps[0].run');
+    expect(result.stderr).toContain(
+      '[WARN]   [WARNING] on.pull_request_target'
+    );
+    expect(result.stderr).not.toContain('[ERROR]   [WARNING]');
+  });
+
   it('fails with a clear message when a required action is missing', () => {
     const contract = write(
       'missing-contract.yml',

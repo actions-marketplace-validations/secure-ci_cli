@@ -16,14 +16,15 @@ of [SecureCI](https://secure-ci.dev).
 
 A single CLI that understands GitHub Actions the way the runner does:
 
-- **Run workflows locally** — jobs in `needs:` order, matrix builds, reusable
-  workflows, composite / JavaScript / Docker actions, and the full
+- **Run workflows locally** — jobs in `needs:` order (independent jobs and
+  matrix combinations in parallel), matrix builds, reusable workflows, composite / JavaScript / Docker actions, and the full
   `${{ }}` / `if:` expression language.
 - **Validate** workflow and action files, flag **template injection**
-  (untrusted `${{ }}` input expanded into `run:` scripts) and over-broad
-  `GITHUB_TOKEN` permissions, and **check them against a pipeline contract**
-  (required/forbidden actions, ordering, minimum versions, SHA-pinning and
-  permissions rules).
+  (untrusted `${{ }}` input expanded into `run:` scripts), over-broad
+  `GITHUB_TOKEN` permissions and `pull_request_target` / `workflow_run` jobs
+  that run untrusted code, and **check them against a pipeline contract**
+  (required/forbidden actions, ordering, minimum versions, SHA-pinning,
+  permissions, forbidden triggers and advisory severity rules).
 - **Inventory** every action a workflow pulls in, resolve each tag to a commit
   SHA, and **catch supply-chain drift** when a tag quietly starts pointing
   somewhere new.
@@ -235,9 +236,9 @@ the feature named, and none runs at install time.
 | Capability               | Where                                                                  | Why                                                                                                                                                                                       |
 | ------------------------ | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Shell / process spawning | `run:` steps, JavaScript actions, `docker`/`podman`/`nerdctl`          | Runs workflow steps in a container (or on your host with `--container-runtime host`). `commander` also loads `child_process`, used only for executable subcommands this CLI does not use. |
-| Network                  | `github.com`, `api.github.com` (or the GHES host you set)              | Downloads actions and workflows, and resolves tags to commit SHAs.                                                                                                                        |
+| Network                  | `github.com`, `api.github.com` (or the GHES host you set)              | Downloads actions and workflows, resolves tags to commit SHAs, and looks up security advisories for the actions you use (skipped with `--offline`).                                       |
 | Environment variables    | `HOME`, `PATH`, `GITHUB_*`, `GITHUB_TOKEN`, `GH_TOKEN`                 | Builds the runner environment and authenticates GitHub downloads.                                                                                                                         |
-| Filesystem               | `~/.secureci/`, the working directory, temp dirs                       | Caches actions, stores artifacts and config, and reads your workflow files.                                                                                                               |
+| Filesystem               | `~/.secureci/`, the working directory, temp dirs                       | Caches actions and advisories, stores artifacts and config, and reads your workflow files.                                                                                                |
 | Hard-coded URLs          | GitHub documentation and JSON Schema URLs in messages and editor hints | Informational only; the CLI does not fetch them.                                                                                                                                          |
 
 No install scripts run for consumers. The published tarball contains only

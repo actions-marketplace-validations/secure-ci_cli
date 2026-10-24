@@ -27,6 +27,8 @@ src/
 ├── config.ts              # ~/.secureci/config.yml defaults
 ├── report.ts              # --format text/json/sarif rendering
 ├── inventory.ts           # Action inventory + lockfile drift
+├── github-lockfile.ts     # Read GitHub's .github/workflows/actions.lock
+├── contract-source.ts     # --contract from a path or owner/repo/path@ref
 ├── pin.ts                 # `secureci pin`: rewrite uses: tags to commit SHAs in place
 ├── advisories.ts          # GitHub Advisory Database lookups, version ranges, cache
 ├── init.ts                # `secureci init workflow` generator
@@ -37,6 +39,7 @@ src/
 │   ├── validator.ts                  # Syntax validation + expression checks
 │   ├── injection.ts                  # Template injection: untrusted ${{ }} in run:/github-script (recursive)
 │   ├── permissions.ts                # GITHUB_TOKEN permissions checks (default + contract policy)
+│   ├── dangerous-triggers.ts         # pull_request_target/workflow_run + untrusted checkout
 │   ├── pipeline-contract-parser.ts   # Parse --contract files
 │   └── pipeline-contract-validator.ts# Check a workflow against a contract (recursive)
 ├── runner/
@@ -61,7 +64,9 @@ src/
 │   ├── container-runtime.ts# Docker/Podman/containerd (nerdctl) CLI driver
 │   └── action-fetcher.ts  # Fetch + cache remote actions by commit SHA
 ├── utils/
-│   ├── logger.ts          # Logging with secret masking
+│   ├── logger.ts          # Logging with secret masking, withJob() prefixes
+│   ├── progress.ts        # Progress lines on stderr (inventory)
+│   ├── ansi.ts            # Minimal terminal colours (no chalk)
 │   ├── key-value.ts       # --input/--secret/--env/--var parsing
 │   ├── env-file.ts        # --env-file/--secret-file/... parsing and precedence
 │   └── repository.ts      # Repository root for ./ references
@@ -104,6 +109,12 @@ and exit codes live here. Keep command wiring thin; put logic in the layer below
   (run by `validateWorkflow`) and the contract `permissions:` policy (errors,
   run by the contract validator). `mergeValidationResults` drops a warning an
   error with the same rule and path supersedes.
+- `dangerous-triggers.ts` — `pull_request_target` / `workflow_run` jobs that
+  check out untrusted code and then run it (errors), and the privileged trigger
+  alone (a warning); the contract's `forbidden-triggers` is checked by the
+  contract validator.
+- Advisory findings (`secureci/vulnerable-action`) come from `advisories.ts`,
+  which `cli.ts` runs for `validate` and `inventory`; the parser stays offline.
 - `pipeline-contract-{parser,validator}.ts` — parse a `--contract` file and check
   a workflow against it, recursing into local (and, opt-in, remote) composite
   actions and reusable workflows.
@@ -180,7 +191,10 @@ graph TD
 ## Where to add things
 
 - **New CLI command:** define it in `cli.ts`, keep logic in a dedicated module.
-- **New validation rule:** `validator.ts` (+ `validator.test.ts`).
+- **New validation rule:** `validator.ts` (+ `validator.test.ts`), or its own
+  `parser/<rule>.ts` called from `validateWorkflow`. Give findings a `rule` id
+  and declare it in `RULES` in `report.ts` so SARIF and JSON carry it, and
+  document it in DOCS.md.
 - **New action type:** extend `ActionRuns` in `types/index.ts`, dispatch in
   `actions.ts` (or a new `<type>-action.ts`), add fixtures + tests.
 - **New workflow feature:** update `types/index.ts`, the parser, the validator,
