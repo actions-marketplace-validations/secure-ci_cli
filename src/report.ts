@@ -57,7 +57,8 @@ function jsonForFile(entry: ReportEntry) {
     errors: entry.result.errors.map((e) => ({
       path: e.path,
       message: e.message,
-      severity: e.severity
+      severity: e.severity,
+      rule: ruleIdFor(e)
     }))
   };
 }

@@ -27,8 +27,31 @@ describe('formatValidation (single file)', () => {
     expect(out.errors[0]).toEqual({
       path: 'jobs.a.steps[0]',
       message: 'Step must have "uses" or "run"',
-      severity: 'error'
+      severity: 'error',
+      rule: 'secureci/validation'
     });
+    expect(out.errors[1].rule).toBe('secureci/contract');
+  });
+
+  it('json: carries an explicit rule, matching the SARIF rule id', () => {
+    const out = JSON.parse(
+      formatValidation(
+        'ci.yml',
+        {
+          valid: false,
+          errors: [
+            {
+              path: 'jobs.a.steps[0].run',
+              message: 'untrusted input',
+              severity: 'error',
+              rule: 'secureci/injection'
+            }
+          ]
+        },
+        'json'
+      )
+    );
+    expect(out.errors[0].rule).toBe('secureci/injection');
   });
 
   it('json: clean result', () => {

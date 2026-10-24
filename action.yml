@@ -39,7 +39,7 @@ inputs:
     required: false
     default: 'latest'
   github-token:
-    description: 'Token used by the CLI to fetch private actions/workflows for --contract-recurse all.'
+    description: 'Token used by the CLI to look up security advisories for the actions you use (raising the API rate limit), and to fetch a private remote contract or private actions/workflows for --contract-recurse all.'
     required: false
     default: ${{ github.token }}
 

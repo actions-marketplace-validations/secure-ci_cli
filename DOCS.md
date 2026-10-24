@@ -6,6 +6,7 @@ introduction and install steps, see the [README](README.md).
 ## Contents
 
 - [Commands at a glance](#commands-at-a-glance)
+  - [Values from files (`--env-file`, `--secret-file`, `--input-file`, `--var-file`)](#values-from-files---env-file---secret-file---input-file---var-file)
 - [Container isolation](#container-isolation)
   - [Flags](#flags)
   - [How container mode works](#how-container-mode-works)
@@ -25,6 +26,7 @@ introduction and install steps, see the [README](README.md).
   - [Contract limitations (v1 scope)](#contract-limitations-v1-scope)
 - [Machine-readable output (`--format`)](#machine-readable-output---format)
 - [Action inventory and drift (`secureci inventory`)](#action-inventory-and-drift-secureci-inventory)
+  - [Drift against `secureci.lock`](#drift-against-securecilock)
   - [GitHub's `actions.lock`](#githubs-actionslock)
 - [Pin actions to commit SHAs (`secureci pin`)](#pin-actions-to-commit-shas-secureci-pin)
 - [Known security advisories](#known-security-advisories)
@@ -38,6 +40,7 @@ introduction and install steps, see the [README](README.md).
   - [Service containers (`jobs.<id>.services`)](#service-containers-jobsidservices)
   - [Artifacts and caching](#artifacts-and-caching)
   - [Matrix builds (`strategy.matrix`)](#matrix-builds-strategymatrix)
+    - [Running a subset of combinations (`--matrix`)](#running-a-subset-of-combinations---matrix)
   - [Reusable workflows (`jobs.<id>.uses:`)](#reusable-workflows-jobsiduses)
   - [Shells and `defaults.run`](#shells-and-defaultsrun)
   - [Step outputs](#step-outputs)
@@ -498,7 +501,7 @@ secureci validate .github/workflows/ci.yml --format json
 secureci validate .github/workflows/ci.yml --contract contract.yml --format sarif > results.sarif
 ```
 
-- **`json`**: `{ file, valid, errors: [{ path, message, severity }] }`.
+- **`json`**: `{ file, valid, errors: [{ path, message, severity, rule }] }`, where `rule` is the same id SARIF uses (for example `secureci/injection`). Several files become `{ valid, files: [...] }`.
 - **`sarif`**: a SARIF 2.1.0 log (rules `secureci/validation`, `secureci/contract`, `secureci/expression`, `secureci/injection`, `secureci/permissions`, `secureci/dangerous-trigger`, `secureci/vulnerable-action`). Upload it with `github/codeql-action/upload-sarif` to see findings inline on pull requests in GitHub code scanning.
 
 ## Action inventory and drift (`secureci inventory`)
@@ -600,7 +603,7 @@ Each change is printed as `file:line owner/repo@v4 -> <sha12> (v4)`, followed by
 - **Resolution** is the same as `inventory`'s: `git ls-remote`, or the GitHub API when a token is available (`GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`). Each distinct reference is looked up once. `--offline` uses only the commits recorded in the action cache by earlier `run` or `inventory` runs. For a branch (`@main`) that is the last commit seen, not necessarily the current one.
 - **Unresolvable references** (a deleted or private repository, a missing ref, or anything not cached with `--offline`) are reported with their file and line and left unchanged. `pin` still pins everything else and exits 0; `pin --check` exits non-zero. A reference with no `@ref`, or one written as a YAML block scalar, is reported the same way.
 - **`--check`** writes nothing and exits non-zero if any reference would be pinned or can't be resolved. Use it in CI to keep workflows pinned.
-- **`--update-lock`** runs [`inventory --update-lock`](#drift-against-secureciclock) after pinning, so `secureci.lock` records the new `owner/repo@<sha>` references. It can't be combined with `--check`.
+- **`--update-lock`** runs [`inventory --update-lock`](#drift-against-securecilock) after pinning, so `secureci.lock` records the new `owner/repo@<sha>` references. It can't be combined with `--check`.
 
 ## Known security advisories
 
@@ -640,7 +643,7 @@ jobs:
       security-events: write # for the SARIF upload
     steps:
       - uses: actions/checkout@v4
-      - uses: secure-ci/cli@v0.4.0 # a release tag; see below
+      - uses: secure-ci/cli@v0.6.0 # a release tag; see below
         with:
           # all inputs are optional
           contract: contracts/platform-standard.yml
@@ -652,7 +655,7 @@ jobs:
 
 The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `inventory` (`check` to also run `secureci inventory --check` against `secureci.lock`, or GitHub's `actions.lock` when that is the only lockfile), `version` (which `@secureci/cli` to run), and `github-token`.
 
-Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v0.4.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; set the `version` input to pin which CLI release it runs (default `latest`).
+Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v0.6.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; set the `version` input to pin which CLI release it runs (default `latest`).
 
 ### Generate the workflow (`secureci init workflow`)
 
@@ -682,7 +685,7 @@ Auditors and assessors increasingly treat the CI pipeline as part of the softwar
 To keep a report per run, turn on the action's drift check and upload the report as a build artifact:
 
 ```yaml
-- uses: secure-ci/cli@v0.4.0 # writes secureci-results.sarif
+- uses: secure-ci/cli@v0.6.0 # writes secureci-results.sarif
   with:
     contract: contracts/standard.yml
     inventory: check # fail on drift against the committed secureci.lock
@@ -900,18 +903,28 @@ secureci run .github/workflows/ci.yml
 src/
 ├── cli.ts                    # CLI entry point (commander)
 ├── config.ts                 # ~/.secureci/config.yml
+├── report.ts                 # --format text/json/sarif rendering
+├── inventory.ts              # `secureci inventory`: action inventory, secureci.lock drift
+├── github-lockfile.ts        # Read GitHub's .github/workflows/actions.lock
+├── pin.ts                    # `secureci pin`: rewrite uses: tags to commit SHAs
+├── advisories.ts             # GitHub Advisory Database lookups, version ranges, cache
+├── contract-source.ts        # --contract from a path or owner/repo/path@ref
 ├── init.ts                   # `secureci init` workflow generator
 ├── index.ts                  # Library exports
 ├── version.ts                # --version (embedded in the standalone binary)
 ├── parser/
 │   ├── workflow-parser.ts    # Parse workflow and action YAML
-│   ├── validator.ts          # Validate syntax
+│   ├── validator.ts          # Validate syntax and expressions
+│   ├── injection.ts          # Template injection in run: / github-script
+│   ├── permissions.ts        # GITHUB_TOKEN permissions checks
+│   ├── dangerous-triggers.ts # pull_request_target / workflow_run with untrusted checkout
 │   ├── pipeline-contract-parser.ts     # Parse --contract files
 │   └── pipeline-contract-validator.ts  # Check a workflow against a contract
 ├── runner/
 │   ├── dry-run.ts            # Dry run mode
 │   ├── executor.ts           # Run a workflow: jobs in needs: order, reusable workflows
-│   ├── job-plan.ts           # Matrix expansion, needs: ordering
+│   ├── job-plan.ts           # Matrix expansion, --matrix filter, needs: ordering
+│   ├── scheduler.ts          # --parallel slots, job graph, max-parallel, fail-fast
 │   ├── github-context.ts     # github context, event payload, workflow inputs
 │   ├── job-runtime.ts        # Per-job state, step files, post steps
 │   ├── job-container.ts      # Job container, runs-on images, services, cleanup
@@ -929,8 +942,10 @@ src/
 │   ├── container-runtime.ts  # Docker/Podman/containerd CLI driver
 │   └── action-fetcher.ts     # Fetch and cache remote actions by commit
 ├── utils/
-│   ├── logger.ts             # Logging utility with secret masking
-│   ├── key-value.ts          # --input/--secret/--env parsing
+│   ├── logger.ts             # Logging utility with secret masking, per-job prefixes
+│   ├── progress.ts           # Progress lines for long inventory runs
+│   ├── ansi.ts               # Terminal colours
+│   ├── key-value.ts          # --input/--secret/--env/--var parsing
 │   ├── env-file.ts           # --env-file/--secret-file/... parsing and precedence
 │   └── repository.ts         # Repository root for ./ references
 └── types/
