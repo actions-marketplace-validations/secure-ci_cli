@@ -333,11 +333,42 @@ jobs:
   `github.head_ref`, `github.event.workflow_run.head_sha`, `.head_branch`,
   `.head_commit.id` or `.head_repository.full_name`, or a literal `refs/pull/…`
   ref.
+- **What `actions/checkout` does about it.** Since June 2026 `actions/checkout`
+  refuses to check out a fork's code under these triggers unless the step sets
+  `allow-unsafe-pr-checkout: true`
+  ([changelog](https://github.blog/changelog/2026-06-18-safer-pull_request_target-defaults-for-github-actions-checkout/)).
+  The finding stays an **error** either way, and its message says which case
+  applies:
+  - v7, a floating major tag (`@v4`), a branch (`@main`) or no version: the
+    checkout is refused by default, so the step fails until someone adds the
+    opt-out, which would run the fork's code.
+  - A commit SHA, a minor or patch version (`@v4.1.0`, `@v4.2`) or `@v1`: the
+    default doesn't apply, so the checkout succeeds. A SHA counts as
+    unprotected because its version can't be told offline.
+  - `allow-unsafe-pr-checkout: true` (or `'true'`): an explicit opt-out of the
+    protection.
 - **Warning instead of error** when the job's `if:` is a label check
   (`github.event.pull_request.labels…`, e.g.
   `contains(github.event.pull_request.labels.*.name, 'safe to test')`, or
   `github.event.label.name`): a maintainer must approve each run, so review the
   pull request's code before applying the label.
+- **Warning instead of error** when the checkout step carries a
+  `# secureci-allow dangerous-trigger: <reason>` comment, at the end of the
+  step's first line or on a line of its own directly above it. Use it when a
+  team accepts the risk, for example while workflows still track the org's own
+  actions on `@main`. The warning names the comment and quotes the reason, so
+  the exception shows up in every report. A comment with no reason doesn't
+  downgrade anything, and the error says a reason is needed.
+
+  ```yaml
+  steps:
+    # secureci-allow dangerous-trigger: org actions stay on main until the v2 release
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+    - run: npm test
+  ```
+
 - **Warning** for the trigger alone (path `on.<trigger>`, once per privileged
   trigger), so teams can audit every such workflow. It is **omitted when a
   job-level finding above is reported**, so a workflow is never reported twice
@@ -643,7 +674,7 @@ jobs:
       security-events: write # for the SARIF upload
     steps:
       - uses: actions/checkout@v4
-      - uses: secure-ci/cli@v0.6.0 # a release tag; see below
+      - uses: secure-ci/cli@v0.7.0 # a release tag; see below
         with:
           # all inputs are optional
           contract: contracts/platform-standard.yml
@@ -655,7 +686,7 @@ jobs:
 
 The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `inventory` (`check` to also run `secureci inventory --check` against `secureci.lock`, or GitHub's `actions.lock` when that is the only lockfile), `version` (which `@secureci/cli` to run), and `github-token`.
 
-Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v0.6.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; set the `version` input to pin which CLI release it runs (default `latest`).
+Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v0.7.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; set the `version` input to pin which CLI release it runs (default `latest`).
 
 ### Generate the workflow (`secureci init workflow`)
 
@@ -685,7 +716,7 @@ Auditors and assessors increasingly treat the CI pipeline as part of the softwar
 To keep a report per run, turn on the action's drift check and upload the report as a build artifact:
 
 ```yaml
-- uses: secure-ci/cli@v0.6.0 # writes secureci-results.sarif
+- uses: secure-ci/cli@v0.7.0 # writes secureci-results.sarif
   with:
     contract: contracts/standard.yml
     inventory: check # fail on drift against the committed secureci.lock

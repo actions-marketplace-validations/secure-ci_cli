@@ -285,6 +285,142 @@ describe('dangerousTriggerErrors', () => {
     });
   });
 
+  describe("actions/checkout's safe pull_request_target default", () => {
+    function finding(
+      uses: string,
+      extra: Record<string, unknown> = {},
+      on: WorkflowTrigger = 'pull_request_target'
+    ) {
+      const errors = dangerousTriggerErrors(
+        wf(on, {
+          build: job([
+            { uses, with: { ref: PR_HEAD, ...extra } },
+            { run: 'make' }
+          ])
+        })
+      );
+      expect(errors).toHaveLength(1);
+      return errors[0];
+    }
+
+    it.each([
+      ['actions/checkout@v7'],
+      ['actions/checkout@v4'],
+      ['actions/checkout@v6'],
+      ['actions/checkout@main'],
+      ['actions/checkout']
+    ])('notes that %s refuses the checkout by default', (uses) => {
+      const f = finding(uses);
+      expect(f.severity).toBe('error');
+      expect(f.message).toMatch(
+        /actions\/checkout refuses this checkout by default.*allow-unsafe-pr-checkout/
+      );
+    });
+
+    it('notes the default for workflow_run too', () => {
+      const f = finding('actions/checkout@v7', {}, 'workflow_run');
+      expect(f.message).toContain('refuses this checkout by default');
+    });
+
+    it.each([
+      ['actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683'],
+      ['actions/checkout@v4.1.0'],
+      ['actions/checkout@v4.2'],
+      ['actions/checkout@v1'],
+      ['actions/checkout@v1.2.0']
+    ])('says the default does not protect %s', (uses) => {
+      const f = finding(uses);
+      expect(f.severity).toBe('error');
+      expect(f.message).toContain(
+        `the safe default of actions/checkout does not apply to @${uses.split('@')[1]}`
+      );
+      expect(f.message).not.toContain('refuses this checkout');
+    });
+
+    it.each([[true], ['true'], ['True']])(
+      'errors on an explicit allow-unsafe-pr-checkout: %s',
+      (value) => {
+        const f = finding('actions/checkout@v7', {
+          'allow-unsafe-pr-checkout': value
+        });
+        expect(f.severity).toBe('error');
+        expect(f.message).toContain(
+          'allow-unsafe-pr-checkout: true explicitly turns off'
+        );
+      }
+    );
+
+    it('treats allow-unsafe-pr-checkout: false as the default', () => {
+      const f = finding('actions/checkout@v7', {
+        'allow-unsafe-pr-checkout': false
+      });
+      expect(f.message).toContain('refuses this checkout by default');
+    });
+
+    it('keeps a label-gated opt-out a warning', () => {
+      const errors = dangerousTriggerErrors(
+        wf('pull_request_target', {
+          test: job(
+            [
+              {
+                uses: 'actions/checkout@v7',
+                with: { ref: PR_HEAD, 'allow-unsafe-pr-checkout': true }
+              },
+              { run: 'npm test' }
+            ],
+            { if: "contains(github.event.pull_request.labels.*.name, 'ok')" }
+          )
+        })
+      );
+      expect(errors.map((e) => e.severity)).toEqual(['warning']);
+      expect(errors[0].message).toContain('allow-unsafe-pr-checkout: true');
+      expect(errors[0].message).toContain('gated by a label check');
+    });
+  });
+
+  describe('secureci-allow comment on the checkout step', () => {
+    const steps = [
+      { uses: 'actions/checkout@v4', with: { ref: PR_HEAD } },
+      { run: 'make' }
+    ];
+
+    it('downgrades the error to a warning and quotes the reason', () => {
+      const errors = dangerousTriggerErrors(
+        wf('pull_request_target', { build: job(steps) }),
+        new Map([['jobs.build.steps[0]', 'org actions still on main']])
+      );
+      expect(errors).toEqual([
+        {
+          path: 'jobs.build.steps[0]',
+          severity: 'warning',
+          rule: 'secureci/dangerous-trigger',
+          message: expect.stringContaining(
+            'Downgraded to a warning by "# secureci-allow dangerous-trigger" on this step: org actions still on main'
+          )
+        }
+      ]);
+    });
+
+    it('keeps the error and explains when the reason is missing', () => {
+      const errors = dangerousTriggerErrors(
+        wf('pull_request_target', { build: job(steps) }),
+        new Map([['jobs.build.steps[0]', '']])
+      );
+      expect(errors.map((e) => e.severity)).toEqual(['error']);
+      expect(errors[0].message).toContain(
+        'The "# secureci-allow dangerous-trigger" comment on this step needs a reason'
+      );
+    });
+
+    it('ignores a comment on another step', () => {
+      const errors = dangerousTriggerErrors(
+        wf('pull_request_target', { build: job(steps) }),
+        new Map([['jobs.build.steps[1]', 'wrong step']])
+      );
+      expect(errors.map((e) => e.severity)).toEqual(['error']);
+    });
+  });
+
   describe('label-gated jobs (downgraded to warning)', () => {
     it.each([
       ["contains(github.event.pull_request.labels.*.name, 'safe to test')"],

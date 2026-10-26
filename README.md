@@ -22,7 +22,8 @@ A single CLI that understands GitHub Actions the way the runner does:
 - **Validate** workflow and action files, flag **template injection**
   (untrusted `${{ }}` input expanded into `run:` scripts), over-broad
   `GITHUB_TOKEN` permissions and `pull_request_target` / `workflow_run` jobs
-  that run untrusted code, and **check them against a pipeline contract**
+  that run untrusted code (noting whether `actions/checkout`'s safe default
+  covers the checkout), and **check them against a pipeline contract**
   (required/forbidden actions, ordering, minimum versions, SHA-pinning,
   permissions, forbidden triggers and advisory severity rules).
 - **Inventory** every action a workflow pulls in, resolve each tag to a commit

@@ -40,6 +40,7 @@ src/
 │   ├── injection.ts                  # Template injection: untrusted ${{ }} in run:/github-script (recursive)
 │   ├── permissions.ts                # GITHUB_TOKEN permissions checks (default + contract policy)
 │   ├── dangerous-triggers.ts         # pull_request_target/workflow_run + untrusted checkout
+│   ├── allow-comments.ts             # `# secureci-allow <rule>: <reason>` comments on steps
 │   ├── pipeline-contract-parser.ts   # Parse --contract files
 │   └── pipeline-contract-validator.ts# Check a workflow against a contract (recursive)
 ├── runner/
@@ -110,9 +111,14 @@ and exit codes live here. Keep command wiring thin; put logic in the layer below
   run by the contract validator). `mergeValidationResults` drops a warning an
   error with the same rule and path supersedes.
 - `dangerous-triggers.ts` — `pull_request_target` / `workflow_run` jobs that
-  check out untrusted code and then run it (errors), and the privileged trigger
-  alone (a warning); the contract's `forbidden-triggers` is checked by the
-  contract validator.
+  check out untrusted code and then run it (errors, whose message says whether
+  `actions/checkout`'s safe default or `allow-unsafe-pr-checkout` applies), and
+  the privileged trigger alone (a warning); the contract's `forbidden-triggers`
+  is checked by the contract validator.
+- `allow-comments.ts` — reads `# secureci-allow <rule>: <reason>` comments on
+  (or directly above) a step from the YAML source, since the parsed workflow
+  drops comments. `validateWorkflow` passes them to `dangerousTriggerErrors`,
+  which downgrades that step's finding to a warning quoting the reason.
 - Advisory findings (`secureci/vulnerable-action`) come from `advisories.ts`,
   which `cli.ts` runs for `validate` and `inventory`; the parser stays offline.
 - `pipeline-contract-{parser,validator}.ts` — parse a `--contract` file and check

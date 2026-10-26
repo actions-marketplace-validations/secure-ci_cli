@@ -2,6 +2,9 @@ import { Step, ValidationError, WorkflowFile } from '../types';
 
 const RULE = 'secureci/dangerous-trigger';
 
+/** The comment that downgrades a finding on a checkout step. */
+const ALLOW = '# secureci-allow dangerous-trigger';
+
 /**
  * Triggers whose runs get the base repository's secrets and a read/write
  * `GITHUB_TOKEN` even when the change came from a fork.
@@ -51,6 +54,39 @@ function untrustedCheckoutInput(step: Step): string | undefined {
   return undefined;
 }
 
+/**
+ * Whether `actions/checkout` itself refuses the untrusted checkout: since
+ * June 2026 it won't check out a fork's code under these triggers unless
+ * `allow-unsafe-pr-checkout` is set. v7 has it, and floating major tags
+ * (`@v4`) and branches got it backported; SHA, minor or patch pins and v1
+ * did not.
+ */
+function checkoutProtection(step: Step): string {
+  const optOut = step.with?.['allow-unsafe-pr-checkout'];
+  if (String(optOut).toLowerCase() === 'true') {
+    return (
+      `allow-unsafe-pr-checkout: true explicitly turns off actions/checkout's refusal to ` +
+      `check out a fork's code under these triggers`
+    );
+  }
+  const version = step.uses?.split('@')[1];
+  if (
+    version !== undefined &&
+    (/^[0-9a-f]{40}$/i.test(version) ||
+      /^v\d+\.\d+/.test(version) ||
+      /^v1$/.test(version))
+  ) {
+    return (
+      `the safe default of actions/checkout does not apply to @${version} ` +
+      `(only v7, floating major tags like @v4 and branches have it), so the checkout succeeds`
+    );
+  }
+  return (
+    `actions/checkout refuses this checkout by default, so the step fails until someone ` +
+    `sets allow-unsafe-pr-checkout: true, which would run the fork's code`
+  );
+}
+
 /** How a step would execute checked-out code, or undefined if it doesn't. */
 function executes(step: Step): string | undefined {
   if (step.run) return 'run:';
@@ -71,9 +107,14 @@ function executes(step: Step): string | undefined {
  * - warning: a privileged trigger with no such job, once per trigger, so
  *   teams can audit it. Omitted when a job-level finding is reported, so
  *   a workflow is never reported twice for the same problem.
+ *
+ * `allowed` maps checkout step paths with a `# secureci-allow
+ * dangerous-trigger: <reason>` comment to the reason (see
+ * stepAllowComments); a reason downgrades that job's error to a warning.
  */
 export function dangerousTriggerErrors(
-  workflow: WorkflowFile
+  workflow: WorkflowFile,
+  allowed: Map<string, string> = new Map()
 ): ValidationError[] {
   const triggers = workflowTriggers(workflow.on).filter((t) =>
     PRIVILEGED_TRIGGERS.includes(t)
@@ -91,17 +132,25 @@ export function dangerousTriggerErrors(
     );
     if (runIdx === -1) continue;
 
+    const path = `jobs.${jobId}.steps[${checkoutIdx}]`;
     const gated = LABEL_GATE.test(String(job.if ?? ''));
+    const reason = allowed.get(path);
     findings.push({
-      path: `jobs.${jobId}.steps[${checkoutIdx}]`,
+      path,
       message:
         `Job "${jobId}" checks out untrusted code (${untrustedCheckoutInput(steps[checkoutIdx])}) ` +
         `in a workflow triggered by ${named}, then executes it at steps[${runIdx}] (${executes(steps[runIdx])}). ` +
-        `These triggers run with the repository's secrets and a write token, so a fork can run its own code with them` +
+        `These triggers run with the repository's secrets and a write token, so a fork can run its own code with them; ` +
+        `${checkoutProtection(steps[checkoutIdx])}` +
         (gated
           ? `. The job is gated by a label check in its if:, so review the pull request's code before applying the label`
-          : `; check out the base ref instead, or move the build to an unprivileged pull_request workflow`),
-      severity: gated ? 'warning' : 'error',
+          : `. Check out the base ref instead, or move the build to an unprivileged pull_request workflow`) +
+        (reason
+          ? `. Downgraded to a warning by "${ALLOW}" on this step: ${reason}`
+          : reason === ''
+            ? `. The "${ALLOW}" comment on this step needs a reason (${ALLOW}: <reason>) to downgrade this to a warning`
+            : ''),
+      severity: gated || reason ? 'warning' : 'error',
       rule: RULE
     });
   }

@@ -162,6 +162,31 @@ describe('Validator', () => {
         ]);
       });
 
+      it('downgrades to a warning with a secureci-allow comment', () => {
+        const result = validate([
+          'name: PR',
+          'on: pull_request_target',
+          'permissions: {}',
+          'jobs:',
+          '  build:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      # secureci-allow dangerous-trigger: org actions pinned to main',
+          '      - uses: actions/checkout@v4',
+          '        with:',
+          '          ref: ${{ github.event.pull_request.head.sha }}',
+          '      - run: npm test'
+        ]);
+        expect(result.valid).toBe(true);
+        expect(result.errors).toEqual([
+          expect.objectContaining({
+            path: 'jobs.build.steps[0]',
+            severity: 'warning',
+            message: expect.stringContaining('org actions pinned to main')
+          })
+        ]);
+      });
+
       it('passes with a warning when the trigger is used safely', () => {
         const result = validate([
           'name: PR',

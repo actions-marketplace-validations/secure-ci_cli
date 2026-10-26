@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import { parseWorkflow, parseAction } from './workflow-parser';
 import {
   ActionFile,
@@ -9,6 +10,7 @@ import { validateExpression } from '../runner/expression';
 import { actionInjectionErrors, workflowInjectionErrors } from './injection';
 import { workflowPermissionErrors } from './permissions';
 import { dangerousTriggerErrors } from './dangerous-triggers';
+import { stepAllowComments } from './allow-comments';
 
 /**
  * Invalid `if:` expressions in a workflow: syntax errors, or contexts and
@@ -142,7 +144,15 @@ export function validateWorkflow(filePath: string): ValidationResult {
     errors.push(...workflowExpressionErrors(workflow));
     errors.push(...workflowInjectionErrors(workflow, filePath));
     errors.push(...workflowPermissionErrors(workflow));
-    errors.push(...dangerousTriggerErrors(workflow));
+    errors.push(
+      ...dangerousTriggerErrors(
+        workflow,
+        stepAllowComments(
+          fs.readFileSync(filePath, 'utf-8'),
+          'dangerous-trigger'
+        )
+      )
+    );
   } catch (error) {
     errors.push({
       path: 'root',
