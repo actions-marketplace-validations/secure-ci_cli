@@ -50,7 +50,31 @@ To build from source instead: `npm install && npm run build`.
 
 ### Standalone binary (no Node.js needed)
 
-Every [release](https://github.com/secure-ci/cli/releases/latest) has a
+On macOS or Linux, the install script picks the binary for your platform,
+checks it against the release's `SHA256SUMS` (a mismatch aborts), verifies its
+build provenance when the [GitHub CLI](https://cli.github.com) is signed in, and
+installs it to `~/.local/bin` without `sudo`:
+
+```bash
+curl -fsSL https://secure-ci.dev/install.sh | sh
+```
+
+To read the script before running it ([source](install.sh)):
+
+```bash
+curl -fsSL https://secure-ci.dev/install.sh -o install.sh
+less install.sh
+sh install.sh
+```
+
+Set `SECURECI_VERSION=0.9.0` to install a specific release,
+`SECURECI_INSTALL_DIR` to install somewhere else, and
+`SECURECI_REQUIRE_ATTESTATION=1` to fail unless `gh` verifies build provenance
+(e.g. `curl -fsSL https://secure-ci.dev/install.sh | SECURECI_VERSION=0.9.0 sh`).
+`secure-ci.dev/install.sh` redirects to [`install.sh`](install.sh) on this
+repository's `main` branch.
+
+Or download a binary yourself. Every [release](https://github.com/secure-ci/cli/releases/latest) has a
 single-file binary for each platform below. The links always point to the
 latest release:
 

@@ -51,6 +51,32 @@ jobs:
           node dist/cli.js validate .github/workflows/ci.yaml
           node dist/cli.js run .github/workflows/ci.yaml --dry-run
 
+  install-script:
+    # install.sh is served from main at secure-ci.dev/install.sh, so check it
+    # installs the latest published release on both supported OSes (and with
+    # each OS's own /bin/sh: dash on Ubuntu, bash 3.2 in sh mode on macOS).
+    name: Install script (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install the latest release with install.sh
+        env:
+          SECURECI_INSTALL_DIR: ${{ runner.temp }}/secureci-bin
+        run: |
+          sh install.sh
+          "$SECURECI_INSTALL_DIR/secureci" --version
+          "$SECURECI_INSTALL_DIR/secureci" validate test/fixtures/simple-workflow.yml
+
   standalone:
     # Standalone binaries (Node.js single executable applications), built
     # natively on each platform. On PRs this is the smoke test; on main the
