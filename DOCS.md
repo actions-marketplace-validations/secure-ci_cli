@@ -176,7 +176,10 @@ multi-line values work in double quotes
 > The CLI never falls back to running steps on your machine: if the container runtime isn't available, it reports that and exits without running anything. Only with `--container-runtime host` (an explicit opt-in, also settable in the config file) do `run:` steps and **remote JavaScript and composite actions run directly on your machine with your user's privileges**. Any third-party action can read your files and use your network. The CLI prints a warning listing the remote actions before such a job runs. Use a container runtime to sandbox them.
 
 - On the host, steps and actions don't inherit your shell's environment: only `PATH`, `HOME`, locale, temp-dir, proxy/CA and container-client variables are passed, plus the runner's `GITHUB_*` / `RUNNER_*` variables and the workflow's own `env:`. Pass anything else explicitly with `--env NAME` (value from your shell) or `--env NAME=value`, and secrets with `--secret NAME`.
-- In container mode, env values never appear on the container client's command line (see [Secret Masking](#secret-masking) below).
+- In container mode, env values never appear on the container client's command line (see [Secret Masking](#secret-masking) below). A Docker action's `args` do; the CLI warns when a secret ends up there.
+- In container mode, the working copy's `.git` is mounted **read-only**, so a step can't plant hooks or config that later run on your machine. Steps that write to `.git` (`git commit`, `git fetch`, ...) fail; with `--no-local-checkout` it stays writable.
+- Built-in artifact and cache actions (and `actions/checkout` with `path:`) never follow a symlink out of the workspace: such paths are skipped on upload, and a destination that resolves outside the workspace fails the step. Symlinks inside a download destination are replaced, not written through.
+- Image references are validated, so an action's `image` can't smuggle `docker run` options.
 
 ### `actions/checkout`
 
@@ -674,7 +677,7 @@ jobs:
       security-events: write # for the SARIF upload
     steps:
       - uses: actions/checkout@v4
-      - uses: secure-ci/cli@v0.7.0 # a release tag; see below
+      - uses: secure-ci/cli@v0.8.0 # a release tag; see below
         with:
           # all inputs are optional
           contract: contracts/platform-standard.yml
@@ -686,7 +689,7 @@ jobs:
 
 The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `inventory` (`check` to also run `secureci inventory --check` against `secureci.lock`, or GitHub's `actions.lock` when that is the only lockfile), `version` (which `@secureci/cli` to run), and `github-token`.
 
-Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v0.7.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; set the `version` input to pin which CLI release it runs (default `latest`).
+Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v0.8.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; by default it runs the CLI release matching the action's tag; set the `version` input to run another one.
 
 ### Generate the workflow (`secureci init workflow`)
 
@@ -716,7 +719,7 @@ Auditors and assessors increasingly treat the CI pipeline as part of the softwar
 To keep a report per run, turn on the action's drift check and upload the report as a build artifact:
 
 ```yaml
-- uses: secure-ci/cli@v0.7.0 # writes secureci-results.sarif
+- uses: secure-ci/cli@v0.8.0 # writes secureci-results.sarif
   with:
     contract: contracts/standard.yml
     inventory: check # fail on drift against the committed secureci.lock
@@ -815,7 +818,7 @@ Sidecar containers such as databases and caches start before the job's steps and
 
 - **Container mode:** the job gets its own network. Each service joins it under its service id, so steps reach it by hostname (`postgres:5432`), as on GitHub.
 - **Host mode** (`--container-runtime host`): services still run in containers (a container runtime is required). Steps reach them through their published `ports` on `localhost`.
-- `image`, `env`, `ports`, `volumes` and `options` (e.g. `--health-cmd ...`) are supported. Steps start once every service with a health check reports healthy; an unhealthy service fails the job. `credentials` are ignored (log in with `docker login`).
+- `image`, `env`, `ports`, `volumes` and `options` (e.g. `--health-cmd ...`) are supported. Options that would give a service access to this machine (`--privileged`, `--cap-add`, `--security-opt`, `--device`, host namespaces such as `--network`/`--pid`, and mounts via `-v`/`--mount`/`--volumes-from`) are refused, failing the job. `volumes` may be named or anonymous volumes, or bind mounts of paths inside the workspace (not its `.git`). Steps start once every service with a health check reports healthy; an unhealthy service fails the job. `credentials` are ignored (log in with `docker login`).
 - `${{ job.services.<id>.ports['5432'] }}` is the host port a container port is published on; `job.services.<id>.id` and `.network` are also set.
 
 ### Artifacts and caching

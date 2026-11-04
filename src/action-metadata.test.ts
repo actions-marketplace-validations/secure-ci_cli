@@ -18,6 +18,13 @@ describe('action.yml', () => {
     expect(action.name).toBe('SecureCI GHA');
   });
 
+  it('runs the CLI release it ships with by default, not a moving dist-tag', () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')
+    );
+    expect(action.inputs.version.default).toBe(pkg.version);
+  });
+
   it('offers an opt-in lockfile drift check', () => {
     expect(action.inputs.inventory).toMatchObject({
       required: false,

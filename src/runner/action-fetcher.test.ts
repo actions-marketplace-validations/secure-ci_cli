@@ -11,7 +11,9 @@ import {
   lsRemoteReachable,
   clearActionCache,
   cachedActionSha,
-  getActionCacheDir
+  getActionCacheDir,
+  getText,
+  followRedirect
 } from './action-fetcher';
 import * as fs from 'fs';
 import * as http from 'http';
@@ -70,6 +72,52 @@ describe('Action Fetcher', () => {
       expect(parseActionReference('invalid')).toBeNull();
       expect(parseActionReference('no-at-sign')).toBeNull();
       expect(parseActionReference('@just-ref')).toBeNull();
+    });
+
+    it('rejects owner or repo names that are not GitHub names', () => {
+      for (const uses of [
+        'org/..@v1',
+        'org/.@v1',
+        '../repo@v1',
+        'org/re po@v1',
+        'org/repo\\x@v1',
+        '-org/repo@v1'
+      ]) {
+        expect(parseActionReference(uses)).toBeNull();
+      }
+      expect(parseActionReference('my.org/re_po-1.x@v1')).toMatchObject({
+        owner: 'my.org',
+        repo: 're_po-1.x'
+      });
+    });
+  });
+
+  describe('followRedirect', () => {
+    it('keeps the token on the same host and drops it on another', () => {
+      const headers = { Authorization: 'Bearer t', 'User-Agent': 'x' };
+      expect(followRedirect('https://api.github.com/a', '/b', headers)).toEqual(
+        { url: 'https://api.github.com/b', headers }
+      );
+      expect(
+        followRedirect(
+          'https://api.github.com/a',
+          'https://codeload.github.com/c',
+          headers
+        )
+      ).toEqual({
+        url: 'https://codeload.github.com/c',
+        headers: { 'User-Agent': 'x' }
+      });
+    });
+
+    it('refuses to downgrade from https to http', () => {
+      expect(() =>
+        followRedirect(
+          'https://api.github.com/a',
+          'http://api.github.com/a',
+          {}
+        )
+      ).toThrow(/insecure redirect/i);
     });
   });
 
@@ -487,6 +535,16 @@ describe('Action Fetcher', () => {
 
       expect(await fetchAction(`org/act@${SHA1}`, { token: null })).toBeNull();
       expect(fs.existsSync(path.join(repoCache(), SHA1))).toBe(false);
+    });
+
+    it('getText refuses an oversized response', async () => {
+      handler = (_req, res) => {
+        res.writeHead(200);
+        res.end(Buffer.alloc(17 * 1024 * 1024, 'a'));
+      };
+      await expect(getText(`${baseUrl}/big`, {}, 5000)).rejects.toThrow(
+        /too large/i
+      );
     });
 
     it('gives up on a redirect loop', async () => {

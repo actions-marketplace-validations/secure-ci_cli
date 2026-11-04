@@ -31,6 +31,14 @@ export interface ActionReference {
   path?: string; // For actions in subdirectories
 }
 
+// GitHub owner and repository names; never `.`/`..` (they'd be cache paths).
+const NAME = /^[A-Za-z0-9_.][A-Za-z0-9_.-]*$/;
+const validName = (name: string) =>
+  NAME.test(name) && name !== '.' && name !== '..';
+
+/** API lookups are small; refuse anything bigger than this. */
+const MAX_TEXT_BYTES = 16 * 1024 * 1024;
+
 /**
  * Parse an action reference like "actions/checkout@v3" or "owner/repo/path@ref"
  */
@@ -44,6 +52,10 @@ export function parseActionReference(uses: string): ActionReference | null {
   }
 
   const [, owner, repo, actionPath, ref] = match;
+  if (!validName(owner) || !validName(repo)) {
+    logger.warn(`Invalid action reference format: ${uses}`);
+    return null;
+  }
 
   return {
     owner,
@@ -211,8 +223,16 @@ export function getText(
     const client = url.startsWith('http://') ? http : https;
     const request = client.get(url, { headers }, (response) => {
       let body = '';
+      let size = 0;
       response.setEncoding('utf8');
-      response.on('data', (chunk) => (body += chunk));
+      response.on('data', (chunk: string) => {
+        size += Buffer.byteLength(chunk);
+        if (size > MAX_TEXT_BYTES) {
+          request.destroy(new Error(`Response too large: ${url}`));
+          return;
+        }
+        body += chunk;
+      });
       response.on('end', () =>
         response.statusCode === 200
           ? resolve(body)
@@ -267,6 +287,26 @@ async function resolveSha(
 }
 
 /**
+ * Where a redirect from `url` to `location` goes, and with which headers:
+ * the Authorization header only stays on the same host, and an https URL
+ * never redirects to http.
+ */
+export function followRedirect(
+  url: string,
+  location: string,
+  headers: Record<string, string>
+): { url: string; headers: Record<string, string> } {
+  const from = new URL(url);
+  const next = new URL(location, url);
+  if (from.protocol === 'https:' && next.protocol !== 'https:') {
+    throw new Error(`Refusing insecure redirect from ${url} to ${next}`);
+  }
+  const nextHeaders = { ...headers };
+  if (next.host !== from.host) delete nextHeaders.Authorization;
+  return { url: next.toString(), headers: nextHeaders };
+}
+
+/**
  * Download a URL to a file, following up to MAX_REDIRECTS redirects. The
  * Authorization header is only sent to the original host (GitHub's API
  * redirects tarballs to a pre-signed codeload URL). Every response that
@@ -293,16 +333,18 @@ function downloadFile(
         } else if (redirectsLeft <= 0) {
           reject(new Error(`Too many redirects downloading ${url}`));
         } else {
-          const next = new URL(location, url);
-          const nextHeaders = { ...headers };
-          if (next.host !== new URL(url).host) {
-            delete nextHeaders.Authorization;
+          let next: { url: string; headers: Record<string, string> };
+          try {
+            next = followRedirect(url, location, headers);
+          } catch (error) {
+            reject(error);
+            return;
           }
           downloadFile(
-            next.toString(),
+            next.url,
             dest,
             timeoutMs,
-            nextHeaders,
+            next.headers,
             redirectsLeft - 1
           ).then(resolve, reject);
         }
