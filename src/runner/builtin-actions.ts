@@ -568,7 +568,7 @@ function findCache(
   if (fs.existsSync(path.join(exact, 'meta.json'))) {
     return { dir: exact, key, created: 0 };
   }
-  let entries: CacheEntry[] = [];
+  let entries: CacheEntry[];
   try {
     entries = fs
       .readdirSync(scope)

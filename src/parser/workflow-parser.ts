@@ -35,7 +35,9 @@ export function parseWorkflow(filePath: string): ParsedWorkflow {
     };
   } catch (error) {
     if (error instanceof Error) {
-      throw new Error(`Failed to parse workflow: ${error.message}`);
+      throw new Error(`Failed to parse workflow: ${error.message}`, {
+        cause: error
+      });
     }
     throw error;
   }
@@ -73,7 +75,9 @@ export function parseAction(filePath: string): ParsedAction {
     };
   } catch (error) {
     if (error instanceof Error) {
-      throw new Error(`Failed to parse action: ${error.message}`);
+      throw new Error(`Failed to parse action: ${error.message}`, {
+        cause: error
+      });
     }
     throw error;
   }
