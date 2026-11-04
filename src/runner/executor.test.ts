@@ -1006,6 +1006,52 @@ jobs:
       fs.unlinkSync(workflowPath);
     });
 
+    it('warns when a Docker action gets a secret in its argv, and keeps .git read-only', async () => {
+      const dockerActionPath = path.join(
+        fixturesDir,
+        'docker-action',
+        'action.yml'
+      );
+      fetchActionMock.mockResolvedValueOnce(dockerActionPath);
+      const executeMock = vi.fn().mockResolvedValue({
+        success: true,
+        stdout: '',
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        durationMs: 1
+      });
+      resolveContainerRuntimeMock.mockResolvedValue({
+        ...fakeJobContainerRuntime(),
+        build: vi
+          .fn()
+          .mockResolvedValue({ success: true, stdout: '', stderr: '' }),
+        execute: executeMock
+      });
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-argsec-'));
+      const workflowPath = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        workflowPath,
+        'name: D\non: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: test-org/docker-action@v1\n        with:\n          message: ${{ secrets.TOKEN }}\n'
+      );
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await executeWorkflow(workflowPath, {
+          containerRuntime: 'docker',
+          secrets: { TOKEN: 'sup3r-s3cret' }
+        });
+        const warnings = warnSpy.mock.calls.flat().join('\n');
+        expect(warnings).toMatch(/secret.*command line/i);
+        expect(warnings).not.toContain('sup3r-s3cret');
+        expect(executeMock.mock.calls[0][0]).toMatchObject({
+          readOnlyPaths: ['.git']
+        });
+      } finally {
+        warnSpy.mockRestore();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('runs Docker actions with the default engine in host mode', async () => {
       const dockerActionPath = path.join(
         fixturesDir,
@@ -2929,6 +2975,34 @@ jobs:
       expect(result.jobs[0].steps[0].error).toContain('outside the workspace');
     });
 
+    for (const [label, link] of [
+      ['itself', 'co'],
+      ['its parent', 'up']
+    ] as const) {
+      it(`rejects a path: that is a symlink out of the workspace (${label})`, async () => {
+        const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-co-'));
+        fs.symlinkSync(outside, path.join(workDir, link));
+        try {
+          const result = await executeWorkflow(
+            writeWorkflow(
+              [
+                '      - uses: actions/checkout@v4',
+                '        with:',
+                `          path: ${link === 'up' ? 'up/co' : 'co'}`
+              ].join('\n')
+            )
+          );
+          expect(result.success).toBe(false);
+          expect(result.jobs[0].steps[0].error).toContain(
+            'outside the workspace'
+          );
+          expect(fs.readdirSync(outside)).toEqual([]);
+        } finally {
+          fs.rmSync(outside, { recursive: true, force: true });
+        }
+      });
+    }
+
     it('exposes secrets.GITHUB_TOKEN as github.token', async () => {
       const result = await executeWorkflow(
         writeWorkflow(
@@ -3904,6 +3978,79 @@ jobs:
       },
       180_000
     );
+
+    for (const [label, extra, message] of [
+      [
+        'privileged options',
+        '        options: --health-cmd true --privileged\n',
+        /unsafe options.*--privileged/
+      ],
+      [
+        'a host bind mount',
+        '        volumes:\n          - /:/host\n',
+        /outside the workspace/
+      ]
+    ] as const) {
+      it(`refuses to start a service with ${label}`, async () => {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const file = path.join(dir, 'unsafe.yml');
+        fs.writeFileSync(
+          file,
+          [
+            'name: U',
+            'on: push',
+            'jobs:',
+            '  t:',
+            '    runs-on: ubuntu-latest',
+            '    services:',
+            '      db:',
+            '        image: postgres:16',
+            extra.trimEnd(),
+            '    steps:',
+            '      - run: echo hi'
+          ].join('\n')
+        );
+        const errorSpy = vi
+          .spyOn(console, 'error')
+          .mockImplementation(() => {});
+        try {
+          const result = await executeWorkflow(file, {
+            containerRuntime: 'docker'
+          });
+          expect(result.success).toBe(false);
+          expect(
+            fake.start.mock.calls.some(
+              (c) => (c[0] as { service?: boolean }).service
+            )
+          ).toBe(false);
+          expect(errorSpy.mock.calls.flat().join('\n')).toMatch(message);
+        } finally {
+          errorSpy.mockRestore();
+        }
+      });
+    }
+
+    it('mounts the working copy .git read-only in the job container', async () => {
+      const fake = fakeJobContainerRuntime();
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+      const file = path.join(dir, 'plain.yml');
+      fs.writeFileSync(
+        file,
+        'name: P\non: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n'
+      );
+      await executeWorkflow(file, { containerRuntime: 'docker' });
+      expect(fake.start.mock.calls[0][0]).toMatchObject({
+        readOnlyPaths: ['.git']
+      });
+
+      fake.start.mockClear();
+      await executeWorkflow(file, {
+        containerRuntime: 'docker',
+        localCheckout: false
+      });
+      expect(fake.start.mock.calls[0][0]).toMatchObject({ readOnlyPaths: [] });
+    });
 
     it('fails clearly when no container runtime is available for services', async () => {
       resolveContainerRuntimeMock.mockResolvedValue(null);

@@ -61,6 +61,21 @@ export function isLocalCheckout(
  * cloned and `.git` is never touched. With `path:`, the working copy is
  * copied into that subdirectory and the copy is removed at job end.
  */
+/**
+ * Whether `dest` (or the closest part of it that exists) resolves outside
+ * `workspace` through a symlink, e.g. one a container step planted.
+ */
+function escapesViaSymlink(workspace: string, dest: string): boolean {
+  const root = fs.realpathSync(workspace);
+  let existing = dest;
+  while (!fs.existsSync(existing) && existing !== path.dirname(existing)) {
+    if (fs.lstatSync(existing, { throwIfNoEntry: false })) return true; // dangling link
+    existing = path.dirname(existing);
+  }
+  const real = fs.realpathSync(existing);
+  return real !== root && !real.startsWith(root + path.sep);
+}
+
 export function localCheckout(
   step: Step,
   ctx: ExpressionContext,
@@ -90,7 +105,11 @@ export function localCheckout(
   const workspace = process.cwd();
   const dest = path.resolve(workspace, withValues.path || '.');
   const relative = path.relative(workspace, dest);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (
+    relative.startsWith('..') ||
+    path.isAbsolute(relative) ||
+    escapesViaSymlink(workspace, dest)
+  ) {
     return fail(
       `actions/checkout: path "${withValues.path}" is outside the workspace`
     );

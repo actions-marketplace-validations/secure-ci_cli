@@ -337,7 +337,8 @@ If you're stuck:
 
 Releases are automated by the `publish` job in `.github/workflows/ci.yaml`:
 
-1. Bump `version` in `package.json` (and `package-lock.json`) in your PR
+1. Bump `version` in `package.json` (and `package-lock.json`) in your PR, and
+   the `version` input's default in `action.yml` to match (a test enforces it)
 2. Merge to `main`
 3. CI publishes `@secureci/cli@<version>` to npm if that version isn't there
    yet, then creates the `v<version>` tag and GitHub release on the merge commit

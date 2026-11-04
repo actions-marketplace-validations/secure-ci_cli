@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
+import { invalidImageReason } from './container-policy';
 
 const execAsync = promisify(exec);
 
@@ -57,6 +58,8 @@ export interface ContainerExecOptions {
   timeoutMs?: number;
   memoryLimit?: string;
   networkDisabled?: boolean;
+  /** Paths under workingDir to mount read-only (e.g. `.git`), if present. */
+  readOnlyPaths?: string[];
 }
 
 export interface ContainerBuildResult {
@@ -86,6 +89,8 @@ export interface ContainerStartOptions {
   workingDir?: string;
   /** Host directory mounted read-write for exchanging file commands etc. */
   exchangeDir?: string;
+  /** Paths under workingDir to mount read-only (e.g. `.git`), if present. */
+  readOnlyPaths?: string[];
   env?: Record<string, string>;
   memoryLimit?: string;
   /** Disable container networking. Default: false (network on). */
@@ -231,6 +236,24 @@ function envTransport(env: Record<string, string> = {}): EnvTransport {
   };
 }
 
+/**
+ * `-v` mounts that put existing `paths` under `workingDir` back read-only
+ * over the workspace mount, so a container can't rewrite them (a step
+ * writing `.git/hooks` would otherwise run code on the host later).
+ */
+function readOnlyMounts(workingDir: string, paths: string[] = []): string[] {
+  const args: string[] = [];
+  for (const rel of paths) {
+    const host = path.join(workingDir, rel);
+    if (!fs.existsSync(host)) continue;
+    args.push(
+      '-v',
+      `${host}:${path.posix.join(CONTAINER_WORKDIR, ...rel.split(path.sep))}:ro`
+    );
+  }
+  return args;
+}
+
 /** Probe timeout for `<bin> version` availability checks. */
 const PROBE_TIMEOUT_MS = 3000;
 
@@ -261,6 +284,17 @@ class CliContainerRuntime implements ContainerRuntime {
   }
 
   execute(options: ContainerExecOptions): Promise<ContainerExecResult> {
+    const invalid = invalidImageReason(options.image);
+    if (invalid) {
+      return Promise.resolve({
+        success: false,
+        stdout: '',
+        stderr: invalid,
+        exitCode: null,
+        timedOut: false,
+        durationMs: 0
+      });
+    }
     const args = [
       'run',
       '--rm',
@@ -268,6 +302,7 @@ class CliContainerRuntime implements ContainerRuntime {
       CONTAINER_WORKDIR,
       '-v',
       `${options.workingDir}:${CONTAINER_WORKDIR}`,
+      ...readOnlyMounts(options.workingDir, options.readOnlyPaths),
       '-v',
       `${options.exchangeDir}:${CONTAINER_EXCHANGE_DIR}`
     ];
@@ -298,13 +333,16 @@ class CliContainerRuntime implements ContainerRuntime {
   }
 
   start(options: ContainerStartOptions): Promise<ContainerStartResult> {
+    const invalid = invalidImageReason(options.image);
+    if (invalid) return Promise.resolve({ success: false, error: invalid });
     const args = ['run', '-d'];
     if (options.workingDir) {
       args.push(
         '-w',
         CONTAINER_WORKDIR,
         '-v',
-        `${options.workingDir}:${CONTAINER_WORKDIR}`
+        `${options.workingDir}:${CONTAINER_WORKDIR}`,
+        ...readOnlyMounts(options.workingDir, options.readOnlyPaths)
       );
     }
     if (options.exchangeDir) {

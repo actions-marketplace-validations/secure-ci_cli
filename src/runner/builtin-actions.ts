@@ -57,7 +57,8 @@ export function hostFileSystem(workspace: string): StepFileSystem {
     workspace,
     home: os.homedir(),
     path: path as unknown as typeof path.posix,
-    readable: async (logical) => (fs.existsSync(logical) ? logical : null),
+    readable: async (logical) =>
+      fs.existsSync(logical) ? fs.realpathSync(logical) : null,
     writeInto: async (logical, fill) => {
       fs.mkdirSync(logical, { recursive: true });
       fill(logical);
@@ -90,11 +91,14 @@ export function containerFileSystem(
   };
   const inWorkspace = (logical: string) =>
     logical === access.workspace || logical.startsWith(access.workspace + '/');
-  const toHost = (logical: string) =>
-    path.join(
-      access.hostWorkspace,
-      ...p.relative(access.workspace, logical).split('/')
-    );
+  const segments = (logical: string) =>
+    p.relative(access.workspace, logical).split('/').filter(Boolean);
+  // The container can put symlinks in the mounted workspace; on the host
+  // they resolve against the host's filesystem. Every workspace path is
+  // resolved and must stay inside the workspace.
+  const hostRoot = () => fs.realpathSync(access.hostWorkspace);
+  const contained = (root: string, real: string) =>
+    real === root || real.startsWith(root + path.sep);
 
   return {
     workspace: access.workspace,
@@ -102,17 +106,45 @@ export function containerFileSystem(
     path: p,
     readable: async (logical) => {
       if (inWorkspace(logical)) {
-        const host = toHost(logical);
-        return fs.existsSync(host) ? host : null;
+        const root = hostRoot();
+        let real: string;
+        try {
+          real = fs.realpathSync(path.join(root, ...segments(logical)));
+        } catch {
+          return null;
+        }
+        return contained(root, real) ? real : null;
       }
       const target = path.join(tempDir(), 'copy');
       return (await access.copyFrom(logical, target)) ? target : null;
     },
     writeInto: async (logical, fill) => {
       if (inWorkspace(logical)) {
-        const host = toHost(logical);
-        fs.mkdirSync(host, { recursive: true });
-        fill(host);
+        const root = hostRoot();
+        let dir = root;
+        for (const part of segments(logical)) {
+          const next = path.join(dir, part);
+          const stat = lstatOrNull(next);
+          if (!stat) {
+            fs.mkdirSync(next);
+            dir = next;
+          } else if (stat.isDirectory()) {
+            dir = next;
+          } else {
+            const real = stat.isSymbolicLink() ? realpathOrNull(next) : null;
+            if (!real || !contained(root, real)) {
+              throw new Error(
+                `Refusing to write to ${logical}: it is outside the workspace or not a directory`
+              );
+            }
+            dir = real;
+          }
+        }
+        // Fill a private staging directory, then merge it in without
+        // following any symlink the container left in the destination.
+        const stage = tempDir();
+        fill(stage);
+        mergeNoFollow(stage, dir);
         return;
       }
       const stage = tempDir();
@@ -132,6 +164,61 @@ export function containerFileSystem(
   };
 }
 
+function lstatOrNull(file: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(file);
+  } catch {
+    return null;
+  }
+}
+
+function realpathOrNull(file: string): string | null {
+  try {
+    return fs.realpathSync(file);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Copy the tree `from` into `to`, replacing (never following) symlinks in
+ * `to`, so the copy can't land outside it.
+ */
+function mergeNoFollow(from: string, to: string): void {
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    const src = path.join(from, entry.name);
+    const dst = path.join(to, entry.name);
+    let stat = lstatOrNull(dst);
+    if (stat?.isSymbolicLink()) {
+      fs.unlinkSync(dst);
+      stat = null;
+    }
+    if (entry.isDirectory()) {
+      if (!stat) fs.mkdirSync(dst);
+      else if (!stat.isDirectory()) {
+        throw new Error(
+          `Cannot overwrite non-directory ${dst} with a directory`
+        );
+      }
+      mergeNoFollow(src, dst);
+    } else if (entry.isFile()) {
+      const fd = fs.openSync(
+        dst,
+        fs.constants.O_WRONLY |
+          fs.constants.O_CREAT |
+          fs.constants.O_TRUNC |
+          (fs.constants.O_NOFOLLOW ?? 0)
+      );
+      try {
+        fs.writeFileSync(fd, fs.readFileSync(src));
+        fs.fchmodSync(fd, fs.statSync(src).mode & 0o7777);
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+  }
+}
+
 /** A file found by collectFiles: where the step sees it, and where it is. */
 interface FoundFile {
   logical: string;
@@ -139,7 +226,9 @@ interface FoundFile {
 }
 
 function listFiles(hostRoot: string, base = ''): string[] {
-  const stat = fs.statSync(hostRoot);
+  // Never follow a symlink (e.g. one copied out of a container).
+  const stat = fs.lstatSync(hostRoot);
+  if (stat.isSymbolicLink()) return [];
   if (stat.isFile()) return [base];
   const files: string[] = [];
   for (const entry of fs.readdirSync(hostRoot, { withFileTypes: true })) {
@@ -204,7 +293,7 @@ export async function collectFiles(
         : pattern.slice(0, pattern.lastIndexOf('/', globAt)) || p.sep;
     const host = await fsys.readable(searchPath);
     if (!host) continue;
-    const isFile = fs.statSync(host).isFile();
+    const isFile = fs.lstatSync(host).isFile();
     searchPaths.push(isFile ? p.dirname(searchPath) : searchPath);
     const matcher = globAt === -1 ? undefined : globToRegExp(pattern);
     for (const rel of listFiles(host)) {

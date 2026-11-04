@@ -1,5 +1,7 @@
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 
 const execMock = vi.fn();
@@ -719,6 +721,79 @@ describe('container-runtime', () => {
       });
       expect(calls[0].slice(0, 2)).toEqual(['inspect', '--format']);
       expect(calls[1]).toEqual(['port', 'svc1']);
+    });
+  });
+
+  describe('isolation guards', () => {
+    async function dockerRuntime() {
+      execMock.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
+      const runtime = await resolveContainerRuntime('docker');
+      if (!runtime) throw new Error('expected a runtime');
+      return runtime;
+    }
+
+    it('refuses an image that would be parsed as an option (execute)', async () => {
+      const runtime = await dockerRuntime();
+      const result = await runtime.execute({
+        image: '--privileged',
+        args: ['-v', '/:/host', 'alpine'],
+        workingDir: '/w',
+        exchangeDir: '/x'
+      });
+      expect(result.success).toBe(false);
+      expect(result.stderr).toMatch(/Invalid image/);
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+
+    it('refuses an image that would be parsed as an option (start)', async () => {
+      const runtime = await dockerRuntime();
+      const started = await runtime.start({ image: '-v=/:/h', service: true });
+      expect(started.success).toBe(false);
+      expect(started.error).toMatch(/Invalid image/);
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+
+    it('mounts readOnlyPaths of the working dir read-only, when they exist', async () => {
+      const runtime = await dockerRuntime();
+      const work = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-ro-'));
+      fs.mkdirSync(path.join(work, '.git'));
+      try {
+        const child = fakeChildProcess();
+        captureSpawn(child);
+        const started = runtime.start({
+          image: 'node:20',
+          workingDir: work,
+          readOnlyPaths: ['.git', 'missing']
+        });
+        child.stdout.emit('data', Buffer.from('id\n'));
+        child.emit('close', 0);
+        await started;
+        const args = spawnMock.mock.calls[0][1] as string[];
+        const mounts = args.filter((_, i) => args[i - 1] === '-v');
+        expect(mounts).toEqual([
+          `${work}:/secureci-workspace`,
+          `${path.join(work, '.git')}:/secureci-workspace/.git:ro`
+        ]);
+
+        const child2 = fakeChildProcess();
+        spawnMock.mockReset();
+        captureSpawn(child2);
+        const ran = runtime.execute({
+          image: 'alpine',
+          command: 'true',
+          workingDir: work,
+          exchangeDir: '/x',
+          readOnlyPaths: ['.git']
+        });
+        child2.emit('close', 0);
+        await ran;
+        const args2 = spawnMock.mock.calls[0][1] as string[];
+        expect(args2).toContain(
+          `${path.join(work, '.git')}:/secureci-workspace/.git:ro`
+        );
+      } finally {
+        fs.rmSync(work, { recursive: true, force: true });
+      }
     });
   });
 });

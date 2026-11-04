@@ -17,6 +17,7 @@ import {
   containerRunnerEnv,
   finishStepOutput
 } from './job-runtime';
+import { protectedWorkspacePaths } from './job-container';
 import { inputEnvName } from './node-action';
 
 /**
@@ -114,6 +115,17 @@ export async function executeDockerAction(
     substituteExpressions(arg, actionCtx)
   );
 
+  // Args go on the engine client's command line, which other local users
+  // can read (`ps`); env values don't, so say so when a secret lands here.
+  const secretValues = Object.values(options.secrets ?? {}).filter(
+    (value) => value && value.length >= 3
+  );
+  if (args.some((arg) => secretValues.some((value) => arg.includes(value)))) {
+    logger.warn(
+      `Docker action "${step.uses}": a secret is passed in its args, so it is on the container engine's command line, visible to other users of this machine. Pass secrets through env: instead.`
+    );
+  }
+
   logger.info(`Executing Docker action: ${action.name}`);
 
   const exchangeDir = fs.mkdtempSync(
@@ -129,6 +141,7 @@ export async function executeDockerAction(
       args,
       entrypoint: action.runs.entrypoint,
       workingDir: process.cwd(),
+      readOnlyPaths: protectedWorkspacePaths(options),
       exchangeDir,
       env: {
         ...containerRunnerEnv(runtime),

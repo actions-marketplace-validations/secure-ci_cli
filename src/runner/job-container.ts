@@ -11,6 +11,10 @@ import {
 import { resolveContainerRuntime, ContainerRuntime } from './container-runtime';
 import { JobRuntime } from './job-runtime';
 import { splitArgs } from './shell';
+import {
+  unsafeServiceOptions,
+  unsafeServiceVolumeReason
+} from './container-policy';
 
 /**
  * Image for jobs whose `runs-on` has no image mapping. Runner-like (Node.js,
@@ -141,6 +145,7 @@ export async function startJobContainer(
   const started = await containerRuntime.start({
     image,
     workingDir: process.cwd(),
+    readOnlyPaths: protectedWorkspacePaths(options),
     exchangeDir,
     env: containerEnv,
     memoryLimit: options.containerMemoryLimit,
@@ -280,6 +285,26 @@ export async function startJobServices(
   const contexts: Record<string, unknown> = {};
   for (const [serviceId, spec] of specs) {
     const service = typeof spec === 'string' ? { image: spec } : spec;
+    const extraArgs = service.options
+      ? splitArgs(substituteExpressions(service.options, ctx))
+      : [];
+    const volumes = (service.volumes ?? []).map((v) =>
+      substituteExpressions(v, ctx)
+    );
+    const unsafe = unsafeServiceOptions(extraArgs);
+    if (unsafe.length > 0) {
+      logger.error(
+        `services.${serviceId}: refusing unsafe options ${[...new Set(unsafe)].join(', ')}: they would give the container access to this machine.`
+      );
+      return false;
+    }
+    for (const volume of volumes) {
+      const reason = unsafeServiceVolumeReason(volume, process.cwd());
+      if (reason) {
+        logger.error(`services.${serviceId}: ${reason}.`);
+        return false;
+      }
+    }
     if (service.credentials) {
       logger.warn(
         `services.${serviceId}: credentials are ignored; log in with \`docker login\` instead.`
@@ -296,12 +321,8 @@ export async function startJobServices(
       ports: (service.ports ?? []).map((port) =>
         substituteExpressions(String(port), ctx)
       ),
-      volumes: (service.volumes ?? []).map((v) =>
-        substituteExpressions(v, ctx)
-      ),
-      extraArgs: service.options
-        ? splitArgs(substituteExpressions(service.options, ctx))
-        : [],
+      volumes,
+      extraArgs,
       env: substituteRecord(service.env, ctx)
     });
     if (!started.success || !started.id) {
@@ -353,4 +374,13 @@ export async function stopJobServices(runtime: JobRuntime): Promise<void> {
     }
     await services.runtime.removeNetwork(services.network);
   }
+}
+
+/**
+ * Workspace paths mounted read-only into containers: the working copy's
+ * `.git`, so a step can't plant hooks or config that run on the host. Not
+ * with --no-local-checkout, where the real actions/checkout manages it.
+ */
+export function protectedWorkspacePaths(options: RunOptions): string[] {
+  return options.localCheckout === false ? [] : ['.git'];
 }
