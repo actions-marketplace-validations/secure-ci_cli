@@ -1,6 +1,6 @@
 {
   "name": "@secureci/cli",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "SecureCI: validate, check against pipeline standards, and run GitHub Actions workflows locally",
   "main": "dist/index.js",
   "bin": {
@@ -19,7 +19,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "dev": "tsc --watch",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint src",
     "format": "prettier --write .",
     "prepare": "npm run build"
   },
@@ -63,18 +63,20 @@
     "yaml": "^2.3.4"
   },
   "devDependencies": {
-    "@jabraf/dev": "^0.1.4",
+    "@eslint/js": "^10.0.1",
     "@jabraf/prettier": "^3.0.1",
     "@types/node": "^20.10.6",
-    "@typescript-eslint/eslint-plugin": "^8.71.1",
-    "@typescript-eslint/parser": "^8.71.1",
     "@vitest/coverage-v8": "^4.1.12",
-    "eslint": "^8.56.0",
+    "eslint": "^10.14.0",
     "postject": "1.0.0-alpha.6",
     "typescript": "^5.3.3",
+    "typescript-eslint": "^8.72.1",
     "vitest": "^4.1.12"
   },
   "volta": {
     "node": "24.0.0"
+  },
+  "overrides": {
+    "minimatch": "^11.0.4"
   }
 }

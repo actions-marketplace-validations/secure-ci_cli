@@ -327,7 +327,8 @@ export function runPreIf(
     return evaluateCondition(action.runs['pre-if'] ?? 'always()', ctx);
   } catch (error) {
     throw new Error(
-      ifEvaluationError(`step 'Pre ${step.name || step.uses}'`, error)
+      ifEvaluationError(`step 'Pre ${step.name || step.uses}'`, error),
+      { cause: error }
     );
   }
 }

@@ -225,7 +225,8 @@ export function loadEvent(
     payload = JSON.parse(fs.readFileSync(options.eventPath, 'utf-8'));
   } catch (error) {
     throw new Error(
-      `Invalid event payload ${options.eventPath}: ${error instanceof Error ? error.message : String(error)}`
+      `Invalid event payload ${options.eventPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {

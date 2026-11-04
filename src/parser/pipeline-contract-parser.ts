@@ -39,7 +39,8 @@ export function parsePipelineContract(filePath: string): PipelineContractSpec {
     parsed = YAML.parse(content);
   } catch (error) {
     throw new Error(
-      `Failed to parse contract file: ${error instanceof Error ? error.message : 'Unknown error'}`
+      `Failed to parse contract file: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      { cause: error }
     );
   }
 

@@ -691,7 +691,6 @@ async function runInventory(
 
   // --dry-run: print the resolved inventory as JSON, touching nothing.
   if (options.dryRun) {
-    // eslint-disable-next-line no-console
     console.log(
       JSON.stringify(
         {
@@ -1112,7 +1111,6 @@ async function validateFiles(
   }
 
   if (quiet) {
-    // eslint-disable-next-line no-console
     console.log(formatReport(entries, format, { contract }));
     if (!allValid) process.exit(1);
     return;

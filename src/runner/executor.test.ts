@@ -4649,7 +4649,7 @@ jobs:
       );
 
       const logSpy = vi.spyOn(console, 'log');
-      let out = '';
+      let out: string;
       let result: Awaited<ReturnType<typeof executeWorkflow>>;
       try {
         result = await executeWorkflow(file);

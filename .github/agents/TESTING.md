@@ -12,7 +12,7 @@ SecureCI follows **Test-Driven Development (TDD)**:
 
 ## Test Framework
 
-> **Note for AI Agents**: This project uses **Vitest** as the test framework, configured via `vitest.config.mts` using `@jabraf/dev`'s `baseVitestConfig()` factory merged with project-specific overrides (Node environment, `*.test.ts` glob, coverage thresholds). Confirm with `npm test` → `vitest run` in `package.json`.
+> **Note for AI Agents**: This project uses **Vitest** as the test framework, configured in `vitest.config.mts` (globals, Node environment, `*.test.ts` glob, v8 coverage thresholds). Confirm with `npm test` → `vitest run` in `package.json`.
 
 - **Framework**: Vitest with native TypeScript support (no separate transpiler needed)
 - **Test Environment**: Node.js
@@ -203,34 +203,32 @@ const workflowContent = fs.readFileSync(workflowPath, 'utf-8');
 From `vitest.config.mts`:
 
 ```typescript
-import { baseVitestConfig } from '@jabraf/dev/vitest';
-import { defineConfig, mergeConfig } from 'vitest/config';
+import { defineConfig } from 'vitest/config';
 
-export default mergeConfig(
-  baseVitestConfig({ coverage: true }),
-  defineConfig({
-    test: {
-      environment: 'node',
-      include: ['src/**/*.test.ts'],
-      coverage: {
-        include: ['src/**/*.ts'],
-        exclude: [
-          'src/**/*.d.ts',
-          'src/**/*.test.ts',
-          'src/**/__tests__/**',
-          'src/cli.ts', // Excluded from coverage
-          'src/index.ts' // Excluded from coverage
-        ],
-        thresholds: {
-          branches: 65,
-          functions: 80,
-          lines: 80,
-          statements: 80
-        }
+export default defineConfig({
+  test: {
+    globals: true,
+    environment: 'node',
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.ts'],
+      exclude: [
+        'src/**/*.d.ts',
+        'src/**/*.test.ts',
+        'src/**/__tests__/**',
+        'src/cli.ts',
+        'src/index.ts'
+      ],
+      thresholds: {
+        branches: 65,
+        functions: 80,
+        lines: 80,
+        statements: 80
       }
     }
-  })
-);
+  }
+});
 ```
 
 ## Coverage Requirements
@@ -539,7 +537,6 @@ Tests run automatically in CI:
 
 - [Vitest Documentation](https://vitest.dev/)
 - [Vitest API Reference](https://vitest.dev/api/)
-- [@jabraf/dev Documentation](https://www.npmjs.com/package/@jabraf/dev)
 - [Testing Best Practices](https://github.com/goldbergyoni/javascript-testing-best-practices)
 
 ## Summary Checklist for AI Agents

@@ -89,6 +89,11 @@ Release binaries are Node.js single executable applications (SEA), built by
 - Inside a SEA `process.execPath` is the CLI itself, so `node-binary.ts` runs
   JavaScript actions on the host with the first `node` on the step's `PATH`
   instead. Job containers always use the image's own `node`.
+- `install.sh` (repository root, POSIX sh) installs a release binary on Linux
+  and macOS. `secure-ci.dev/install.sh` redirects to it on `main`, so a merge
+  ships it: `scripts/install.test.ts` runs it against a fake `file://` release,
+  and the `install-script` CI job installs the real latest release with it on
+  Ubuntu and macOS.
 
 ## Layers
 
