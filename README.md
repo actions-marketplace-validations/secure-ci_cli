@@ -36,22 +36,38 @@ far fewer false positives than plain pattern-matching tools.
 
 ## Install
 
+There are two ways to install it: from npm (needs Node.js 20+), or as a
+[standalone binary](#standalone-binary-no-nodejs-needed) for Linux, macOS or
+Windows that needs no Node.js.
+
 ```bash
 npm install -g @secureci/cli
 # or run without installing:
 npx @secureci/cli --help
 ```
 
-Node.js 20+ is required. To build from source instead:
-`npm install && npm run build`.
+To build from source instead: `npm install && npm run build`.
 
 ### Standalone binary (no Node.js needed)
 
-Each [release](https://github.com/secure-ci/cli/releases) has a single-file
-binary for Linux (x64, arm64), macOS (Intel, Apple silicon) and Windows (x64),
-a `SHA256SUMS` file, and a signed build-provenance attestation. Pick the asset
-for your platform: `secureci-linux-x64`, `secureci-linux-arm64`,
-`secureci-darwin-x64`, `secureci-darwin-arm64` or `secureci-win-x64.exe`.
+Every [release](https://github.com/secure-ci/cli/releases/latest) has a
+single-file binary for each platform below. The links always point to the
+latest release:
+
+| Platform              | Download                                                                                                   |
+| --------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Linux x64             | [`secureci-linux-x64`](https://github.com/secure-ci/cli/releases/latest/download/secureci-linux-x64)       |
+| Linux arm64           | [`secureci-linux-arm64`](https://github.com/secure-ci/cli/releases/latest/download/secureci-linux-arm64)   |
+| macOS (Apple silicon) | [`secureci-darwin-arm64`](https://github.com/secure-ci/cli/releases/latest/download/secureci-darwin-arm64) |
+| macOS (Intel)         | [`secureci-darwin-x64`](https://github.com/secure-ci/cli/releases/latest/download/secureci-darwin-x64)     |
+| Windows x64           | [`secureci-win-x64.exe`](https://github.com/secure-ci/cli/releases/latest/download/secureci-win-x64.exe)   |
+| Checksums             | [`SHA256SUMS`](https://github.com/secure-ci/cli/releases/latest/download/SHA256SUMS)                       |
+
+Before you run a binary, check it against `SHA256SUMS`. Each binary also has a
+signed build-provenance attestation, which `gh attestation verify` checks. The
+commands below download, verify and install it in one go. To install a
+specific version, take its assets from that version's
+[release page](https://github.com/secure-ci/cli/releases).
 
 ```bash
 # macOS / Linux (here: Linux x64)
