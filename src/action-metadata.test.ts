@@ -39,6 +39,16 @@ describe('action.yml', () => {
     expect(fail.if).toContain('steps.run.outputs.status');
     expect(fail.if).toContain('steps.run.outputs.inventory-status');
   });
+
+  // An empty report (the CLI crashed before writing SARIF) would fail the
+  // upload with "Invalid SARIF" and hide the real error, so the upload is
+  // gated on the run step having written a non-empty report.
+  it('uploads SARIF only when the run step wrote a non-empty report', () => {
+    const upload = action.runs.steps.find(
+      (s: { name?: string }) => s.name === 'Upload SARIF to code scanning'
+    );
+    expect(upload.if).toContain("steps.run.outputs.sarif-ready == 'true'");
+  });
 });
 
 // Runs the action's main bash step with a stub `npx` that records its
@@ -61,14 +71,20 @@ describe('action.yml run step', () => {
     fs.writeFileSync(
       path.join(dir, 'bin', 'npx'),
       '#!/usr/bin/env bash\necho "$*" >> "$STUB_LOG"\n' +
-        'if [[ "$*" == *" inventory "* ]]; then exit "${STUB_INVENTORY_EXIT:-0}"; fi\n',
+        'if [[ "$*" == *" inventory "* ]]; then exit "${STUB_INVENTORY_EXIT:-0}"; fi\n' +
+        // validate writes the report to stdout unless STUB_EMPTY_REPORT is set.
+        'if [[ "$*" == *" validate "* && -z "${STUB_EMPTY_REPORT:-}" ]]; then echo "{}"; fi\n',
       { mode: 0o755 }
     );
   });
 
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-  function run(inventory: string, inventoryExit = 0) {
+  function run(
+    inventory: string,
+    inventoryExit = 0,
+    extraEnv: Record<string, string> = {}
+  ) {
     const env = {
       PATH: `${path.join(dir, 'bin')}:${process.env.PATH}`,
       GITHUB_OUTPUT: path.join(dir, 'out'),
@@ -80,8 +96,10 @@ describe('action.yml run step', () => {
       SECURECI_FORMAT: 'sarif',
       SECURECI_OUTPUT: 'secureci-results.sarif',
       SECURECI_VERSION: 'latest',
-      SECURECI_INVENTORY: inventory
+      SECURECI_INVENTORY: inventory,
+      ...extraEnv
     };
+    fs.rmSync(env.GITHUB_OUTPUT, { force: true });
     execFileSync('bash', ['-c', script], { cwd: dir, env });
     return {
       calls: fs.existsSync(env.STUB_LOG)
@@ -96,6 +114,13 @@ describe('action.yml run step', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain(' validate ');
     expect(outputs).toContain('inventory-status=0');
+  });
+
+  it('marks the SARIF report ready only when it is non-empty', () => {
+    expect(run('').outputs).toContain('sarif-ready=true');
+    expect(run('', 0, { STUB_EMPTY_REPORT: '1' }).outputs).not.toContain(
+      'sarif-ready=true'
+    );
   });
 
   it('also runs inventory --check when inventory is "check"', () => {

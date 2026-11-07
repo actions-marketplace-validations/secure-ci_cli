@@ -672,12 +672,15 @@ permissions:
 jobs:
   secureci:
     runs-on: ubuntu-latest
+    # The SARIF upload needs code scanning enabled for this repository
+    # (Settings > Code security); otherwise set upload-sarif: false.
     permissions:
       contents: read
-      security-events: write # for the SARIF upload
+      actions: read # upload-sarif reads the workflow run
+      security-events: write # upload SARIF to code scanning
     steps:
       - uses: actions/checkout@v4
-      - uses: secure-ci/cli@v0.9.0 # a release tag; see below
+      - uses: secure-ci/cli@v0.10.0 # a release tag; see below
         with:
           # all inputs are optional
           contract: contracts/platform-standard.yml
@@ -689,7 +692,7 @@ jobs:
 
 The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `inventory` (`check` to also run `secureci inventory --check` against `secureci.lock`, or GitHub's `actions.lock` when that is the only lockfile), `version` (which `@secureci/cli` to run), and `github-token`.
 
-Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v0.9.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; by default it runs the CLI release matching the action's tag; set the `version` input to run another one.
+Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v0.10.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; by default it runs the CLI release matching the action's tag; set the `version` input to run another one.
 
 ### Generate the workflow (`secureci init workflow`)
 
@@ -700,9 +703,13 @@ secureci init workflow                                   # SARIF upload on (defa
 secureci init workflow --contract contracts/standard.yml # also check a pipeline contract
 secureci init workflow --no-upload                        # keep contents: read only, no code-scanning upload
 secureci init workflow --output .github/workflows/ci-security.yml
+secureci init workflow --no-pin                           # keep tag refs (actions/checkout@v4)
+secureci init workflow --offline                          # pin only refs already in the action cache
 ```
 
-It refuses to overwrite an existing file unless you pass `--force`, and the file it writes passes `secureci validate` with no findings: `contents: read` at the top level, and `security-events: write` (for the upload) on the job.
+By default the actions in the file are pinned to commit SHAs, as [`secureci pin`](#pin-actions-to-commit-shas-secureci-pin) would do (`actions/checkout@<sha> # v4`), so the workflow runs exactly the code you reviewed. A ref that can't be resolved (no network, or not in the cache with `--offline`) keeps its tag and is reported; run `secureci pin` on the file later to pin it. Pass `--no-pin` to keep tags.
+
+It refuses to overwrite an existing file unless you pass `--force`, and the file it writes passes `secureci validate` with no findings: `contents: read` at the top level, and `actions: read` plus `security-events: write` (for the upload) on the job. With uploads on, both the file (as a comment) and the command's output remind you that **code scanning must be enabled** for the repository (Settings > Code security; private repositories need GitHub Code Security) for the SARIF upload to work. If you can't enable it, use `--no-upload`.
 
 ## Using output as audit evidence
 
@@ -719,7 +726,7 @@ Auditors and assessors increasingly treat the CI pipeline as part of the softwar
 To keep a report per run, turn on the action's drift check and upload the report as a build artifact:
 
 ```yaml
-- uses: secure-ci/cli@v0.9.0 # writes secureci-results.sarif
+- uses: secure-ci/cli@v0.10.0 # writes secureci-results.sarif
   with:
     contract: contracts/standard.yml
     inventory: check # fail on drift against the committed secureci.lock

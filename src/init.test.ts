@@ -19,16 +19,35 @@ describe('renderInitWorkflow', () => {
     expect(steps[1].uses).toBe('secure-ci/cli@v1.2.3');
   });
 
-  it('requests security-events: write on the job and uploads SARIF by default', () => {
+  it('requests actions: read and security-events: write on the job and uploads SARIF by default', () => {
     const doc = YAML.parse(renderInitWorkflow({ version: '1.2.3' }));
     // Write scopes go on the job, not the workflow (#45). Job-level
     // permissions replace the top-level ones, so contents: read is repeated.
     expect(doc.permissions).toEqual({ contents: 'read' });
+    // upload-sarif needs actions: read (workflow run info, private repos)
+    // and security-events: write (the upload itself).
     expect(doc.jobs.secureci.permissions).toEqual({
       contents: 'read',
+      actions: 'read',
       'security-events': 'write'
     });
     expect(doc.jobs.secureci.steps[1].with?.['upload-sarif']).toBeUndefined();
+  });
+
+  it('notes in a comment that code scanning must be enabled for the SARIF upload', () => {
+    const yml = renderInitWorkflow({ version: '1.2.3' });
+    const comments = yml
+      .split('\n')
+      .filter((line) => line.trimStart().startsWith('#'))
+      .join('\n');
+    expect(comments).toMatch(/code scanning/i);
+    expect(comments).toMatch(/enabled/i);
+    expect(comments).toContain('upload-sarif: false');
+  });
+
+  it('omits the code scanning comment when upload is off', () => {
+    const yml = renderInitWorkflow({ version: '1.2.3', upload: false });
+    expect(yml).not.toMatch(/code scanning/i);
   });
 
   it('drops the SARIF permission and upload when upload is off', () => {

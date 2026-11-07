@@ -1671,8 +1671,11 @@ describe('secureci commands', () => {
     expect(bare.stdout + bare.stderr).toContain('workflow');
     expect(fs.existsSync(out)).toBe(false);
 
-    const first = run(['init', 'workflow'], dir);
+    // --no-pin keeps tag refs and needs no network.
+    const first = run(['init', 'workflow', '--no-pin'], dir);
     expect(first.status).toBe(0);
+    // It tells the user code scanning must be enabled for the SARIF upload.
+    expect(first.stdout).toMatch(/code scanning must be enabled/i);
     expect(fs.existsSync(out)).toBe(true);
     // The action ref is this CLI's own release tag (package.json version).
     const { version } = JSON.parse(
@@ -1686,18 +1689,92 @@ describe('secureci commands', () => {
     expect(run(['validate', out], dir).status).toBe(0);
 
     // A second run won't overwrite without --force.
-    const second = run(['init', 'workflow'], dir);
+    const second = run(['init', 'workflow', '--no-pin'], dir);
     expect(second.status).not.toBe(0);
     expect(second.stderr).toContain('already exists');
 
     // --no-upload keeps contents: read only and the file still validates.
-    const forced = run(['init', 'workflow', '--no-upload', '--force'], dir);
+    const forced = run(
+      ['init', 'workflow', '--no-upload', '--no-pin', '--force'],
+      dir
+    );
     expect(forced.status).toBe(0);
+    expect(forced.stdout).not.toMatch(/code scanning must be enabled/i);
     const content = fs.readFileSync(out, 'utf-8');
     expect(content).not.toContain('security-events');
+    expect(content).not.toContain('actions: read');
     expect(content).toContain('upload-sarif: false');
     expect(run(['validate', out], dir).status).toBe(0);
 
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('pins the generated workflow to commit SHAs, keeping a tag it cannot resolve', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-init-pin-'));
+    const out = path.join(dir, '.github', 'workflows', 'secureci.yml');
+    const { version } = JSON.parse(
+      fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')
+    );
+    // Seed the action cache so --offline resolves actions/checkout@v4 but
+    // not secure-ci/cli@v<version>.
+    const home = path.join(dir, 'home');
+    const checkout = 'c'.repeat(40);
+    const cache = path.join(
+      home,
+      '.secureci',
+      'actions-cache',
+      'actions/checkout'
+    );
+    fs.mkdirSync(path.join(cache, checkout), { recursive: true });
+    fs.writeFileSync(
+      path.join(cache, 'refs.json'),
+      JSON.stringify({ v4: checkout })
+    );
+    const env = { ...process.env, HOME: home };
+    // spawnSync: the warnings go to stderr, which run() drops on success.
+    const init = (...args: string[]) => {
+      const r = spawnSync('node', [cliPath, 'init', 'workflow', ...args], {
+        encoding: 'utf-8',
+        cwd: dir,
+        env
+      });
+      return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+    };
+
+    try {
+      const partial = init('--offline');
+      expect(partial.status).toBe(0);
+      let content = fs.readFileSync(out, 'utf-8');
+      expect(content).toContain(`uses: actions/checkout@${checkout} # v4\n`);
+      // Unresolvable refs stay on their tag, with a warning naming them.
+      expect(content).toContain(`uses: secure-ci/cli@v${version}\n`);
+      expect(partial.stdout + partial.stderr).toContain(
+        `secure-ci/cli@v${version} could not be resolved`
+      );
+      expect(partial.stdout + partial.stderr).toContain('secureci pin');
+
+      // With both refs cached, every action is pinned and the file validates.
+      const cli = 'a'.repeat(40);
+      const cliCache = path.join(
+        home,
+        '.secureci',
+        'actions-cache',
+        'secure-ci/cli'
+      );
+      fs.mkdirSync(path.join(cliCache, cli), { recursive: true });
+      fs.writeFileSync(
+        path.join(cliCache, 'refs.json'),
+        JSON.stringify({ [`v${version}`]: cli })
+      );
+      const full = init('--offline', '--force');
+      expect(full.status).toBe(0);
+      expect(full.stdout + full.stderr).not.toMatch(/could not be resolved/);
+      content = fs.readFileSync(out, 'utf-8');
+      expect(content).toContain(`uses: actions/checkout@${checkout} # v4\n`);
+      expect(content).toContain(`uses: secure-ci/cli@${cli} # v${version}\n`);
+      expect(run(['validate', out], dir, env).status).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

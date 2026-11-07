@@ -27,7 +27,7 @@ inputs:
     required: false
     default: 'secureci-results.sarif'
   upload-sarif:
-    description: 'Upload the SARIF report to GitHub code scanning (needs security-events: write; ignored for json).'
+    description: 'Upload the SARIF report to GitHub code scanning (needs actions: read and security-events: write, and code scanning enabled for the repository; ignored for json).'
     required: false
     default: 'true'
   inventory:
@@ -37,7 +37,7 @@ inputs:
   version:
     description: 'Version of @secureci/cli to run (npm version or dist-tag). Default: the release this action ships with (kept equal to package.json).'
     required: false
-    default: '0.9.0'
+    default: '0.10.0'
   github-token:
     description: 'Token used by the CLI to look up security advisories for the actions you use (raising the API rate limit), and to fetch a private remote contract or private actions/workflows for --contract-recurse all.'
     required: false
@@ -101,6 +101,11 @@ runs:
           > "${SECURECI_OUTPUT}" || status=$?
         echo "report=${SECURECI_OUTPUT}" >> "$GITHUB_OUTPUT"
         echo "status=${status}" >> "$GITHUB_OUTPUT"
+        # An empty report means the CLI failed before writing one; uploading
+        # it would only add an "Invalid SARIF" error on top of the real one.
+        if [ -s "${SECURECI_OUTPUT}" ]; then
+          echo "sarif-ready=true" >> "$GITHUB_OUTPUT"
+        fi
         if [ "$status" -ne 0 ]; then
           echo "::error::SecureCI validation failed. See the report at ${SECURECI_OUTPUT}."
         fi
@@ -118,7 +123,7 @@ runs:
         exit 0
 
     - name: Upload SARIF to code scanning
-      if: ${{ inputs.upload-sarif == 'true' && inputs.format == 'sarif' && hashFiles(inputs.output) != '' }}
+      if: ${{ inputs.upload-sarif == 'true' && inputs.format == 'sarif' && steps.run.outputs.sarif-ready == 'true' }}
       uses: github/codeql-action/upload-sarif@a3d1b77a1ba1550fbb5c74db1dc3a11f4a481126 # v3
       with:
         sarif_file: ${{ inputs.output }}
