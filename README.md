@@ -147,6 +147,17 @@ secureci inventory --check    # fail on drift (use in CI)
 secureci pin
 ```
 
+### Agent skill
+
+[`skills/secureci`](skills/secureci/SKILL.md) walks a coding agent (Claude Code,
+Codex, Cursor, …) through setting SecureCI up in a repo: pin actions, commit
+`secureci.lock`, and add the `secure-ci/cli` action as a step in an existing job
+(replacing `actionlint` if present).
+
+```bash
+npx skills add secure-ci/cli --skill secureci
+```
+
 ## Where it shines
 
 - **Fast feedback loop** — iterate on a workflow in seconds instead of
