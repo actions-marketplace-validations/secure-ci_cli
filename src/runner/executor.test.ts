@@ -38,6 +38,7 @@ import {
   parseRepositoryFromRemote
 } from './executor';
 import { createContext } from './expression';
+import * as crypto from 'crypto';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -990,9 +991,15 @@ jobs:
       });
 
       expect(buildMock).toHaveBeenCalledTimes(1);
+      const actionDir = path.dirname(dockerActionPath);
+      const tagHash = crypto
+        .createHash('sha256')
+        .update(actionDir)
+        .digest('hex')
+        .slice(0, 12);
       expect(buildMock).toHaveBeenCalledWith(
-        path.dirname(dockerActionPath),
-        expect.stringMatching(/^secureci-action-/),
+        actionDir,
+        `secureci-action-${tagHash}`,
         'Dockerfile'
       );
 

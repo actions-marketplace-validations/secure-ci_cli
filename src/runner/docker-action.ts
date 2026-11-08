@@ -82,7 +82,7 @@ export async function executeDockerAction(
       };
     }
 
-    const tag = `secureci-action-${crypto.createHash('sha1').update(actionDir).digest('hex').slice(0, 12)}`;
+    const tag = `secureci-action-${crypto.createHash('sha256').update(actionDir).digest('hex').slice(0, 12)}`;
     logger.info(`Building Docker action image: ${action.name} (${tag})`);
     const buildResult = await containerRuntime.build(
       actionDir,

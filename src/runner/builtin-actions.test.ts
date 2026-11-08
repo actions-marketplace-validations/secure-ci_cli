@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -388,6 +389,28 @@ describe('builtin-actions', () => {
       );
       expect(result.success).toBe(true);
     });
+  });
+
+  it('derives artifact-id from a SHA-256 of the artifact store path (no SHA-1)', async () => {
+    const result = await uploadArtifact(
+      hostFileSystem(work),
+      { name: 'id-check', path: 'dist/a.txt', overwrite: 'true' },
+      'run1'
+    );
+    expect(result.success).toBe(true);
+    const target = result.output.match(/ to (.+)$/)?.[1];
+    expect(target).toBeDefined();
+    const expected = String(
+      parseInt(
+        crypto
+          .createHash('sha256')
+          .update(target as string)
+          .digest('hex')
+          .slice(0, 8),
+        16
+      )
+    );
+    expect(result.outputs['artifact-id']).toBe(expected);
   });
 
   describe('concurrent jobs (#49)', () => {

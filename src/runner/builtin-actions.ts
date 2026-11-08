@@ -465,7 +465,7 @@ export async function uploadArtifact(
   }
   const id = String(
     parseInt(
-      crypto.createHash('sha1').update(target).digest('hex').slice(0, 8),
+      crypto.createHash('sha256').update(target).digest('hex').slice(0, 8),
       16
     )
   );

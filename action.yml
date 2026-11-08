@@ -37,7 +37,7 @@ inputs:
   version:
     description: 'Version of @secureci/cli to run (npm version or dist-tag). Default: the release this action ships with (kept equal to package.json).'
     required: false
-    default: '0.10.0'
+    default: '1.0.0'
   github-token:
     description: 'Token used by the CLI to look up security advisories for the actions you use (raising the API rate limit), and to fetch a private remote contract or private actions/workflows for --contract-recurse all.'
     required: false
@@ -124,7 +124,7 @@ runs:
 
     - name: Upload SARIF to code scanning
       if: ${{ inputs.upload-sarif == 'true' && inputs.format == 'sarif' && steps.run.outputs.sarif-ready == 'true' }}
-      uses: github/codeql-action/upload-sarif@a3d1b77a1ba1550fbb5c74db1dc3a11f4a481126 # v3
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
       with:
         sarif_file: ${{ inputs.output }}
 
