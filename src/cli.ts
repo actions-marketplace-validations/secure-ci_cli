@@ -49,6 +49,7 @@ import {
   addTransitive,
   buildInventory,
   diffLock,
+  mergeLock,
   InventoryAction,
   LockEntry,
   Lockfile
@@ -499,6 +500,43 @@ function defaultWorkflowFiles(): string[] {
     .map((f) => path.join('.github', 'workflows', f));
 }
 
+/** The workflows in .github/workflows that aren't among `targets`. */
+function otherWorkflowFiles(targets: string[]): string[] {
+  const given = new Set(targets.map((file) => path.resolve(file)));
+  return defaultWorkflowFiles().filter(
+    (file) => !given.has(path.resolve(file))
+  );
+}
+
+/**
+ * The remote references these workflows use, read locally (no network), or
+ * undefined, with a warning, when one of them can't be read.
+ */
+async function workflowUses(
+  files: string[],
+  lockName: string
+): Promise<Set<string> | undefined> {
+  const uses = new Set<string>();
+  for (const file of files) {
+    try {
+      const parsed = parseFile(file);
+      if (parsed.type !== 'workflow') continue;
+      const inv = await buildInventory({
+        type: 'workflow',
+        path: file,
+        file: parsed.file
+      });
+      inv.actions.forEach((action) => uses.add(action.uses));
+    } catch (error) {
+      logger.warn(
+        `Could not read ${file} (${error instanceof Error ? error.message : 'Unknown error'}), so every entry in ${lockName} is kept.`
+      );
+      return undefined;
+    }
+  }
+  return uses;
+}
+
 async function runInventory(
   files: string[],
   options: {
@@ -736,10 +774,37 @@ async function runInventory(
         )
       );
     }
-    fs.writeFileSync(lockPath, serializeSecureciLockfile(current));
-    const transitive = Object.values(current).filter((e) => e.via).length;
+    // Given some of the workflows, lock what they use and keep the other
+    // workflows' entries as locked, instead of dropping them.
+    let entries = current;
+    const others = source ? otherWorkflowFiles(targets) : [];
+    if (source && others.length > 0) {
+      let previous: Lockfile;
+      try {
+        previous = readLockfile(source);
+      } catch (error) {
+        logger.error(
+          `Could not read ${lockName}: ${error instanceof Error ? error.message : 'Unknown error'}. Run without file arguments to rewrite it from every workflow.`
+        );
+        process.exit(1);
+      }
+      // actions.lock records no `via`, so its transitive entries can't be
+      // told apart from unused ones: keep them all.
+      const otherUses = github
+        ? undefined
+        : await workflowUses(others, lockName);
+      const merged = mergeLock(previous.actions, current, otherUses);
+      entries = merged.actions;
+      if (merged.kept > 0) {
+        logger.info(
+          `Kept ${merged.kept} action(s) from ${lockName} for the other workflows.`
+        );
+      }
+    }
+    fs.writeFileSync(lockPath, serializeSecureciLockfile(entries));
+    const transitive = Object.values(entries).filter((e) => e.via).length;
     logger.success(
-      `Wrote ${Object.keys(current).length} action(s) to ${LOCKFILE_NAME}` +
+      `Wrote ${Object.keys(entries).length} action(s) to ${LOCKFILE_NAME}` +
         (transitive > 0 ? ` (${transitive} used by other actions)` : '') +
         '. Commit it to track supply-chain drift.'
     );

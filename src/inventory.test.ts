@@ -8,6 +8,7 @@ import {
   buildInventory,
   addTransitive,
   diffLock,
+  mergeLock,
   type Lockfile
 } from './inventory';
 import type { ParsedWorkflow } from './types';
@@ -358,5 +359,97 @@ describe('diffLock', () => {
     );
     expect(diff.identity).toEqual([]);
     expect(diff.changed).toBe(false);
+  });
+});
+
+describe('mergeLock', () => {
+  const sha = (c: string) => c.repeat(40);
+
+  it("keeps the other workflows' entries and drops what no workflow uses", () => {
+    const previous = {
+      'org/a@v3': { commit: sha('1') }, // the given file bumped it to v4
+      'org/b@v1': { commit: sha('2'), ownerId: 7, repoId: 8 }
+    };
+    const updated = { 'org/a@v4': { commit: sha('3') } };
+    expect(mergeLock(previous, updated, new Set(['org/b@v1']))).toEqual({
+      actions: {
+        'org/a@v4': { commit: sha('3') },
+        'org/b@v1': { commit: sha('2'), ownerId: 7, repoId: 8 }
+      },
+      kept: 1
+    });
+  });
+
+  it('takes the freshly resolved entry for a reference both sides use', () => {
+    const previous = { 'org/b@v1': { commit: sha('2') } };
+    const updated = { 'org/b@v1': { commit: sha('9') } };
+    expect(mergeLock(previous, updated, new Set(['org/b@v1']))).toEqual({
+      actions: { 'org/b@v1': { commit: sha('9') } },
+      kept: 0
+    });
+  });
+
+  it('keeps what the kept entries pull in, following via', () => {
+    const previous = {
+      'org/a@v3': { commit: sha('1') },
+      'org/b@v1': { commit: sha('2') },
+      'org/t@v1': { commit: sha('4'), via: ['org/b@v1'] },
+      'org/u@v1': { commit: sha('5'), via: ['org/t@v1'] },
+      // Pulled in only by the bumped org/a@v3: dropped with it.
+      'org/s@v1': { commit: sha('6'), via: ['org/a@v3'] },
+      // Pulled in by both: keeps only the reference that is still locked.
+      'org/w@v1': { commit: sha('7'), via: ['org/a@v3', 'org/b@v1'] }
+    };
+    const updated = { 'org/a@v4': { commit: sha('3') } };
+    expect(mergeLock(previous, updated, new Set(['org/b@v1']))).toEqual({
+      actions: {
+        'org/a@v4': { commit: sha('3') },
+        'org/b@v1': { commit: sha('2') },
+        'org/t@v1': { commit: sha('4'), via: ['org/b@v1'] },
+        'org/u@v1': { commit: sha('5'), via: ['org/t@v1'] },
+        'org/w@v1': { commit: sha('7'), via: ['org/b@v1'] }
+      },
+      kept: 4
+    });
+  });
+
+  it('records every reference that pulls in a shared dependency, and none for a direct one', () => {
+    const previous = {
+      'org/b@v1': { commit: sha('2') },
+      'org/t@v1': { commit: sha('4'), via: ['org/b@v1'] },
+      'org/c@v1': { commit: sha('5'), via: ['org/b@v1'] }
+    };
+    const updated = {
+      'org/a@v4': { commit: sha('3') },
+      'org/t@v1': { commit: sha('4'), via: ['org/a@v4'] },
+      // Used directly by another workflow, so not a transitive entry.
+      'org/c@v1': { commit: sha('5'), via: ['org/a@v4'] }
+    };
+    expect(
+      mergeLock(previous, updated, new Set(['org/b@v1', 'org/c@v1']))
+    ).toEqual({
+      actions: {
+        'org/a@v4': { commit: sha('3') },
+        'org/b@v1': { commit: sha('2') },
+        'org/c@v1': { commit: sha('5') },
+        'org/t@v1': { commit: sha('4'), via: ['org/a@v4', 'org/b@v1'] }
+      },
+      kept: 1
+    });
+  });
+
+  it('keeps every previous entry when what the other workflows use is unknown', () => {
+    const previous = {
+      'org/a@v3': { commit: sha('1') },
+      'org/helper@v1': { commit: sha('2') }
+    };
+    const updated = { 'org/a@v3': { commit: sha('3') } };
+    expect(mergeLock(previous, updated, undefined)).toEqual({
+      actions: {
+        'org/a@v3': { commit: sha('3') },
+        'org/helper@v1': { commit: sha('2') }
+      },
+      kept: 1
+    });
   });
 });
