@@ -55,6 +55,48 @@ function writeRelease(
   fs.writeFileSync(path.join(dir, 'SHA256SUMS'), sums.join('\n') + '\n');
 }
 
+/**
+ * Mirror a release in GitHub API form under `api`: the release JSON at
+ * `releases/<ref>` and each asset at `releases/assets/<id>`, where the
+ * install script falls back to when the release download URL fails.
+ */
+function writeApiRelease(
+  api: string,
+  ref: string,
+  version: string,
+  firstId: number,
+  opts: { tamper?: string; pretty?: boolean; assetBase?: string } = {}
+): void {
+  const src = tmp('secureci-api-src-');
+  writeRelease(src, version, opts.tamper);
+  const assetsDir = path.join(api, 'releases', 'assets');
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const assets = [...ASSETS, 'SHA256SUMS'].map((name, i) => {
+    const id = firstId + i;
+    fs.copyFileSync(path.join(src, name), path.join(assetsDir, String(id)));
+    return {
+      url: `${opts.assetBase ?? `file://${api}`}/releases/assets/${id}`,
+      id,
+      name,
+      uploader: { login: 'bot', url: 'https://api.github.com/users/bot' },
+      browser_download_url: `https://github.com/x/releases/download/v${version}/${name}`
+    };
+  });
+  const release = {
+    url: `file://${api}/releases/1`,
+    name: `v${version}`,
+    // Release notes can mention asset names; they must not be picked up.
+    body: `Fixes, "name":"secureci-linux-x64", and more`,
+    assets
+  };
+  const file = path.join(api, 'releases', ref);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(
+    file,
+    opts.pretty ? JSON.stringify(release, null, 2) : JSON.stringify(release)
+  );
+}
+
 interface Setup {
   os?: string;
   arch?: string;
@@ -63,17 +105,36 @@ interface Setup {
   tamper?: string;
   omit?: string;
   env?: Record<string, string>;
+  /** Release download URLs fail (as github.com did with HTTP 504). */
+  downloadsFail?: boolean;
+  /** Tamper with an asset served by the API fallback. */
+  apiTamper?: string;
+  /** Point the API's asset URLs somewhere other than the API base. */
+  apiAssetBase?: string;
+  /** Serve no API release either. */
+  apiMissing?: boolean;
 }
 
 function run(setup: Setup = {}) {
   const releases = tmp('secureci-releases-');
-  writeRelease(
-    path.join(releases, 'latest', 'download'),
-    '9.9.9',
-    setup.tamper,
-    setup.omit
-  );
-  writeRelease(path.join(releases, 'download', 'v1.2.3'), '1.2.3');
+  if (!setup.downloadsFail) {
+    writeRelease(
+      path.join(releases, 'latest', 'download'),
+      '9.9.9',
+      setup.tamper,
+      setup.omit
+    );
+    writeRelease(path.join(releases, 'download', 'v1.2.3'), '1.2.3');
+  }
+  const api = tmp('secureci-api-');
+  if (!setup.apiMissing) {
+    const opts = { tamper: setup.apiTamper, assetBase: setup.apiAssetBase };
+    writeApiRelease(api, 'latest', '9.9.9', 100, opts);
+    writeApiRelease(api, 'tags/v1.2.3', '1.2.3', 200, {
+      ...opts,
+      pretty: true
+    });
+  }
 
   const bin = tmp('secureci-fakebin-');
   fs.writeFileSync(
@@ -87,6 +148,17 @@ function run(setup: Setup = {}) {
     { mode: 0o755 }
   );
 
+  // A curl wrapper that logs each call's arguments, then runs the real curl.
+  const realCurl = spawnSync('sh', ['-c', 'command -v curl'], {
+    encoding: 'utf8'
+  }).stdout.trim();
+  const curlLog = path.join(bin, 'curl.log');
+  fs.writeFileSync(
+    path.join(bin, 'curl'),
+    `#!/bin/sh\nprintf '%s\\n' "$*" >>"${curlLog}"\nexec "${realCurl}" "$@"\n`,
+    { mode: 0o755 }
+  );
+
   const home = tmp('secureci-home-');
   const installDir = path.join(home, 'bin');
   const result = spawnSync('sh', [SCRIPT], {
@@ -95,13 +167,17 @@ function run(setup: Setup = {}) {
       PATH: `${bin}:${process.env.PATH}`,
       HOME: home,
       SECURECI_DOWNLOAD_BASE: `file://${releases}`,
+      SECURECI_API_BASE: `file://${api}`,
       SECURECI_INSTALL_DIR: installDir,
       ...setup.env
     }
   });
   const installed = path.join(installDir, 'secureci');
   const output = result.stdout + result.stderr;
-  return { status: result.status, output, installed, home };
+  const curlCalls = fs.existsSync(curlLog)
+    ? fs.readFileSync(curlLog, 'utf8').trim().split('\n')
+    : [];
+  return { status: result.status, output, installed, home, curlCalls };
 }
 
 describe('install.sh', () => {
@@ -199,5 +275,59 @@ describe('install.sh', () => {
     const r = run({ ghAuth: 1, env: { SECURECI_REQUIRE_ATTESTATION: '1' } });
     expect(r.status).not.toBe(0);
     expect(fs.existsSync(r.installed)).toBe(false);
+  });
+
+  it('retries transient server errors (5xx, timeouts) on every download', () => {
+    const r = run({ downloadsFail: true });
+    expect(r.status, r.output).toBe(0);
+    // Release URL x2, API release JSON, API asset x2.
+    expect(r.curlCalls.length).toBe(5);
+    for (const call of r.curlCalls) expect(call).toMatch(/--retry 3 /);
+  });
+
+  describe('when the release download URL fails', () => {
+    it('falls back to the GitHub API for the latest release', () => {
+      const r = run({ downloadsFail: true });
+      expect(r.status, r.output).toBe(0);
+      expect(fs.readFileSync(r.installed, 'utf8')).toBe(
+        fakeBinary('secureci-linux-x64', '9.9.9')
+      );
+      expect(r.output).toMatch(/trying the GitHub API/);
+    });
+
+    it('falls back to the GitHub API for a specific version (pretty-printed JSON)', () => {
+      const r = run({
+        downloadsFail: true,
+        env: { SECURECI_VERSION: '1.2.3' }
+      });
+      expect(r.status, r.output).toBe(0);
+      expect(fs.readFileSync(r.installed, 'utf8')).toBe(
+        fakeBinary('secureci-linux-x64', '1.2.3')
+      );
+    });
+
+    it('still refuses a fallback binary whose checksum does not match', () => {
+      const r = run({ downloadsFail: true, apiTamper: 'secureci-linux-x64' });
+      expect(r.status).not.toBe(0);
+      expect(r.output).toMatch(/checksum mismatch/i);
+      expect(fs.existsSync(r.installed)).toBe(false);
+    });
+
+    it('ignores asset URLs outside the API base', () => {
+      const r = run({
+        downloadsFail: true,
+        apiAssetBase: 'https://example.com/repos/secure-ci/cli'
+      });
+      expect(r.status).not.toBe(0);
+      expect(r.output).toMatch(/secureci-linux-x64 is not in the release/);
+      expect(fs.existsSync(r.installed)).toBe(false);
+    });
+
+    it('fails when the API fallback fails too', () => {
+      const r = run({ downloadsFail: true, apiMissing: true });
+      expect(r.status).not.toBe(0);
+      expect(r.output).toMatch(/download failed/);
+      expect(fs.existsSync(r.installed)).toBe(false);
+    });
   });
 });

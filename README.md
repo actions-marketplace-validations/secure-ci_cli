@@ -71,6 +71,9 @@ Set `SECURECI_VERSION=1.0.0` to install a specific release,
 `SECURECI_INSTALL_DIR` to install somewhere else, and
 `SECURECI_REQUIRE_ATTESTATION=1` to fail unless `gh` verifies build provenance
 (e.g. `curl -fsSL https://secure-ci.dev/install.sh | SECURECI_VERSION=1.0.0 sh`).
+If the release's download link fails (GitHub has returned `504` for one while
+its API still served the files), the script fetches the same files through the
+GitHub API instead; the `SHA256SUMS` and provenance checks are unchanged.
 `secure-ci.dev/install.sh` redirects to [`install.sh`](install.sh) on this
 repository's `main` branch.
 

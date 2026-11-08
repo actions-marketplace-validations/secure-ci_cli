@@ -90,7 +90,10 @@ Release binaries are Node.js single executable applications (SEA), built by
   JavaScript actions on the host with the first `node` on the step's `PATH`
   instead. Job containers always use the image's own `node`.
 - `install.sh` (repository root, POSIX sh) installs a release binary on Linux
-  and macOS. `secure-ci.dev/install.sh` redirects to it on `main`, so a merge
+  and macOS. When a release download URL fails it falls back to the same
+  asset through the GitHub API (`releases/<latest|tags/vX>` JSON, parsed with
+  `tr`/`awk`, asset URL must be under `SECURECI_API_BASE/releases/assets/`).
+  `secure-ci.dev/install.sh` redirects to it on `main`, so a merge
   ships it: `scripts/install.test.ts` runs it against a fake `file://` release,
   and the `install-script` CI job installs the real latest release with it on
   Ubuntu and macOS.

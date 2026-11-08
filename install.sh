@@ -9,7 +9,8 @@
 #   less install.sh
 #   sh install.sh
 #
-# What it does: picks the binary for this OS and CPU from the GitHub release,
+# What it does: picks the binary for this OS and CPU from the GitHub release
+# (falling back to the GitHub API when the release download URL fails),
 # checks it against the release's SHA256SUMS (a mismatch aborts), verifies its
 # build-provenance attestation when the GitHub CLI (gh) is signed in, then
 # installs it as `secureci`. It never uses sudo.
@@ -20,6 +21,8 @@
 #   SECURECI_REQUIRE_ATTESTATION  1 = fail unless gh verifies build provenance
 #   SECURECI_DOWNLOAD_BASE        releases URL, for mirrors and tests
 #                                 (default: https://github.com/secure-ci/cli/releases)
+#   SECURECI_API_BASE             GitHub API repo URL for the fallback, for tests
+#                                 (default: https://api.github.com/repos/secure-ci/cli)
 #
 # Windows: see https://secure-ci.dev/docs#standalone-binary-no-nodejs-needed
 #
@@ -72,17 +75,50 @@ detect_asset() {
   echo "secureci-$os-$arch"
 }
 
-download() {
-  # $1 = URL, $2 = output file. HTTPS only, including redirects (file:// is
-  # allowed for SECURECI_DOWNLOAD_BASE mirrors and tests).
+try_download() {
+  # $1 = URL, $2 = output file, $3 = optional request header. HTTPS only,
+  # including redirects (file:// is allowed for mirrors and tests). curl
+  # retries transient errors (timeouts, HTTP 408/429/500/502/503/504), which
+  # GitHub's release downloads and API both return intermittently.
   if has curl; then
-    curl -fsSL --proto '=https,file' --proto-redir '=https' -o "$2" "$1" ||
-      die "download failed: $1"
+    curl -fsSL --retry 3 --retry-delay 2 --proto '=https,file' --proto-redir '=https' \
+      ${3:+-H "$3"} -o "$2" "$1"
   elif has wget; then
-    wget -q --https-only -O "$2" "$1" || die "download failed: $1"
+    wget -q --https-only ${3:+--header="$3"} -O "$2" "$1"
   else
     die "curl or wget is required"
   fi
+}
+
+download() {
+  try_download "$@" || die "download failed: $1"
+}
+
+api_asset_url() {
+  # $1 = asset name, $2 = release JSON from the GitHub API. Prints the asset's
+  # API URL, only if it is under $api/releases/assets/<numeric id>. No jq:
+  # split the JSON at , { } [ ] and pair each asset's "url" with its "name".
+  tr ',{}[]' '\n\n\n\n\n' <"$2" |
+    awk -v name="$1" -v prefix="$api/releases/assets/" '
+      { sub(/^[ \t]+/, ""); sub(/[ \t\r]+$/, "") }
+      /^"url": *"/ { url = $0; sub(/^"url": *"/, "", url); sub(/"$/, "", url); next }
+      /^"name": *"/ {
+        n = $0; sub(/^"name": *"/, "", n); sub(/"$/, "", n)
+        id = substr(url, length(prefix) + 1)
+        if (n == name && index(url, prefix) == 1 && id ~ /^[0-9]+$/) { print url; exit }
+      }'
+}
+
+fetch() {
+  # $1 = asset name, $2 = output file. The release download URL first; if it
+  # fails (github.com has returned 504 for a release's downloads while the API
+  # served them), the same asset through the GitHub API.
+  try_download "$url/$1" "$2" && return 0
+  say "download from $url failed; trying the GitHub API"
+  [ -s "$tmp/release.json" ] || download "$release_api" "$tmp/release.json"
+  asset_url=$(api_asset_url "$1" "$tmp/release.json")
+  [ -n "$asset_url" ] || die "$1 is not in the release at $release_api"
+  download "$asset_url" "$2" "Accept: application/octet-stream"
 }
 
 sha256_of() {
@@ -112,18 +148,21 @@ verify_attestation() {
 
 main() {
   base=${SECURECI_DOWNLOAD_BASE:-https://github.com/$REPO/releases}
+  api=${SECURECI_API_BASE:-https://api.github.com/repos/$REPO}
   version=${SECURECI_VERSION:-latest}
   install_dir=${SECURECI_INSTALL_DIR:-}
   [ -n "$install_dir" ] || install_dir="$HOME/.local/bin"
 
   if [ "$version" = latest ]; then
     url="$base/latest/download"
+    release_api="$api/releases/latest"
   else
     version=${version#v}
     case "$version" in
       *[!0-9A-Za-z.-]* | "") die "invalid SECURECI_VERSION: $version" ;;
     esac
     url="$base/download/v$version"
+    release_api="$api/releases/tags/v$version"
   fi
 
   asset=$(detect_asset)
@@ -132,8 +171,8 @@ main() {
   trap 'exit 130' INT TERM
 
   say "downloading $asset ($version)"
-  download "$url/$asset" "$tmp/$asset"
-  download "$url/SHA256SUMS" "$tmp/SHA256SUMS"
+  fetch "$asset" "$tmp/$asset"
+  fetch SHA256SUMS "$tmp/SHA256SUMS"
 
   expected=$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1; exit }' "$tmp/SHA256SUMS")
   [ -n "$expected" ] || die "$asset is not listed in SHA256SUMS; not installing"
