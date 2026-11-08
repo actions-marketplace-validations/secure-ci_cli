@@ -152,10 +152,13 @@ secureci pin
 
 ### Agent skill
 
-[`skills/secureci`](skills/secureci/SKILL.md) walks a coding agent (Claude Code,
-Codex, Cursor, …) through setting SecureCI up in a repo: pin actions, commit
-`secureci.lock`, and add the `secure-ci/cli` action as a step in an existing job
-(replacing `actionlint` if present).
+[`skills/secureci`](skills/secureci/SKILL.md) lets a coding agent (Claude Code,
+Codex, Cursor, …) check every workflow it creates or edits (`secureci validate`,
+`secureci pin --check`), run workflows locally (`secureci run`), and set
+SecureCI up in a repo: pin actions, commit `secureci.lock`, and add the
+`secure-ci/cli` action as a step in an existing job (replacing `actionlint` if
+present). It also picks up requests that name actionlint, zizmor, nektos/act,
+pinact and similar tools.
 
 ```bash
 npx skills add secure-ci/cli --skill secureci

@@ -696,7 +696,7 @@ Reference the action by a [release tag](https://github.com/secure-ci/cli/release
 
 ### Generate the workflow (`secureci init workflow`)
 
-`secureci init workflow` writes the workflow above to `.github/workflows/secureci.yml` so you don't have to copy it by hand, with the action pinned to the release tag of the CLI you ran it with (`secure-ci/cli@v<version>`; check yours with `secureci --version`). (Bare `secureci init` just prints help and its subcommands.)
+`secureci init workflow` writes the workflow above to `.github/workflows/secureci.yml` so you don't have to copy it by hand, with the action set to the release of the CLI you ran it with (`secure-ci/cli@<sha> # v<version>`, or `secure-ci/cli@v<version>` with `--no-pin`; check yours with `secureci --version`). (Bare `secureci init` just prints help and its subcommands.)
 
 ```bash
 secureci init workflow                                   # SARIF upload on (default)
@@ -921,7 +921,7 @@ SecureCI supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps.
 - **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with the CLI's own Node.js binary (with the [standalone binary](README.md#standalone-binary-no-nodejs-needed), the first `node` on the step's `PATH`, including one added by `actions/setup-node`; if there is none the step fails with "JavaScript actions need Node.js on PATH when using the standalone binary"), in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` of remote actions runs at job start, before any step, gated by `pre-if` (local actions, which usually come from the checkout, run it right before `main`); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.
-- **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it in its own container. Note: this is distinct from the job container that `--container-runtime` starts for `run:` steps and JavaScript actions.
+- **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it in its own container. Note: this is distinct from the job container that `--container-runtime` starts for `run:` steps and JavaScript actions. A built image is tagged `secureci-action-<hash>`, from a SHA-256 hash of the action's directory (1.0.0 or later; earlier releases used SHA-1). Images built by those earlier releases have different tags and are no longer used, so you can remove them with `docker rmi`.
 - **Local Actions** (`uses: ./path/to/action`): Resolved relative to the workspace (the current directory), using `action.yml` or `action.yaml`.
 - **`docker://` steps** (`uses: docker://alpine:3.20`): Run the image directly, with `with.args` as its arguments and `with.entrypoint` as its entrypoint.
 - **Unresolvable actions fail the step**: A remote action that can't be fetched, a missing local action, or an unsupported `runs.using` fails the step (as on GitHub) instead of being skipped.

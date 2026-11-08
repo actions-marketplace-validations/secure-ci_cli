@@ -345,5 +345,6 @@ Releases are automated by the `publish` job in `.github/workflows/ci.yaml`:
 
 Don't tag or `npm publish` by hand. The job fails if `v<version>` already
 exists on a different commit, so pick a version that has no tag yet.
-`secureci init workflow` emits `secure-ci/cli@v<version>`, so each release
-tag must exist for the workflows it generates to resolve.
+`secureci init workflow` emits `secure-ci/cli@v<version>` and, by default,
+pins it to that tag's commit, so each release tag must exist for the workflows
+it generates to resolve and be pinned.
