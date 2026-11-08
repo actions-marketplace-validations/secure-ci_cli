@@ -9,6 +9,12 @@ them, and checks them against your organization's pipeline standards — without
 committing, pushing, or waiting on a CI runner. It is the free, open-source part
 of [SecureCI](https://secure-ci.dev).
 
+<a href="https://secure-ci.dev/assets/video/secureci-walkthrough-16x9.mp4"><img src="https://secure-ci.dev/assets/readme-demo.svg" width="848" alt="Terminal demo of the secureci CLI on a demo repository: run executes a workflow locally and its tests pass; validate fails a deploy workflow against a pipeline contract (security scan below the minimum version, wrong step order, actions not pinned to a commit SHA); pin pins actions/checkout@v4 to its full commit SHA, keeping # v4 for Dependabot; inventory --check fails because the v4 tag now resolves to a different commit than the one locked."></a>
+
+<sub>Real output from the CLI on a demo repository.</sub>
+
+▶️ **[Watch the 60-second walkthrough](https://secure-ci.dev/assets/video/secureci-walkthrough-16x9.mp4)**
+
 > 📖 This README is the quick tour. Every flag, context and edge case lives in
 > the **[full reference → DOCS.md](DOCS.md)**.
 
