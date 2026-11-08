@@ -3,6 +3,9 @@ name: 'Test workflow'
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test job

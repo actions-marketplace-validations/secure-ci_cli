@@ -9,8 +9,9 @@ export interface InitWorkflowOptions {
   contract?: string;
   /**
    * Upload the SARIF report to GitHub code scanning. Defaults to true, which
-   * also requests the `security-events: write` permission the upload needs
-   * (on the job).
+   * also requests the `actions: read` and `security-events: write`
+   * permissions the upload needs (on the job), with a comment noting that
+   * code scanning must be enabled for the repository.
    */
   upload?: boolean;
 }
@@ -22,7 +23,8 @@ export interface InitWorkflowOptions {
  *
  * The output is deterministic for a given set of options, so it can be
  * regenerated and diffed. With uploads on (the default) the job asks for
- * `security-events: write` and lets the action upload SARIF; with uploads off
+ * `actions: read` and `security-events: write` and lets the action upload
+ * SARIF; with uploads off
  * it keeps `contents: read` only and passes `upload-sarif: false`.
  */
 export function renderInitWorkflow(options: InitWorkflowOptions): string {
@@ -46,11 +48,20 @@ export function renderInitWorkflow(options: InitWorkflowOptions): string {
   ];
   // Write scopes belong on the job, not the workflow. Job-level permissions
   // replace the top-level ones, so contents: read is repeated for checkout.
+  // The SARIF upload (github/codeql-action/upload-sarif) needs actions: read
+  // to read the workflow run (required on private repositories) and
+  // security-events: write to upload the results.
   if (upload) {
     lines.push(
+      '    # The SARIF upload needs code scanning enabled for this repository',
+      '    # (Settings > Code security; on private repositories this needs',
+      '    # GitHub Code Security / Advanced Security). Without it the upload',
+      '    # step fails: enable it, or give the secure-ci/cli step',
+      '    # `with: upload-sarif: false` (and drop the two scopes below).',
       '    permissions:',
       '      contents: read',
-      '      security-events: write'
+      '      actions: read # upload-sarif reads the workflow run',
+      '      security-events: write # upload SARIF to code scanning'
     );
   }
 

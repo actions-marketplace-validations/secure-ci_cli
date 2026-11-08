@@ -365,7 +365,7 @@ export function actionDirInContainer(
   let containerDir = container.actionDirs.get(actionDir);
   if (!containerDir) {
     const hash = crypto
-      .createHash('sha1')
+      .createHash('sha256')
       .update(actionDir)
       .digest('hex')
       .slice(0, 12);

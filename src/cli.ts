@@ -469,14 +469,24 @@ initCommand
     '.github/workflows/secureci.yml'
   )
   .option('-f, --force', 'Overwrite the output file if it already exists')
+  .option(
+    '--no-pin',
+    'Keep tag refs (e.g. actions/checkout@v4) instead of pinning them to commit SHAs'
+  )
+  .option(
+    '--offline',
+    'Pin only refs already in the action cache; others keep their tag'
+  )
   .action(
-    (options: {
+    async (options: {
       contract?: string;
       upload: boolean;
       output: string;
       force?: boolean;
+      pin: boolean;
+      offline?: boolean;
     }) => {
-      runInit(options);
+      await runInit(options);
     }
   );
 
@@ -1128,12 +1138,14 @@ async function validateFiles(
   if (!allValid) process.exit(1);
 }
 
-function runInit(options: {
+async function runInit(options: {
   contract?: string;
   upload: boolean;
   output: string;
   force?: boolean;
-}): void {
+  pin: boolean;
+  offline?: boolean;
+}): Promise<void> {
   const output = path.resolve(process.cwd(), options.output);
   if (fs.existsSync(output) && !options.force) {
     logger.error(
@@ -1142,19 +1154,40 @@ function runInit(options: {
     process.exit(1);
   }
 
-  const content = renderInitWorkflow({
+  let unpinned: Array<{ uses: string; reason: string }> = [];
+  let content = renderInitWorkflow({
     version: readVersion(),
     contract: options.contract,
     upload: options.upload
   });
 
+  // Pin action tags to commit SHAs (`owner/repo@<sha> # v4`), as
+  // `secureci pin` would. A ref that can't be resolved keeps its tag.
+  if (options.pin) {
+    const result = await pinContent(content, (uses) =>
+      options.offline
+        ? Promise.resolve(cachedActionSha(uses))
+        : resolveActionSha(uses)
+    );
+    content = result.content;
+    unpinned = result.unresolved;
+  }
+
   fs.mkdirSync(path.dirname(output), { recursive: true });
   fs.writeFileSync(output, content);
 
   logger.success(`Wrote ${options.output}`);
+  for (const problem of unpinned) {
+    logger.warn(
+      `${problem.uses} ${problem.reason}; left on its tag. Run \`secureci pin ${options.output}\` to pin it later.`
+    );
+  }
   if (options.upload) {
     logger.info(
-      'The workflow uploads SARIF to code scanning (needs security-events: write).'
+      'The workflow uploads SARIF to code scanning (needs actions: read and security-events: write).'
+    );
+    logger.info(
+      'Code scanning must be enabled for the repository (Settings > Code security) for the SARIF upload to work; otherwise regenerate with --no-upload.'
     );
   }
   logger.info('Commit it and open a pull request to see SecureCI run.');

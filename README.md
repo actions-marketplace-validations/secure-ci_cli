@@ -67,10 +67,10 @@ less install.sh
 sh install.sh
 ```
 
-Set `SECURECI_VERSION=0.9.0` to install a specific release,
+Set `SECURECI_VERSION=1.0.0` to install a specific release,
 `SECURECI_INSTALL_DIR` to install somewhere else, and
 `SECURECI_REQUIRE_ATTESTATION=1` to fail unless `gh` verifies build provenance
-(e.g. `curl -fsSL https://secure-ci.dev/install.sh | SECURECI_VERSION=0.9.0 sh`).
+(e.g. `curl -fsSL https://secure-ci.dev/install.sh | SECURECI_VERSION=1.0.0 sh`).
 `secure-ci.dev/install.sh` redirects to [`install.sh`](install.sh) on this
 repository's `main` branch.
 
@@ -145,6 +145,17 @@ secureci inventory --check    # fail on drift (use in CI)
 
 # Pin action tags to commit SHAs in place (keeps `# v4` for Dependabot/Renovate)
 secureci pin
+```
+
+### Agent skill
+
+[`skills/secureci`](skills/secureci/SKILL.md) walks a coding agent (Claude Code,
+Codex, Cursor, …) through setting SecureCI up in a repo: pin actions, commit
+`secureci.lock`, and add the `secure-ci/cli` action as a step in an existing job
+(replacing `actionlint` if present).
+
+```bash
+npx skills add secure-ci/cli --skill secureci
 ```
 
 ## Where it shines
