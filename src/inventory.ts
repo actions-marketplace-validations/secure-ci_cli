@@ -384,3 +384,62 @@ export function diffLock(
     identity
   };
 }
+
+/**
+ * Merge entries resolved for some workflow files into the previous lock, so
+ * locking those files doesn't drop the other workflows' entries.
+ *
+ * `updated` wins. From `previous`, keep what the other workflows still use
+ * (`otherUses`, their direct references) and, following `via`, what those
+ * pull in; drop the rest. A reference used directly by another workflow has
+ * no `via`, and a dependency both sides pull in lists every reference that
+ * pulls it in. When `otherUses` is unknown (GitHub's actions.lock records no
+ * `via`, or a workflow couldn't be read), keep every previous entry.
+ */
+export function mergeLock(
+  previous: Record<string, LockEntry>,
+  updated: Record<string, LockEntry>,
+  otherUses: ReadonlySet<string> | undefined
+): { actions: Record<string, LockEntry>; kept: number } {
+  if (!otherUses) {
+    const kept = Object.keys(previous).filter((uses) => !(uses in updated));
+    return { actions: { ...previous, ...updated }, kept: kept.length };
+  }
+
+  // Previous entries the other workflows reach, taken as locked.
+  const kept = new Set(
+    [...otherUses].filter((uses) => uses in previous && !(uses in updated))
+  );
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [uses, entry] of Object.entries(previous)) {
+      if (kept.has(uses) || uses in updated) continue;
+      if (entry.via?.some((v) => kept.has(v))) {
+        kept.add(uses);
+        grew = true;
+      }
+    }
+  }
+  const withVia = (entry: LockEntry, via: string[]): LockEntry => {
+    const out: LockEntry = { ...entry };
+    delete out.via;
+    if (via.length > 0) out.via = [...new Set(via)].sort();
+    return out;
+  };
+  const stillLocked = (via: string[] | undefined) =>
+    (via ?? []).filter((v) => kept.has(v));
+
+  const actions: Record<string, LockEntry> = {};
+  for (const [uses, entry] of Object.entries(updated)) {
+    actions[uses] = otherUses.has(uses)
+      ? withVia(entry, [])
+      : entry.via
+        ? withVia(entry, [...entry.via, ...stillLocked(previous[uses]?.via)])
+        : entry;
+  }
+  for (const uses of kept) {
+    const entry = previous[uses];
+    actions[uses] = entry.via ? withVia(entry, stillLocked(entry.via)) : entry;
+  }
+  return { actions, kept: kept.size };
+}

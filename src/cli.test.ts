@@ -869,6 +869,136 @@ describe('secureci commands', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("inventory --update-lock with files keeps the other workflows' entries", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-merge-cli-'));
+    const wfDir = path.join(dir, '.github', 'workflows');
+    fs.mkdirSync(wfDir, { recursive: true });
+    const write = (name: string, uses: string) => {
+      const file = path.join(wfDir, name);
+      fs.writeFileSync(
+        file,
+        [
+          'name: CI',
+          'on: push',
+          'jobs:',
+          '  a:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          `      - uses: ${uses}`
+        ].join('\n')
+      );
+      return file;
+    };
+    const scan = (c: string) => 'org/scan@' + c.repeat(40);
+    const deploy = 'org/deploy@' + '2'.repeat(40);
+    const a = write('a.yml', scan('1'));
+    write('b.yml', deploy);
+    const lock = path.join(dir, 'secureci.lock');
+    const readLock = () => JSON.parse(fs.readFileSync(lock, 'utf-8')).actions;
+    const out = (r: { stdout: string; stderr: string }) => r.stdout + r.stderr;
+
+    // Lock every workflow, plus transitive entries as an online run records
+    // them: one pulled in by b.yml's action, one by a.yml's.
+    expect(run(['inventory', '--offline', '--update-lock'], dir).status).toBe(
+      0
+    );
+    const data = JSON.parse(fs.readFileSync(lock, 'utf-8'));
+    data.actions['org/helper@v1'] = { commit: '4'.repeat(40), via: [deploy] };
+    data.actions['org/old-dep@v1'] = {
+      commit: '5'.repeat(40),
+      via: [scan('1')]
+    };
+    fs.writeFileSync(lock, JSON.stringify(data));
+
+    // Bump a.yml and update the lock for that file only: b.yml's entries
+    // stay as locked, a.yml's old ones go.
+    write('a.yml', scan('3'));
+    const updated = run(['inventory', a, '--offline', '--update-lock'], dir);
+    expect(updated.status).toBe(0);
+    expect(out(updated)).toContain(
+      'Kept 2 action(s) from secureci.lock for the other workflows'
+    );
+    expect(Object.keys(readLock()).sort()).toEqual(
+      [deploy, 'org/helper@v1', scan('3')].sort()
+    );
+    expect(readLock()['org/helper@v1'].via).toEqual([deploy]);
+    expect(run(['inventory', '--offline', '--check'], dir).status).toBe(0);
+
+    // `pin --update-lock <file>` locks the same way.
+    write('a.yml', scan('6'));
+    expect(run(['pin', a, '--offline', '--update-lock'], dir).status).toBe(0);
+    expect(Object.keys(readLock()).sort()).toEqual(
+      [deploy, 'org/helper@v1', scan('6')].sort()
+    );
+
+    // With only GitHub's actions.lock, the other workflows' entries are
+    // carried over from it into the new secureci.lock.
+    fs.rmSync(lock);
+    fs.writeFileSync(
+      path.join(wfDir, 'actions.lock'),
+      [
+        "version: 'v0.0.2'",
+        'dependencies:',
+        `  '${deploy}':`,
+        "    ref: 'v1'",
+        `    commit: 'sha1-${'2'.repeat(40)}'`,
+        '    owner_id: 1',
+        '    repo_id: 1',
+        "  'org/helper@v1':",
+        "    ref: 'v1'",
+        `    commit: 'sha1-${'4'.repeat(40)}'`,
+        '    owner_id: 1',
+        '    repo_id: 2'
+      ].join('\n')
+    );
+    const switched = run(['inventory', a, '--offline', '--update-lock'], dir);
+    expect(switched.status).toBe(0);
+    expect(out(switched)).toContain(
+      'Kept 2 action(s) from actions.lock for the other workflows'
+    );
+    expect(readLock()[deploy]).toEqual({
+      commit: '2'.repeat(40),
+      owner_id: 1,
+      repo_id: 1
+    });
+    expect(Object.keys(readLock()).sort()).toEqual(
+      [deploy, 'org/helper@v1', scan('6')].sort()
+    );
+
+    // If another workflow can't be read, what it uses is unknown, so nothing
+    // in the previous lock is dropped.
+    fs.writeFileSync(path.join(wfDir, 'broken.yml'), 'jobs: [');
+    write('a.yml', scan('7'));
+    // (spawnSync: `run` drops stderr when the command succeeds.)
+    const unsure = spawnSync(
+      'node',
+      [cliPath, 'inventory', a, '--offline', '--update-lock'],
+      { cwd: dir, encoding: 'utf-8' }
+    );
+    expect(unsure.status).toBe(0);
+    expect(unsure.stderr).toContain(
+      'broken.yml (Flow sequence in block collection'
+    );
+    expect(unsure.stderr).toContain('so every entry in secureci.lock is kept');
+    expect(Object.keys(readLock()).sort()).toEqual(
+      [deploy, 'org/helper@v1', scan('6'), scan('7')].sort()
+    );
+
+    // A lock that can't be read isn't overwritten for some of the workflows;
+    // without file arguments it is rewritten as before.
+    fs.rmSync(path.join(wfDir, 'broken.yml'));
+    fs.writeFileSync(lock, '{not json');
+    const bad = run(['inventory', a, '--offline', '--update-lock'], dir);
+    expect(bad.status).not.toBe(0);
+    expect(out(bad)).toContain('Could not read secureci.lock');
+    expect(fs.readFileSync(lock, 'utf-8')).toBe('{not json');
+    expect(run(['inventory', '--offline', '--update-lock'], dir).status).toBe(
+      0
+    );
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('inventory locks transitive dependencies and still reads a v1 lock', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-trans-cli-'));
     const wfDir = path.join(dir, 'repo', '.github', 'workflows');

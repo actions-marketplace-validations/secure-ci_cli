@@ -9,6 +9,12 @@ them, and checks them against your organization's pipeline standards — without
 committing, pushing, or waiting on a CI runner. It is the free, open-source part
 of [SecureCI](https://secure-ci.dev).
 
+<a href="https://secure-ci.dev/assets/video/secureci-walkthrough-16x9.mp4"><img src="https://secure-ci.dev/assets/readme-demo.svg" width="848" alt="Terminal demo of the secureci CLI on a demo repository: run executes a workflow locally and its tests pass; validate fails a deploy workflow against a pipeline contract (security scan below the minimum version, wrong step order, actions not pinned to a commit SHA); pin pins actions/checkout@v4 to its full commit SHA, keeping # v4 for Dependabot; inventory --check fails because the v4 tag now resolves to a different commit than the one locked."></a>
+
+<sub>Real output from the CLI on a demo repository.</sub>
+
+▶️ **[Watch the 60-second walkthrough](https://secure-ci.dev/assets/video/secureci-walkthrough-16x9.mp4)**
+
 > 📖 This README is the quick tour. Every flag, context and edge case lives in
 > the **[full reference → DOCS.md](DOCS.md)**.
 
@@ -67,10 +73,13 @@ less install.sh
 sh install.sh
 ```
 
-Set `SECURECI_VERSION=1.0.0` to install a specific release,
+Set `SECURECI_VERSION=1.0.1` to install a specific release,
 `SECURECI_INSTALL_DIR` to install somewhere else, and
 `SECURECI_REQUIRE_ATTESTATION=1` to fail unless `gh` verifies build provenance
-(e.g. `curl -fsSL https://secure-ci.dev/install.sh | SECURECI_VERSION=1.0.0 sh`).
+(e.g. `curl -fsSL https://secure-ci.dev/install.sh | SECURECI_VERSION=1.0.1 sh`).
+If the release's download link fails (GitHub has returned `504` for one while
+its API still served the files), the script fetches the same files through the
+GitHub API instead; the `SHA256SUMS` and provenance checks are unchanged.
 `secure-ci.dev/install.sh` redirects to [`install.sh`](install.sh) on this
 repository's `main` branch.
 
@@ -149,10 +158,13 @@ secureci pin
 
 ### Agent skill
 
-[`skills/secureci`](skills/secureci/SKILL.md) walks a coding agent (Claude Code,
-Codex, Cursor, …) through setting SecureCI up in a repo: pin actions, commit
-`secureci.lock`, and add the `secure-ci/cli` action as a step in an existing job
-(replacing `actionlint` if present).
+[`skills/secureci`](skills/secureci/SKILL.md) lets a coding agent (Claude Code,
+Codex, Cursor, …) check every workflow it creates or edits (`secureci validate`,
+`secureci pin --check`), run workflows locally (`secureci run`), and set
+SecureCI up in a repo: pin actions, commit `secureci.lock`, and add the
+`secure-ci/cli` action as a step in an existing job (replacing `actionlint` if
+present). It also picks up requests that name actionlint, zizmor, nektos/act,
+pinact and similar tools.
 
 ```bash
 npx skills add secure-ci/cli --skill secureci

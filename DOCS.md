@@ -570,7 +570,7 @@ secureci inventory --check         # compare against secureci.lock, fail on drif
 
 - **Bare `secureci inventory`** writes `secureci.lock` the first time (when none exists), and drift-checks against it on later runs.
 - **`--check` / `--compare`** always compares and fails (non-zero) when a `uses:` reference now resolves to a different commit than recorded (a moved tag), a new action isn't in the lock yet, a locked repository's identity changed, or an action can't be verified (below). Use it in CI.
-- **`--update-lock` / `--update-lockfile`** accepts the current state by rewriting the lock. Review the diff, then commit it.
+- **`--update-lock` / `--update-lockfile`** accepts the current state by rewriting the lock. Review the diff, then commit it. Given only some workflow files (`secureci inventory .github/workflows/ci.yml --update-lock`), it locks what those files use and keeps the other workflows' entries as they were locked, including the actions those pull in; entries no workflow uses any more are dropped. If another workflow can't be read, every previous entry is kept, with a warning. When the only lockfile is GitHub's `actions.lock`, the other workflows' entries are carried over from it into the new `secureci.lock` (all of them, since `actions.lock` doesn't say which entries are transitive). Before 1.0.1, file arguments rewrote the lock from those files alone, dropping every other workflow's entries.
 
 The lockfile is plain JSON, safe to commit and diff:
 
@@ -637,7 +637,7 @@ Each change is printed as `file:line owner/repo@v4 -> <sha12> (v4)`, followed by
 - **Resolution** is the same as `inventory`'s: `git ls-remote`, or the GitHub API when a token is available (`GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`). Each distinct reference is looked up once. `--offline` uses only the commits recorded in the action cache by earlier `run` or `inventory` runs. For a branch (`@main`) that is the last commit seen, not necessarily the current one.
 - **Unresolvable references** (a deleted or private repository, a missing ref, or anything not cached with `--offline`) are reported with their file and line and left unchanged. `pin` still pins everything else and exits 0; `pin --check` exits non-zero. A reference with no `@ref`, or one written as a YAML block scalar, is reported the same way.
 - **`--check`** writes nothing and exits non-zero if any reference would be pinned or can't be resolved. Use it in CI to keep workflows pinned.
-- **`--update-lock`** runs [`inventory --update-lock`](#drift-against-securecilock) after pinning, so `secureci.lock` records the new `owner/repo@<sha>` references. It can't be combined with `--check`.
+- **`--update-lock`** runs [`inventory --update-lock`](#drift-against-securecilock) on the same files after pinning (with file arguments, the other workflows' entries are kept), so `secureci.lock` records the new `owner/repo@<sha>` references. It can't be combined with `--check`.
 
 ## Known security advisories
 
@@ -680,7 +680,7 @@ jobs:
       security-events: write # upload SARIF to code scanning
     steps:
       - uses: actions/checkout@v4
-      - uses: secure-ci/cli@v1.0.0 # a release tag; see below
+      - uses: secure-ci/cli@v1.0.1 # a release tag; see below
         with:
           # all inputs are optional
           contract: contracts/platform-standard.yml
@@ -692,11 +692,11 @@ jobs:
 
 The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `inventory` (`check` to also run `secureci inventory --check` against `secureci.lock`, or GitHub's `actions.lock` when that is the only lockfile), `version` (which `@secureci/cli` to run), and `github-token`.
 
-Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v1.0.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; by default it runs the CLI release matching the action's tag; set the `version` input to run another one.
+Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v1.0.1`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; by default it runs the CLI release matching the action's tag; set the `version` input to run another one.
 
 ### Generate the workflow (`secureci init workflow`)
 
-`secureci init workflow` writes the workflow above to `.github/workflows/secureci.yml` so you don't have to copy it by hand, with the action pinned to the release tag of the CLI you ran it with (`secure-ci/cli@v<version>`; check yours with `secureci --version`). (Bare `secureci init` just prints help and its subcommands.)
+`secureci init workflow` writes the workflow above to `.github/workflows/secureci.yml` so you don't have to copy it by hand, with the action set to the release of the CLI you ran it with (`secure-ci/cli@<sha> # v<version>`, or `secure-ci/cli@v<version>` with `--no-pin`; check yours with `secureci --version`). (Bare `secureci init` just prints help and its subcommands.)
 
 ```bash
 secureci init workflow                                   # SARIF upload on (default)
@@ -726,7 +726,7 @@ Auditors and assessors increasingly treat the CI pipeline as part of the softwar
 To keep a report per run, turn on the action's drift check and upload the report as a build artifact:
 
 ```yaml
-- uses: secure-ci/cli@v1.0.0 # writes secureci-results.sarif
+- uses: secure-ci/cli@v1.0.1 # writes secureci-results.sarif
   with:
     contract: contracts/standard.yml
     inventory: check # fail on drift against the committed secureci.lock
@@ -921,7 +921,7 @@ SecureCI supports fetching and executing remote GitHub Actions:
 
 - **Composite Actions**: Full support for composite actions with multiple steps.
 - **JavaScript Actions** (node12, node16, node20, node22+): Runs `main` with the CLI's own Node.js binary (with the [standalone binary](README.md#standalone-binary-no-nodejs-needed), the first `node` on the step's `PATH`, including one added by `actions/setup-node`; if there is none the step fails with "JavaScript actions need Node.js on PATH when using the standalone binary"), in the workspace, with `INPUT_*` (from `with:` or the input's `default`), `GITHUB_ACTION_PATH` and the file commands above. `pre:` of remote actions runs at job start, before any step, gated by `pre-if` (local actions, which usually come from the checkout, run it right before `main`); `post:` runs at the end of the job in reverse order, gated by `post-if` (default `always()`), with state from `$GITHUB_STATE` exposed as `STATE_*`.
-- **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it in its own container. Note: this is distinct from the job container that `--container-runtime` starts for `run:` steps and JavaScript actions.
+- **Docker Actions** (action type `runs.using: docker`): Builds the action's Dockerfile (or pulls a `docker://...` image) and runs it in its own container. Note: this is distinct from the job container that `--container-runtime` starts for `run:` steps and JavaScript actions. A built image is tagged `secureci-action-<hash>`, from a SHA-256 hash of the action's directory (1.0.0 or later; earlier releases used SHA-1). Images built by those earlier releases have different tags and are no longer used, so you can remove them with `docker rmi`.
 - **Local Actions** (`uses: ./path/to/action`): Resolved relative to the workspace (the current directory), using `action.yml` or `action.yaml`.
 - **`docker://` steps** (`uses: docker://alpine:3.20`): Run the image directly, with `with.args` as its arguments and `with.entrypoint` as its entrypoint.
 - **Unresolvable actions fail the step**: A remote action that can't be fetched, a missing local action, or an unsupported `runs.using` fails the step (as on GitHub) instead of being skipped.
