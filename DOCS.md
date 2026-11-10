@@ -34,6 +34,7 @@ introduction and install steps, see the [README](README.md).
 - [Use in CI (GitHub Action)](#use-in-ci-github-action)
   - [Generate the workflow (`secureci init workflow`)](#generate-the-workflow-secureci-init-workflow)
 - [Using output as audit evidence](#using-output-as-audit-evidence)
+- [Scan an organisation (`secureci org scan`)](#scan-an-organisation-secureci-org-scan)
 - [Workflow features](#workflow-features)
   - [Conditional execution (`if:`)](#conditional-execution-if)
   - [Job dependencies (`needs:`)](#job-dependencies-needs)
@@ -82,6 +83,10 @@ secureci inventory --check         # compare against ./secureci.lock, fail on dr
 # Pin action tags to commit SHAs in place (owner/repo@<sha> # v4)
 secureci pin                       # every workflow, plus the local actions they use
 secureci pin --check               # fail if anything would change (for CI)
+
+# Scan every repository in an organisation, for a SecureCI supply-chain assessment
+secureci org scan my-org           # JSON results + secureci-org-scan-my-org.tar.gz
+secureci org scan --print-script   # print the script it runs, to review it
 
 # Generate a PR-checks workflow, list workflows, manage config/cache
 secureci init workflow
@@ -754,6 +759,73 @@ To keep a report per run, turn on the action's drift check and upload the report
 ```
 
 These artifacts **support** controls; they don't make you compliant on their own. Which controls they help with in PCI DSS, DORA, NIS2, the UK Software Security Code of Practice, ISO/IEC 27001 and SOC 2 is mapped, with what you still need beyond SecureCI, at [secure-ci.dev/compliance](https://secure-ci.dev/compliance).
+
+## Scan an organisation (`secureci org scan`)
+
+`secureci org scan <org>` runs `validate` and `inventory` on every repository
+in a GitHub organisation (or user account) and packs the JSON results into one
+archive, for a [SecureCI supply-chain assessment](https://secure-ci.dev/#sample-report).
+It runs [`org-scan.sh`](org-scan.sh), a short bash script you can also
+download and run on its own:
+
+```bash
+secureci org scan --print-script | less     # read exactly what will run
+GITHUB_TOKEN=... secureci org scan my-org
+
+# or, without the command:
+curl -fsSL https://secure-ci.dev/org-scan.sh -o org-scan.sh
+less org-scan.sh
+GITHUB_TOKEN=... bash org-scan.sh my-org
+```
+
+For each repository it makes a shallow, sparse clone of `.github/` only (your
+application code is never downloaded), runs
+`secureci validate --format json` on its workflows and
+`secureci inventory --dry-run` on each workflow, saves the JSON and deletes
+the clone. Archived repositories are skipped, and so are forks unless you pass
+`--include-forks`.
+
+| Option              | What it does                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------ |
+| `--repos <file>`    | Scan only these repositories: one `name` or `owner/name` per line, `#` comments allowed          |
+| `--out <dir>`       | Output directory (default `./secureci-org-scan-<org>`; the archive is `<dir>.tar.gz`)            |
+| `--contract <file>` | Also check every workflow against a [pipeline contract](#pipeline-contracts-validate---contract) |
+| `--include-forks`   | Also scan forked repositories                                                                    |
+| `--print-script`    | Print the script and exit                                                                        |
+
+The output directory holds:
+
+- `manifest.json`: the org, server, time, CLI and script versions, the
+  contract (if any), and each repository's status (`scanned`, `no-workflows`
+  or `clone-failed`) and workflow count;
+- `repos/<owner>__<name>/validate.json` and
+  `repos/<owner>__<name>/inventory/<workflow>.json`;
+- `errors.log`: git and CLI messages, such as a repository that failed to
+  clone or advisories that couldn't be checked.
+
+Nothing else is written: no source code, and not your token. Check the archive
+before you send it with `tar -tzf secureci-org-scan-<org>.tar.gz`. Then email
+it to [hello@secure-ci.dev](mailto:hello@secure-ci.dev); if your policy
+doesn't allow that, write to us there and we'll agree another way.
+
+**Token.** Set `GITHUB_TOKEN` (or `GH_TOKEN`) to a token that can read the
+organisation's repositories (`contents: read` and `metadata: read`). Without
+one, only public repositories are listed, and API rate limits stop large
+scans. The token is passed to curl on stdin and to git through environment
+variables, so it never appears on a command line.
+
+**GitHub Enterprise Server.** Set `GITHUB_SERVER_URL` (e.g.
+`https://github.example.com`); the API defaults to `$GITHUB_SERVER_URL/api/v3`
+(override with `GITHUB_API_URL`).
+
+**Requirements.** bash, git 2.31+, curl, base64 and tar. On Windows, run it
+from Git Bash or WSL. The command runs the same CLI that started it (the
+standalone binary, or node with the npm package), so nothing else needs
+installing.
+
+**Limits.** Local actions outside `.github/` (`uses: ./tools/my-action`)
+aren't cloned, so `validate` reports them as not found; actions inside
+`.github/` are checked as usual.
 
 ## Workflow features
 

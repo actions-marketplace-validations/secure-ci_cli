@@ -154,6 +154,9 @@ secureci inventory --check    # fail on drift (use in CI)
 
 # Pin action tags to commit SHAs in place (keeps `# v4` for Dependabot/Renovate)
 secureci pin
+
+# Scan every repository in an organisation (JSON results, never source code)
+secureci org scan my-org
 ```
 
 ### Agent skill
