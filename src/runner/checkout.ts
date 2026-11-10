@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import { logger } from '../utils/logger';
 import { StepResult, Step } from '../types';
 import { substituteRecord, ExpressionContext } from './expression';
@@ -32,8 +33,38 @@ export function copyWorkingCopy(
     fs.cpSync(src, dst, {
       recursive: true,
       verbatimSymlinks: true,
+      // Copy-on-write clones where the file system supports them.
+      mode: fs.constants.COPYFILE_FICLONE,
       filter: (file) => !fs.existsSync(path.join(file, CHECKOUT_MARKER))
     });
+  }
+}
+
+/**
+ * A copy of the working copy (uncommitted changes and .git included) for
+ * one job, in `parentDir`, for --isolate-workspace. Remove it with
+ * removeIsolatedWorkspace.
+ */
+export function createIsolatedWorkspace(
+  workingCopy: string,
+  parentDir: string
+): string {
+  const dir = fs.mkdtempSync(path.join(parentDir, 'workspace-'));
+  copyWorkingCopy(workingCopy, dir, dir);
+  return dir;
+}
+
+/**
+ * Remove a job's isolated workspace. Best effort: files a container step
+ * created as another user may not be removable, which is only warned about.
+ */
+export function removeIsolatedWorkspace(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (error) {
+    logger.warn(
+      `Couldn't remove the job's workspace copy ${dir}: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 }
 
@@ -76,6 +107,53 @@ function escapesViaSymlink(workspace: string, dest: string): boolean {
   return real !== root && !real.startsWith(root + path.sep);
 }
 
+/** Run git in `cwd` on the host; undefined when it fails. */
+function gitOutput(cwd: string, args: string[]): string | undefined {
+  try {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The commit `ref` names in the local repository (as given, else as a
+ * branch of `origin`), or undefined. A ref that looks like an option is
+ * never passed to git.
+ */
+function resolveLocalRef(workspace: string, ref: string): string | undefined {
+  if (ref.startsWith('-')) return undefined;
+  for (const candidate of [ref, `refs/remotes/origin/${ref}`]) {
+    const sha = gitOutput(workspace, [
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      '--end-of-options',
+      `${candidate}^{commit}`
+    ]);
+    if (sha) return sha;
+  }
+  return undefined;
+}
+
+/**
+ * Submodules of the working copy that aren't initialized (`git submodule
+ * status` marks them with "-"), by path.
+ */
+function uninitializedSubmodules(workspace: string): string[] {
+  if (!fs.existsSync(path.join(workspace, '.gitmodules'))) return [];
+  const status = gitOutput(workspace, ['submodule', 'status', '--recursive']);
+  return (status ?? '')
+    .split('\n')
+    .filter((line) => line.startsWith('-'))
+    .map((line) => line.slice(1).split(' ')[1])
+    .filter(Boolean);
+}
+
 export function localCheckout(
   step: Step,
   ctx: ExpressionContext,
@@ -92,17 +170,7 @@ export function localCheckout(
     return { step, success: false, error, duration: Date.now() - startTime };
   };
 
-  const ref = withValues.ref;
-  if (
-    ref &&
-    ![ctx.github.ref, ctx.github.ref_name, ctx.github.sha].includes(ref)
-  ) {
-    logger.warn(
-      `actions/checkout: ignoring ref "${ref}"; using the local working copy (pass --no-local-checkout to run the real action)`
-    );
-  }
-
-  const workspace = process.cwd();
+  const workspace = runtime.workspace;
   const dest = path.resolve(workspace, withValues.path || '.');
   const relative = path.relative(workspace, dest);
   if (
@@ -113,6 +181,37 @@ export function localCheckout(
     return fail(
       `actions/checkout: path "${withValues.path}" is outside the workspace`
     );
+  }
+
+  // A ref other than the current one: check out that commit, when the local
+  // repository has it, into path: (never over the user's working copy).
+  const ref = withValues.ref;
+  let commit: string | undefined;
+  if (
+    ref &&
+    ![ctx.github.ref, ctx.github.ref_name, ctx.github.sha].includes(ref)
+  ) {
+    commit = resolveLocalRef(workspace, ref);
+    if (!commit) {
+      logger.warn(
+        `actions/checkout: ref "${ref}" isn't in the local repository; using the local working copy (fetch it, or pass --no-local-checkout to run the real action)`
+      );
+    } else if (relative === '') {
+      logger.warn(
+        `actions/checkout: not checking out ref "${ref}" over your working copy; add a path: to check it out there, or pass --no-local-checkout to run the real action`
+      );
+      commit = undefined;
+    }
+  }
+
+  const submodules = String(withValues.submodules ?? '').toLowerCase();
+  if (submodules === 'true' || submodules === 'recursive') {
+    const missing = uninitializedSubmodules(workspace);
+    if (missing.length > 0) {
+      logger.warn(
+        `actions/checkout: submodules aren't initialized in your working copy (${missing.join(', ')}); run \`git submodule update --init --recursive\` first`
+      );
+    }
   }
 
   let output = 'Using local working copy';
@@ -126,9 +225,35 @@ export function localCheckout(
         );
       }
     }
-    copyWorkingCopy(workspace, dest, dest);
+    if (commit) {
+      // A local clone, sharing the repository's objects: nothing is fetched
+      // and the working copy's .git is only read.
+      const cloned =
+        gitOutput(workspace, [
+          'clone',
+          '--quiet',
+          '--shared',
+          '--no-checkout',
+          '--',
+          workspace,
+          dest
+        ]) !== undefined &&
+        gitOutput(dest, ['checkout', '--quiet', '--detach', commit]) !==
+          undefined;
+      if (!cloned) {
+        fs.rmSync(dest, { recursive: true, force: true });
+        return fail(
+          `actions/checkout: couldn't check out ref "${ref}" to "${withValues.path}"`
+        );
+      }
+      outputs.ref = String(ref);
+      outputs.commit = commit;
+      output = `Checked out ${ref} (${commit.slice(0, 7)}) to ${relative}`;
+    } else {
+      copyWorkingCopy(workspace, dest, dest);
+      output = `Using local working copy (copied to ${relative})`;
+    }
     fs.writeFileSync(path.join(dest, CHECKOUT_MARKER), '');
-    output = `Using local working copy (copied to ${relative})`;
 
     const postStep: Step = { name: `Post ${step.name || step.uses}` };
     runtime.postSteps.push({

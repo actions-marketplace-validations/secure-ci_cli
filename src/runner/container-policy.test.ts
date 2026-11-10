@@ -4,6 +4,7 @@ import * as path from 'path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   invalidImageReason,
+  splitReservedOptions,
   unsafeServiceOptions,
   unsafeServiceVolumeReason
 } from './container-policy';
@@ -116,6 +117,49 @@ describe('container-policy', () => {
       expect(unsafeServiceOptions(['--health-cmd', '--privileged'])).toEqual(
         []
       );
+    });
+  });
+
+  describe('splitReservedOptions', () => {
+    const reserved = new Set([
+      '--entrypoint',
+      '--workdir',
+      '-w',
+      '--memory',
+      '-m'
+    ]);
+
+    it('drops reserved options with their values, in any form', () => {
+      expect(
+        splitReservedOptions(
+          [
+            '--entrypoint',
+            'sh',
+            '-w',
+            '/tmp',
+            '--workdir=/x',
+            '-m64g',
+            '--cpus',
+            '2'
+          ],
+          reserved
+        )
+      ).toEqual({
+        kept: ['--cpus', '2'],
+        dropped: ['--entrypoint', '-w', '--workdir', '-m']
+      });
+    });
+
+    it('keeps the values of other options, even when they look reserved', () => {
+      expect(
+        splitReservedOptions(
+          ['--health-cmd', '--entrypoint', '--user', '1001'],
+          reserved
+        )
+      ).toEqual({
+        kept: ['--health-cmd', '--entrypoint', '--user', '1001'],
+        dropped: []
+      });
     });
   });
 

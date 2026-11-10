@@ -263,6 +263,25 @@ function runnerOs(): string {
 }
 
 /**
+ * `RUNNER_ARCH` / `runner.arch` for a Node.js architecture, using GitHub's
+ * values (X86, X64, ARM, ARM64). Jobs run natively (a job container has the
+ * host's architecture), so the host's is the runner's. Anything else reports
+ * X64, as before this was mapped.
+ */
+export function runnerArch(arch: string = process.arch): string {
+  switch (arch) {
+    case 'arm64':
+      return 'ARM64';
+    case 'arm':
+      return 'ARM';
+    case 'ia32':
+      return 'X86';
+    default:
+      return 'X64';
+  }
+}
+
+/**
  * The default environment variables GitHub's runner exports to every step,
  * derived from the (local, best-effort) `github` context.
  * https://docs.github.com/en/actions/learn-github-actions/variables#default-environment-variables
@@ -291,6 +310,7 @@ export function buildRunnerEnv(
     GITHUB_WORKSPACE: options.workspace,
     GITHUB_EVENT_PATH: options.eventPath,
     RUNNER_OS: runnerOs(),
+    RUNNER_ARCH: runnerArch(),
     RUNNER_TEMP: options.tempDir,
     RUNNER_TOOL_CACHE: options.toolCache
   };

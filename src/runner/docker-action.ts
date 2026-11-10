@@ -140,7 +140,7 @@ export async function executeDockerAction(
       image,
       args,
       entrypoint: action.runs.entrypoint,
-      workingDir: process.cwd(),
+      workingDir: runtime.workspace,
       readOnlyPaths: protectedWorkspacePaths(options),
       exchangeDir,
       env: {

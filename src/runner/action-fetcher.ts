@@ -219,6 +219,15 @@ export function getText(
   headers: Record<string, string>,
   timeoutMs: number
 ): Promise<string> {
+  return getResponse(url, headers, timeoutMs).then((r) => r.body);
+}
+
+/** getText, with the response headers (e.g. `link` for pagination). */
+export function getResponse(
+  url: string,
+  headers: Record<string, string>,
+  timeoutMs: number
+): Promise<{ body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('http://') ? http : https;
     const request = client.get(url, { headers }, (response) => {
@@ -235,7 +244,7 @@ export function getText(
       });
       response.on('end', () =>
         response.statusCode === 200
-          ? resolve(body)
+          ? resolve({ body, headers: response.headers })
           : reject(
               Object.assign(new Error(`HTTP ${response.statusCode}`), {
                 status: response.statusCode

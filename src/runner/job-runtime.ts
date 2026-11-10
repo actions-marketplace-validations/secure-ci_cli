@@ -38,6 +38,11 @@ export interface PostStep {
  * `post:` steps queued by JavaScript actions.
  */
 export interface JobRuntime {
+  /**
+   * The job's workspace on the host: the working copy, or a copy of it per
+   * job with --isolate-workspace.
+   */
+  workspace: string;
   runnerEnv: Record<string, string>;
   eventPath: string;
   env: Record<string, string>;
@@ -143,7 +148,7 @@ export function runnerContext(runtime: JobRuntime): Record<string, unknown> {
   return {
     name: 'secureci',
     os: runtime.runnerEnv.RUNNER_OS,
-    arch: process.arch === 'arm64' ? 'ARM64' : 'X64',
+    arch: runtime.runnerEnv.RUNNER_ARCH,
     temp: runtime.runnerEnv.RUNNER_TEMP,
     tool_cache: runtime.runnerEnv.RUNNER_TOOL_CACHE
   };
@@ -167,13 +172,15 @@ export function hostHasBash(): boolean {
 export function createJobRuntime(
   github: GithubContext,
   runDir: string,
-  defaults: JobRuntime['defaults'] = {}
+  defaults: JobRuntime['defaults'] = {},
+  workspace: string = process.cwd()
 ): JobRuntime {
   const homeDir = process.env.HOME || process.env.USERPROFILE || os.tmpdir();
   const eventPath = path.join(runDir, 'event.json');
   return {
+    workspace,
     runnerEnv: buildRunnerEnv(github, {
-      workspace: process.cwd(),
+      workspace,
       eventPath,
       // Per job, so concurrent jobs don't share $RUNNER_TEMP.
       tempDir: fs.mkdtempSync(path.join(runDir, 'tmp-')),

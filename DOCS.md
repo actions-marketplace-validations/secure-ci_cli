@@ -10,6 +10,7 @@ introduction and install steps, see the [README](README.md).
 - [Container isolation](#container-isolation)
   - [Flags](#flags)
   - [How container mode works](#how-container-mode-works)
+  - [The job's `container:`](#the-jobs-container)
   - [Security: what runs where](#security-what-runs-where)
   - [`actions/checkout`](#actionscheckout)
 - [Global configuration](#global-configuration)
@@ -33,6 +34,7 @@ introduction and install steps, see the [README](README.md).
 - [Use in CI (GitHub Action)](#use-in-ci-github-action)
   - [Generate the workflow (`secureci init workflow`)](#generate-the-workflow-secureci-init-workflow)
 - [Using output as audit evidence](#using-output-as-audit-evidence)
+- [Scan an organisation (`secureci org scan`)](#scan-an-organisation-secureci-org-scan)
 - [Workflow features](#workflow-features)
   - [Conditional execution (`if:`)](#conditional-execution-if)
   - [Job dependencies (`needs:`)](#job-dependencies-needs)
@@ -81,6 +83,10 @@ secureci inventory --check         # compare against ./secureci.lock, fail on dr
 # Pin action tags to commit SHAs in place (owner/repo@<sha> # v4)
 secureci pin                       # every workflow, plus the local actions they use
 secureci pin --check               # fail if anything would change (for CI)
+
+# Scan every repository in an organisation, for a SecureCI supply-chain assessment
+secureci org scan my-org           # JSON results + secureci-org-scan-my-org.tar.gz
+secureci org scan --print-script   # print the script it runs, to review it
 
 # Generate a PR-checks workflow, list workflows, manage config/cache
 secureci init workflow
@@ -161,7 +167,7 @@ multi-line values work in double quotes
 
 - Each job (and each matrix combination) gets **one container**, started when the job begins and removed when it ends, including when a step fails or you press Ctrl-C. Every `run:` step and JavaScript action in the job runs in it via `exec`, so files, installed packages and tools from earlier steps are still there. The current directory is mounted at `/secureci-workspace`.
 - The image is chosen in this order:
-  1. `jobs.<id>.container` (string or `{ image, env }` form; `options`, `volumes`, `ports` and `credentials` are ignored with a warning). With `--container-runtime host` it's ignored and the job runs on the host.
+  1. `jobs.<id>.container` (string or object form, see [The job's `container:`](#the-jobs-container) below). With `--container-runtime host` it's ignored and the job runs on the host.
   2. `--container-image`, for every job.
   3. The job's `runs-on` label, mapped to a runner-like image: `ubuntu-latest` → `catthehacker/ubuntu:act-latest`, `ubuntu-24.04` / `22.04` / `20.04` → `catthehacker/ubuntu:act-24.04` / `act-22.04` / `act-20.04` (the images nektos/act uses, with Node.js, git, curl and common runner tools). Add or override labels with `runner-images` in the config file (below).
   4. `container-image` from the config file, else `catthehacker/ubuntu:act-22.04`, for labels with no mapping (self-hosted, custom), with a warning. `windows-*` / `macos-*` jobs also run in this Linux image, with a warning.
@@ -169,6 +175,14 @@ multi-line values work in double quotes
 - JavaScript actions run with the image's own `node`. If an image has no Node.js (e.g. a plain `ubuntu:22.04` via `--container-image`), they fail with a clear error.
 - `jobs.<id>.services` are supported: see [Service Containers](#service-containers-jobsidservices).
 - `--container-timeout` fails a step that runs longer than the given time, and kills its processes in the job container (including background ones it started).
+
+### The job's `container:`
+
+`jobs.<id>.container` takes `image`, `env`, `options`, `ports` and `volumes`, checked like [service containers](#service-containers-jobsidservices):
+
+- `options` (e.g. `--user 1001 --shm-size 1g --cpus 2`) are passed to the container engine. Options that would give the container access to this machine (`--privileged`, `--cap-add`, `--security-opt`, `--device`, host namespaces such as `--network`/`--pid`, and mounts via `-v`/`--mount`/`--volumes-from`) are refused, failing the job. `--entrypoint` and `--workdir`/`-w` are ignored with a warning, since the CLI sets them itself (the container idles and steps run in the mounted workspace), as are `--memory`/`-m`/`--memory-swap` when `--container-memory` is set, so your limit wins.
+- `volumes` may be named or anonymous volumes, or bind mounts of paths inside the workspace (not its `.git`); anything else fails the job. `ports` are published as given.
+- `credentials` are ignored with a warning (log in with `docker login`).
 
 ### Security: what runs where
 
@@ -186,7 +200,9 @@ multi-line values work in double quotes
 `actions/checkout` of the repository being run (no `repository:` input, or the current repository) doesn't clone anything: the workspace already is your working copy, so later steps see your uncommitted changes, no network or token is needed, and your `.git` is never touched. The step's `ref` and `commit` outputs are `github.ref` and `github.sha`.
 
 - `path:` copies the working copy into that subdirectory (skipping the copy itself) and removes it when the job ends. A non-empty directory there that the CLI didn't create is never overwritten; the step fails instead.
-- `ref:` and other inputs (`fetch-depth`, `submodules`, ...) are ignored, with a warning for a `ref` other than the current one.
+- `ref:` other than the current one: with a `path:`, if your local repository has that ref (a tag, branch, commit, or a branch of `origin`), the step checks it out there from a local clone that shares the repository's objects. Nothing is fetched and your `.git` is only read. The `ref` and `commit` outputs are that ref and its commit, and the clone is removed when the job ends. Without a `path:` the step warns and uses your working copy, which is never replaced. A ref that isn't in the local repository (e.g. `refs/pull/1/merge`) is warned about and the working copy is used. Fetch it first, or pass `--no-local-checkout`.
+- `fetch-depth:` doesn't apply: the working copy has whatever history your clone has (a local `ref:` clone has all of it).
+- `submodules: true` / `recursive` warns when a submodule isn't initialized in your working copy. Run `git submodule update --init --recursive` first. Other inputs are ignored.
 - Checkouts of **other** repositories run the real action, which needs a token: pass one with `--secret GITHUB_TOKEN` (reads `$GITHUB_TOKEN`). It becomes both `secrets.GITHUB_TOKEN` and `github.token`. No token is picked up implicitly, since every action in the run could read it.
 - `--no-local-checkout` runs the real action for the current repository too.
 
@@ -202,7 +218,7 @@ secureci config unset container-runtime        # revert to the built-in default 
 secureci config path                           # print the config file location
 ```
 
-Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`, `parallel` (see [Parallel jobs](#parallel-jobs---parallel)), `env-file`, `secret-file`, `input-file`, `var-file`, and `runner-images.<label>`.
+Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`, `parallel` and `isolate-workspace` (see [Parallel jobs](#parallel-jobs---parallel)), `env-file`, `secret-file`, `input-file`, `var-file`, and `runner-images.<label>`.
 
 `env-file`, `secret-file`, `input-file` and `var-file` are default files for the matching `run` flags ([Values from files](#values-from-files---env-file---secret-file---input-file---var-file)). `config set` stores one path; edit the file by hand for a list, read in order:
 
@@ -522,7 +538,11 @@ secureci validate .github/workflows/deploy.yml \
 
 - Without `--contract-recurse all`, **remote** composite actions and reusable workflows are not inspected; only the reference itself is matched.
 - **`strategy.matrix` jobs** are checked once against the job's `steps:` as authored, not once per combination: `uses:` can't contain expressions, so a matrix can only change _whether_ steps run (via `if:`), not which actions they use.
-- **`if:` conditions** aren't evaluated. A required action that only appears in steps or jobs with an `if:` (other than `success()` / `always()`) is reported as a **warning** that it may be skipped; a forbidden action counts even under an `if:`.
+- **`if:` conditions** are decided only from what's known without running the workflow: constants, `success()` / `always()`, and `github.event_name`, which is tried for each of the workflow's triggers (a step's `if:` and those of its job, composite actions and called workflows are combined per trigger). Everything else (`github.ref`, `inputs`, `matrix`, `steps`, `failure()`, `hashFiles()`, ...) is unknown.
+  - A required action whose every occurrence **can never run** for the workflow's triggers (e.g. `if: github.event_name == 'release'` in a workflow `on: [push, pull_request]`) is an **error**. Occurrences that never run aren't used for ordering either.
+  - One whose occurrences depend on something unknown, or run for only some triggers, is a **warning** that it may be skipped. One that runs for every trigger (e.g. `if: github.event_name == 'push'` in an `on: push` workflow) isn't reported.
+  - A workflow with `on: workflow_call` runs with its caller's event, so `github.event_name` is unknown there.
+  - A forbidden action counts even under an `if:` that can't be true, since triggers change.
 - **Action references** are matched as exact strings against `uses:` (minus any `@version` suffix) — this covers the common `owner/repo` or `owner/repo/path` marketplace-action form, as well as local paths (`./.github/actions/foo`, matched with no version). `docker://image` references are matched as-is (the whole string, including `docker://`) and have no version-pin concept.
 - The `owner/repo` part of an action reference is matched **case-insensitively**, as GitHub resolves it (`Org/Action` matches a contract entry for `org/action`). A path inside the repo (`owner/repo/Path`), local paths and `docker://` references (whose tags are case-sensitive) are matched exactly.
 
@@ -654,7 +674,7 @@ Each change is printed as `file:line owner/repo@v4 -> <sha12> (v4)`, followed by
 - **Severity.** In `validate`, findings use the rule `secureci/vulnerable-action`. Critical and high advisories are errors that fail validation. Medium, low and unrated ones are warnings. A contract can change the threshold with [`advisories: fail-on`](#advisory-severity-threshold). `inventory` reports findings (errors and warnings in text, an `advisories` array in `--dry-run` JSON), but they don't change its exit code. Use `validate` to gate on them.
 - **`--dry-run` JSON.** Each entry in `advisories` has `uses`, `ghsaId`, `cveId`, `severity`, `summary`, `url`, the affected `range`, `firstPatched`, the `version` compared, `approximate` (the "may be affected" case) and `path`. `advisoryUnknownVersions` lists `{ uses, advisories }` for references whose version couldn't be found.
 
-**Network, rate limits and caching.** Each distinct `owner/repo` is one request to the REST API: `GET /advisories?ecosystem=actions&affects=owner/repo` on `GITHUB_API_URL`, or on GitHub Enterprise Server's API when `GITHUB_SERVER_URL` is set. Requests use `GITHUB_TOKEN`/`GH_TOKEN` or `gh auth token` when one is available. Advisories are public, so they work without a token, but anonymous requests are limited to 60 an hour. The GitHub Action passes its `github-token`. Responses are cached per repository under `~/.secureci/advisories/` for 24 hours. Only the first 100 advisories for a repository are read.
+**Network, rate limits and caching.** Each distinct `owner/repo` is one request to the REST API: `GET /advisories?ecosystem=actions&affects=owner/repo` on `GITHUB_API_URL`, or on GitHub Enterprise Server's API when `GITHUB_SERVER_URL` is set. Requests use `GITHUB_TOKEN`/`GH_TOKEN` or `gh auth token` when one is available. Advisories are public, so they work without a token, but anonymous requests are limited to 60 an hour. The GitHub Action passes its `github-token`. Responses are cached per repository under `~/.secureci/advisories/` for 24 hours. Up to 1,000 advisories for a repository are read: 100 per request, following the API's next-page links on the same host, up to 10 pages. A lookup whose later page fails isn't cached and is reported like any other API failure.
 
 - **When the API can't answer** (network down, rate-limited, or a GitHub Enterprise Server without the advisory database), a warning names the repositories that weren't checked. This doesn't fail the run. A cache older than 24 hours is used if there is one, with a warning.
 - **`--offline`** (on both commands) makes no advisory requests and lists no tags. It uses cached advisories at any age, and warns about repositories with nothing cached. For `validate`, `--offline` also reads a remote `--contract` and `--contract-recurse all` actions only from the action cache.
@@ -680,7 +700,7 @@ jobs:
       security-events: write # upload SARIF to code scanning
     steps:
       - uses: actions/checkout@v4
-      - uses: secure-ci/cli@v1.0.1 # a release tag; see below
+      - uses: secure-ci/cli@v1.1.0 # a release tag; see below
         with:
           # all inputs are optional
           contract: contracts/platform-standard.yml
@@ -692,7 +712,7 @@ jobs:
 
 The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `inventory` (`check` to also run `secureci inventory --check` against `secureci.lock`, or GitHub's `actions.lock` when that is the only lockfile), `version` (which `@secureci/cli` to run), and `github-token`.
 
-Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v1.0.1`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; by default it runs the CLI release matching the action's tag; set the `version` input to run another one.
+Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v1.1.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; by default it runs the CLI release matching the action's tag; set the `version` input to run another one.
 
 ### Generate the workflow (`secureci init workflow`)
 
@@ -726,7 +746,7 @@ Auditors and assessors increasingly treat the CI pipeline as part of the softwar
 To keep a report per run, turn on the action's drift check and upload the report as a build artifact:
 
 ```yaml
-- uses: secure-ci/cli@v1.0.1 # writes secureci-results.sarif
+- uses: secure-ci/cli@v1.1.0 # writes secureci-results.sarif
   with:
     contract: contracts/standard.yml
     inventory: check # fail on drift against the committed secureci.lock
@@ -739,6 +759,73 @@ To keep a report per run, turn on the action's drift check and upload the report
 ```
 
 These artifacts **support** controls; they don't make you compliant on their own. Which controls they help with in PCI DSS, DORA, NIS2, the UK Software Security Code of Practice, ISO/IEC 27001 and SOC 2 is mapped, with what you still need beyond SecureCI, at [secure-ci.dev/compliance](https://secure-ci.dev/compliance).
+
+## Scan an organisation (`secureci org scan`)
+
+`secureci org scan <org>` runs `validate` and `inventory` on every repository
+in a GitHub organisation (or user account) and packs the JSON results into one
+archive, for a [SecureCI supply-chain assessment](https://secure-ci.dev/#sample-report).
+It runs [`org-scan.sh`](org-scan.sh), a short bash script you can also
+download and run on its own:
+
+```bash
+secureci org scan --print-script | less     # read exactly what will run
+GITHUB_TOKEN=... secureci org scan my-org
+
+# or, without the command:
+curl -fsSL https://secure-ci.dev/org-scan.sh -o org-scan.sh
+less org-scan.sh
+GITHUB_TOKEN=... bash org-scan.sh my-org
+```
+
+For each repository it makes a shallow, sparse clone of `.github/` only (your
+application code is never downloaded), runs
+`secureci validate --format json` on its workflows and
+`secureci inventory --dry-run` on each workflow, saves the JSON and deletes
+the clone. Archived repositories are skipped, and so are forks unless you pass
+`--include-forks`.
+
+| Option              | What it does                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------ |
+| `--repos <file>`    | Scan only these repositories: one `name` or `owner/name` per line, `#` comments allowed          |
+| `--out <dir>`       | Output directory (default `./secureci-org-scan-<org>`; the archive is `<dir>.tar.gz`)            |
+| `--contract <file>` | Also check every workflow against a [pipeline contract](#pipeline-contracts-validate---contract) |
+| `--include-forks`   | Also scan forked repositories                                                                    |
+| `--print-script`    | Print the script and exit                                                                        |
+
+The output directory holds:
+
+- `manifest.json`: the org, server, time, CLI and script versions, the
+  contract (if any), and each repository's status (`scanned`, `no-workflows`
+  or `clone-failed`) and workflow count;
+- `repos/<owner>__<name>/validate.json` and
+  `repos/<owner>__<name>/inventory/<workflow>.json`;
+- `errors.log`: git and CLI messages, such as a repository that failed to
+  clone or advisories that couldn't be checked.
+
+Nothing else is written: no source code, and not your token. Check the archive
+before you send it with `tar -tzf secureci-org-scan-<org>.tar.gz`. Then email
+it to [hello@secure-ci.dev](mailto:hello@secure-ci.dev); if your policy
+doesn't allow that, write to us there and we'll agree another way.
+
+**Token.** Set `GITHUB_TOKEN` (or `GH_TOKEN`) to a token that can read the
+organisation's repositories (`contents: read` and `metadata: read`). Without
+one, only public repositories are listed, and API rate limits stop large
+scans. The token is passed to curl on stdin and to git through environment
+variables, so it never appears on a command line.
+
+**GitHub Enterprise Server.** Set `GITHUB_SERVER_URL` (e.g.
+`https://github.example.com`); the API defaults to `$GITHUB_SERVER_URL/api/v3`
+(override with `GITHUB_API_URL`).
+
+**Requirements.** bash, git 2.31+, curl, base64 and tar. On Windows, run it
+from Git Bash or WSL. The command runs the same CLI that started it (the
+standalone binary, or node with the npm package), so nothing else needs
+installing.
+
+**Limits.** Local actions outside `.github/` (`uses: ./tools/my-action`)
+aren't cloned, so `validate` reports them as not found; actions inside
+`.github/` are checked as usual.
 
 ## Workflow features
 
@@ -800,9 +887,10 @@ jobs:
 
 Like on GitHub, jobs run concurrently: a job starts as soon as every job it `needs:` is done, and matrix combinations run side by side.
 
-| Flag             | Description                                                                                                                                   |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--parallel <n>` | Run up to `n` jobs at once, counting each matrix combination as a job. Default: the number of CPUs. `1` runs jobs one after another, in order |
+| Flag                  | Description                                                                                                                                   |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--parallel <n>`      | Run up to `n` jobs at once, counting each matrix combination as a job. Default: the number of CPUs. `1` runs jobs one after another, in order |
+| `--isolate-workspace` | Run each job (and matrix combination) in its own copy of the working copy, removed when the job ends. Config: `isolate-workspace`             |
 
 ```bash
 secureci run .github/workflows/ci.yml --parallel 4
@@ -814,7 +902,9 @@ secureci config set parallel 2                       # persist a default
 - `strategy.max-parallel` limits a matrix's combinations running at once, within the `--parallel` limit. The jobs of a called reusable workflow share the same limit.
 - `strategy.fail-fast` (default `true`): when a combination fails, the combinations of the same matrix that are still waiting don't start and those running are **cancelled**: the running step is killed, the job's containers and services are removed, and the remaining steps (and `post:` steps) don't run. A cancelled job is reported as `cancelled` (`"cancelled": true` in its result), and `needs.<id>.result` is `failure` for the matrix job. A failure allowed by job-level `continue-on-error` doesn't cancel anything.
 - Each job gets its own container, service network, `$RUNNER_TEMP`, step files and container env file. Artifacts and caches are shared by the run as on GitHub, and saving the same cache key from two jobs at once is safe (the first save wins). Remote actions needed by several jobs are downloaded once.
-- **Jobs share the working copy**: every job's container mounts the current directory (as does every job on the host). Jobs that write the same files at the same time, such as two matrix combinations both running `npm ci`, can interfere; run those with `--parallel 1`.
+- **Jobs share the working copy** by default: every job's container mounts the current directory (as does every job on the host). Jobs that write the same files at the same time, such as two matrix combinations both running `npm ci`, can interfere.
+- **`--isolate-workspace`** gives each job (and matrix combination) its own copy of the working copy instead, as each GitHub job gets its own checkout. The copy includes uncommitted changes, ignored files such as `node_modules` and `.git`, and uses copy-on-write clones where the file system supports them (e.g. APFS, Btrfs, XFS); elsewhere it's a full copy, which takes time and disk space for a large working copy. `github.workspace` and `$GITHUB_WORKSPACE` are the copy. What a job writes there is discarded when it ends and never reaches your working copy, so pass files between jobs with artifacts, as on GitHub. Turn it on by default with `secureci config set isolate-workspace true`; `--no-isolate-workspace` overrides that. The alternative is `--parallel 1`.
+- **`concurrency:`** (workflow or job) isn't applied: a local run has no other runs to queue behind or cancel, and jobs run as `needs:` and `--parallel` allow. The run notes this once at the start.
 - **Logs:** when more than one job can run at a time, every line is prefixed with its job's label, e.g. `[build (node: 20)] [INFO] Running: npm test` (a called workflow's jobs as `[call / build]`). Each job still logs its own step results and its `Job summary (<label>)`. With `--parallel 1`, or a single job, output has no prefixes and is the same as before.
 - The run's results list jobs in workflow order, whichever finished first.
 - On the host, a cancelled step's processes are killed with the step's shell; a JavaScript or Docker action that is running when its job is cancelled finishes first.
@@ -907,7 +997,7 @@ secureci run .github/workflows/ci.yml --event-name pull_request --event-path eve
 
 ### Default environment variables
 
-Steps receive the runner's default variables, derived from the local `github` context: `CI`, `GITHUB_ACTIONS`, `GITHUB_WORKFLOW`, `GITHUB_JOB`, `GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_EVENT_NAME`, `GITHUB_ACTOR`, `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_OWNER`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKSPACE`, `GITHUB_EVENT_PATH` (see above), `RUNNER_OS`, `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` (`~/.secureci/toolcache`).
+Steps receive the runner's default variables, derived from the local `github` context: `CI`, `GITHUB_ACTIONS`, `GITHUB_WORKFLOW`, `GITHUB_JOB`, `GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_EVENT_NAME`, `GITHUB_ACTOR`, `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_OWNER`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, `GITHUB_RUN_ATTEMPT`, `GITHUB_WORKSPACE`, `GITHUB_EVENT_PATH` (see above), `RUNNER_OS`, `RUNNER_ARCH` (`X64`, `ARM64`, `ARM` or `X86`, from this machine; a job container runs on the same architecture), `RUNNER_TEMP` and `RUNNER_TOOL_CACHE` (`~/.secureci/toolcache`).
 
 ### Secret masking
 

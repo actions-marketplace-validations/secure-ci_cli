@@ -73,12 +73,18 @@ import {
   getConfigValue,
   setConfigValue,
   unsetConfigValue,
+  resolveIsolateWorkspace,
   resolveNetworkDisabled,
   getDefaultParallel,
   CONFIG_KEYS
 } from './config';
 import { parseParallel } from './runner/scheduler';
 import { readVersion } from './version';
+import { runOrgScan } from './org-scan';
+import { ORG_SCAN_SCRIPT } from './org-scan-script';
+import { isSea } from './runner/node-binary';
+import { spawn } from 'child_process';
+import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -218,6 +224,14 @@ program
     'Turn on container network access, overriding allow-network: false in the config'
   )
   .option(
+    '--isolate-workspace',
+    "Run each job in its own copy of the working copy, removed when the job ends, so parallel jobs can't overwrite each other's files. Config: isolate-workspace"
+  )
+  .option(
+    '--no-isolate-workspace',
+    'Share the working copy between jobs, overriding isolate-workspace: true in the config'
+  )
+  .option(
     '--parallel <n>',
     'Run up to this many jobs (and matrix combinations) at once; 1 runs them one after another. Default: the number of CPUs. Config: parallel',
     String(defaultParallel)
@@ -308,7 +322,11 @@ program
           { network: options.network, allowNetwork: options.allowNetwork },
           globalConfig
         ),
-        parallel
+        parallel,
+        isolateWorkspace: resolveIsolateWorkspace(
+          options.isolateWorkspace,
+          globalConfig
+        )
       });
 
       if (!result.success) {
@@ -1375,6 +1393,72 @@ configCmd
     saveConfig(config);
     logger.success(`Unset ${key} in ${getConfigFilePath()}`);
   });
+
+const orgCmd = program
+  .command('org')
+  .description(
+    'Organisation-wide commands (for a SecureCI supply-chain assessment)'
+  );
+
+orgCmd
+  .command('scan')
+  .description(
+    'Scan the GitHub Actions workflows of every repository in an organisation and pack the JSON results for a SecureCI supply-chain assessment (runs org-scan.sh; source code is never downloaded)'
+  )
+  .argument('[org]', 'GitHub organisation (or user) to scan')
+  .option(
+    '--repos <file>',
+    'Scan only the repositories in this file (one "name" or "owner/name" per line)'
+  )
+  .option(
+    '--out <dir>',
+    'Output directory (default: ./secureci-org-scan-<org>)'
+  )
+  .option(
+    '-c, --contract <file>',
+    'Also check workflows against this pipeline contract (local file or owner/repo/path@ref)'
+  )
+  .option('--include-forks', 'Also scan forked repositories')
+  .option(
+    '--print-script',
+    'Print the script this command runs, to review it, and exit'
+  )
+  .action(
+    async (
+      org: string | undefined,
+      options: {
+        repos?: string;
+        out?: string;
+        contract?: string;
+        includeForks?: boolean;
+        printScript?: boolean;
+      }
+    ) => {
+      if (options.printScript) {
+        process.stdout.write(ORG_SCAN_SCRIPT);
+        return;
+      }
+      if (!org) {
+        logger.error('Missing <org>: secureci org scan <org>');
+        process.exit(2);
+      }
+      try {
+        const code = await runOrgScan(org, options, {
+          spawn: (command, args, spawnOptions) =>
+            spawn(command, args, spawnOptions),
+          tmpdir: os.tmpdir,
+          sea: isSea(),
+          execPath: process.execPath,
+          entry: process.argv[1],
+          env: process.env
+        });
+        process.exit(code);
+      } catch (error) {
+        logger.error(error instanceof Error ? error.message : String(error));
+        process.exit(1);
+      }
+    }
+  );
 
 const cacheCmd = program
   .command('cache')

@@ -9,7 +9,8 @@ import {
   cleanupStepFiles,
   processWorkflowCommands,
   buildRunnerEnv,
-  prependPath
+  prependPath,
+  runnerArch
 } from './runner-env';
 
 describe('runner-env', () => {
@@ -224,6 +225,23 @@ describe('runner-env', () => {
         RUNNER_TOOL_CACHE: '/tools'
       });
       expect(env.RUNNER_OS).toMatch(/^(Linux|macOS|Windows)$/);
+      expect(env.RUNNER_ARCH).toBe(runnerArch());
+    });
+  });
+
+  describe('runnerArch', () => {
+    // GitHub's values: https://docs.github.com/en/actions/reference/variables-reference
+    it.each([
+      ['x64', 'X64'],
+      ['arm64', 'ARM64'],
+      ['arm', 'ARM'],
+      ['ia32', 'X86']
+    ] as const)('maps %s to %s', (nodeArch, expected) => {
+      expect(runnerArch(nodeArch)).toBe(expected);
+    });
+
+    it('falls back to X64 for architectures GitHub has no runner for', () => {
+      expect(runnerArch('s390x')).toBe('X64');
     });
   });
 

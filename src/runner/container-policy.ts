@@ -89,6 +89,37 @@ export function unsafeServiceOptions(args: string[]): string[] {
   return found;
 }
 
+/**
+ * Split `args` into the options to pass on and the `reserved` ones (by
+ * flag name, in order), dropping a reserved option's value too. Values of
+ * other options are kept as they are, so `--health-cmd --entrypoint` stays.
+ */
+export function splitReservedOptions(
+  args: string[],
+  reserved: ReadonlySet<string>
+): { kept: string[]; dropped: string[] } {
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    let name: string | undefined;
+    let takesNext = false;
+    if (arg.startsWith('--')) {
+      const [flag, value] = arg.split(/=(.*)/s);
+      name = flag;
+      takesNext = value === undefined && VALUE_OPTIONS.has(flag);
+    } else if (arg.startsWith('-') && arg.length > 1) {
+      name = arg.slice(0, 2);
+      takesNext = arg.length === 2 && SHORT_VALUE_OPTIONS.has(name);
+    }
+    const span = takesNext ? args.slice(i, i + 2) : [arg];
+    if (name !== undefined && reserved.has(name)) dropped.push(name);
+    else kept.push(...span);
+    if (takesNext) i++;
+  }
+  return { kept, dropped };
+}
+
 const VOLUME_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
 function realpathOrSelf(p: string): string {
