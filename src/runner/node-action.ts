@@ -165,7 +165,7 @@ export async function executeNodeAction(
         node.path,
         [path.join(actionDir, script)],
         {
-          cwd: process.cwd(),
+          cwd: runtime.workspace,
           maxBuffer: 64 * 1024 * 1024,
           timeout: limit.ms,
           killSignal: 'SIGKILL',

@@ -269,7 +269,7 @@ When running locally with SecureCI:
 
 - **Runner images:** Jobs run in a container image mapped from `runs-on` (not the exact GitHub-hosted runner image); `windows-*`/`macos-*` fall back to a Linux image with a warning
 - **No GitHub context:** Limited access to GitHub API
-- **Parallel job execution:** Jobs whose `needs:` are done, and matrix combinations, run concurrently up to `--parallel` (default: CPU count); they share the local working copy
+- **Parallel job execution:** Jobs whose `needs:` are done, and matrix combinations, run concurrently up to `--parallel` (default: CPU count); they share the local working copy unless `--isolate-workspace` gives each its own copy
 - **Local caching:** Actions cached locally instead of GitHub servers
 - **Limited secrets:** Secrets passed via CLI (not GitHub Secrets), masked in log output
 

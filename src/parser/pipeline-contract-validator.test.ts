@@ -825,6 +825,137 @@ describe('validatePipelineContract', () => {
       expect((await validatePipelineContract(wf, contract)).errors).toEqual([]);
     });
 
+    const onEvents = (
+      on: ParsedWorkflow['file']['on'],
+      jobs: ParsedWorkflow['file']['jobs']
+    ): ParsedWorkflow => {
+      const wf = workflow(jobs);
+      wf.file.on = on;
+      return wf;
+    };
+
+    it("errors when a required action's if: can't be true for any of the workflow's triggers", async () => {
+      const wf = onEvents(['push', 'pull_request'], {
+        build: {
+          'runs-on': 'ubuntu-latest',
+          steps: [
+            {
+              uses: 'org/security-scan@v1',
+              if: "github.event_name == 'release'"
+            }
+          ]
+        }
+      });
+      const result = await validatePipelineContract(wf, contract);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toEqual([
+        {
+          path: 'required[0]',
+          severity: 'error',
+          message:
+            'Required action "org/security-scan" never runs: its if: conditions (on its step or job) can\'t be true for this workflow\'s triggers (push, pull_request)'
+        }
+      ]);
+    });
+
+    it('combines job and step conditions per trigger', async () => {
+      const wf = onEvents(['push', 'pull_request'], {
+        build: {
+          'runs-on': 'ubuntu-latest',
+          if: "github.event_name == 'push'",
+          steps: [
+            {
+              uses: 'org/security-scan@v1',
+              if: "github.event_name == 'pull_request'"
+            }
+          ]
+        }
+      });
+      const result = await validatePipelineContract(wf, contract);
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          severity: 'error',
+          message: expect.stringContaining('never runs')
+        })
+      ]);
+    });
+
+    it("doesn't warn when the if: holds for every trigger", async () => {
+      const wf = onEvents(
+        { push: { branches: ['main'] }, workflow_dispatch: {} },
+        {
+          build: {
+            'runs-on': 'ubuntu-latest',
+            steps: [
+              {
+                uses: 'org/security-scan@v1',
+                if: "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"
+              }
+            ]
+          }
+        }
+      );
+      expect((await validatePipelineContract(wf, contract)).errors).toEqual([]);
+    });
+
+    it('still only warns when the if: holds for some triggers', async () => {
+      const wf = onEvents(['push', 'pull_request'], {
+        build: {
+          'runs-on': 'ubuntu-latest',
+          steps: [
+            { uses: 'org/security-scan@v1', if: "github.event_name == 'push'" }
+          ]
+        }
+      });
+      const result = await validatePipelineContract(wf, contract);
+      expect(result.valid).toBe(true);
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          severity: 'warning',
+          message: expect.stringContaining('may be skipped')
+        })
+      ]);
+    });
+
+    it("doesn't decide on github.event_name for a reusable workflow, which runs with its caller's event", async () => {
+      const wf = onEvents(['push', 'workflow_call'], {
+        build: {
+          'runs-on': 'ubuntu-latest',
+          steps: [
+            {
+              uses: 'org/security-scan@v1',
+              if: "github.event_name == 'release'"
+            }
+          ]
+        }
+      });
+      const result = await validatePipelineContract(wf, contract);
+      expect(result.valid).toBe(true);
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          severity: 'warning',
+          message: expect.stringContaining('may be skipped')
+        })
+      ]);
+    });
+
+    it('matches the occurrence that can run, for ordering', async () => {
+      const wf = onEvents('push', {
+        build: {
+          'runs-on': 'ubuntu-latest',
+          steps: [
+            { uses: 'org/deploy@v1', if: "github.event_name == 'release'" },
+            { uses: 'org/security-scan@v1' },
+            { uses: 'org/deploy@v1' }
+          ]
+        }
+      });
+      const result = await validatePipelineContract(wf, {
+        required: [{ uses: 'org/security-scan' }, { uses: 'org/deploy' }]
+      });
+      expect(result.errors).toEqual([]);
+    });
+
     it('still errors for a forbidden action under an if:', async () => {
       const wf = workflow({
         build: {

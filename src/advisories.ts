@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
   apiUrl as defaultApiUrl,
-  getText,
+  getResponse,
   githubToken,
   lsRemoteTags,
   serverUrl
@@ -91,10 +91,26 @@ export interface AdvisoryReport {
 }
 
 /** GET `url`; rejects with an error carrying `status` on a non-200. */
+/**
+ * GET `url`: the body, or the body and the `Link` header (for the next
+ * page of a paginated API response).
+ */
 export type HttpGet = (
   url: string,
   headers: Record<string, string>
-) => Promise<string>;
+) => Promise<string | { body: string; link?: string }>;
+
+/** Pages of advisories read per repository (100 each). */
+const MAX_ADVISORY_PAGES = 10;
+
+/** The `rel="next"` URL of a `Link` header, if any. */
+function nextPageUrl(link: string | undefined): string | undefined {
+  for (const part of (link ?? '').split(',')) {
+    const match = part.match(/<([^>]+)>\s*;\s*rel="?next"?/);
+    if (match) return match[1];
+  }
+  return undefined;
+}
 
 export interface AdvisoryOptions {
   /** Use only cached advisories; never touch the network. */
@@ -460,7 +476,7 @@ function describeError(error: unknown, authenticated: boolean): string {
  * The advisories naming `owner/repo` in the actions ecosystem, cached per
  * repository for `ttlMs` (default 24h). Offline, the cache is used at any
  * age. If the API fails, a stale cache is used when there is one.
- * Only the first page (100 advisories) is read.
+ * Pages are followed (on the API's own host) up to 1,000 advisories.
  */
 export async function fetchRepoAdvisories(
   owner: string,
@@ -495,7 +511,10 @@ export async function fetchRepoAdvisories(
   const httpGet =
     options.httpGet ??
     ((url: string, headers: Record<string, string>) =>
-      getText(url, headers, ADVISORY_TIMEOUT_MS));
+      getResponse(url, headers, ADVISORY_TIMEOUT_MS).then((r) => ({
+        body: r.body,
+        link: [r.headers.link].flat()[0]
+      })));
   const query = new URLSearchParams({
     ecosystem: 'actions',
     affects: `${owner}/${repo}`,
@@ -509,17 +528,29 @@ export async function fetchRepoAdvisories(
     ...(token ? { Authorization: `Bearer ${token}` } : {})
   });
   let token = options.token === undefined ? githubToken() : options.token;
-  let body: string;
+  const page = async (pageUrl: string) => {
+    const response = await httpGet(pageUrl, headers(token));
+    return typeof response === 'string' ? { body: response } : response;
+  };
   try {
+    let response: { body: string; link?: string };
     try {
-      body = await httpGet(url, headers(token));
+      response = await page(url);
     } catch (error) {
       // A rejected token shouldn't block public advisories.
       if (!token || (error as { status?: number }).status !== 401) throw error;
       token = null;
-      body = await httpGet(url, headers(null));
+      response = await page(url);
     }
-    const advisories = parseAdvisories(JSON.parse(body));
+    const advisories = parseAdvisories(JSON.parse(response.body));
+    // Later pages only from the API's own origin, which the token is for.
+    const origin = new URL(url).origin;
+    for (let pages = 1; pages < MAX_ADVISORY_PAGES; pages++) {
+      const next = nextPageUrl(response.link);
+      if (!next || new URL(next, url).origin !== origin) break;
+      response = await page(new URL(next, url).toString());
+      advisories.push(...parseAdvisories(JSON.parse(response.body)));
+    }
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const entry: CacheFile = { api, fetchedAt: now, advisories };
     fs.writeFileSync(file, JSON.stringify(entry, null, 2));

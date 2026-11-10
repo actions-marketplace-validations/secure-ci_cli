@@ -460,4 +460,73 @@ jobs:
     ]);
     expect(logged()).toContain('[call (n: 1)]');
   });
+
+  describe('--isolate-workspace', () => {
+    let ws: string;
+    beforeEach(() => {
+      ws = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-isolate-'));
+      fs.writeFileSync(path.join(ws, 'seed.txt'), 'uncommitted seed');
+      vi.spyOn(process, 'cwd').mockReturnValue(ws);
+    });
+    afterEach(() => {
+      fs.rmSync(ws, { recursive: true, force: true });
+    });
+
+    const isolationWorkflow = () =>
+      workflow(`
+name: Isolate
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo from-a > out.txt
+          touch "${dir}/a-wrote"
+          ${waitFor('b-wrote')}
+          echo "a sees $(cat out.txt), $(cat seed.txt)"
+          echo "a ws=$GITHUB_WORKSPACE ctx=\${{ github.workspace }}"
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo from-b > out.txt
+          touch "${dir}/b-wrote"
+          ${waitFor('a-wrote')}
+          echo "b sees $(cat out.txt)"
+`);
+
+    it('gives each job its own copy of the working copy, and removes it at job end', async () => {
+      const result = await executeWorkflow(isolationWorkflow(), {
+        parallel: 2,
+        isolateWorkspace: true,
+        containerRuntime: 'host'
+      });
+
+      expect(result.success).toBe(true);
+      const output = logged();
+      expect(output).toContain('a sees from-a, uncommitted seed');
+      expect(output).toContain('b sees from-b');
+      expect(fs.existsSync(path.join(ws, 'out.txt'))).toBe(false);
+      const copy = output.match(/a ws=(\S+) ctx=(\S+)/);
+      expect(copy).not.toBeNull();
+      expect(copy![1]).toBe(copy![2]);
+      expect(copy![1]).not.toBe(ws);
+      expect(fs.existsSync(copy![1])).toBe(false);
+    });
+
+    it('shares the working copy without it, as before', async () => {
+      const result = await executeWorkflow(isolationWorkflow(), {
+        parallel: 2,
+        containerRuntime: 'host'
+      });
+      expect(result.success).toBe(true);
+      const output = logged();
+      // Both jobs wrote the same file; whichever wrote last wins for both.
+      const a = output.match(/a sees (from-\w)/)![1];
+      const b = output.match(/b sees (from-\w)/)![1];
+      expect(a).toBe(b);
+      expect(fs.existsSync(path.join(ws, 'out.txt'))).toBe(true);
+    });
+  });
 });

@@ -39,6 +39,7 @@ import {
 } from './executor';
 import { createContext } from './expression';
 import * as crypto from 'crypto';
+import { execFileSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -1774,6 +1775,210 @@ jobs:
       });
     });
 
+    describe('jobs.<id>.container options, ports, volumes and credentials', () => {
+      function captureLogs() {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+        return {
+          text: () =>
+            [...warn.mock.calls, ...error.mock.calls, ...log.mock.calls]
+              .flat()
+              .join('\n'),
+          restore: () => {
+            warn.mockRestore();
+            error.mockRestore();
+            log.mockRestore();
+          }
+        };
+      }
+
+      it('passes options, ports and volumes to the job container, as on GitHub', async () => {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const workflowPath = writeWorkflow(`
+name: Container Options
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20
+      options: --user 1001 --shm-size \${{ inputs.shm }}
+      ports:
+        - 8080
+      volumes:
+        - my_cache:/cache
+    steps:
+      - run: echo a
+`);
+
+        const result = await executeWorkflow(workflowPath, {
+          containerRuntime: 'docker',
+          inputs: { shm: '1g' }
+        });
+
+        expect(result.success).toBe(true);
+        expect(fake.start.mock.calls[0][0]).toMatchObject({
+          image: 'node:20',
+          extraArgs: ['--user', '1001', '--shm-size', '1g'],
+          ports: ['8080'],
+          volumes: ['my_cache:/cache']
+        });
+      });
+
+      it('refuses options that give the container access to this machine, failing the job', async () => {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const workflowPath = writeWorkflow(`
+name: Unsafe
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20
+      options: --privileged --cap-add SYS_ADMIN
+    steps:
+      - run: echo a
+`);
+        const logs = captureLogs();
+        try {
+          const result = await executeWorkflow(workflowPath, {
+            containerRuntime: 'docker'
+          });
+          expect(result.success).toBe(false);
+          expect(fake.start).not.toHaveBeenCalled();
+          expect(logs.text()).toContain(
+            'jobs.a.container: refusing unsafe options --privileged, --cap-add'
+          );
+        } finally {
+          logs.restore();
+        }
+      });
+
+      it('refuses a volume that mounts a host path outside the workspace', async () => {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const workflowPath = writeWorkflow(`
+name: Unsafe Volume
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20
+      volumes:
+        - /etc:/host-etc
+    steps:
+      - run: echo a
+`);
+        const logs = captureLogs();
+        try {
+          const result = await executeWorkflow(workflowPath, {
+            containerRuntime: 'docker'
+          });
+          expect(result.success).toBe(false);
+          expect(fake.start).not.toHaveBeenCalled();
+          expect(logs.text()).toContain(
+            'mounts a host path outside the workspace'
+          );
+        } finally {
+          logs.restore();
+        }
+      });
+
+      it('keeps a memory option when no --container-memory-limit is set', async () => {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const workflowPath = writeWorkflow(`
+name: Memory
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20
+      options: --memory 4g
+    steps:
+      - run: echo a
+`);
+        const result = await executeWorkflow(workflowPath, {
+          containerRuntime: 'docker'
+        });
+        expect(result.success).toBe(true);
+        expect(fake.start.mock.calls[0][0]).toMatchObject({
+          extraArgs: ['--memory', '4g']
+        });
+      });
+
+      it('drops options the CLI sets itself (entrypoint, working directory, memory limit), with a warning', async () => {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const workflowPath = writeWorkflow(`
+name: Reserved
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20
+      options: --entrypoint sh -w /tmp --workdir=/tmp --memory 64g --cpus 2
+    steps:
+      - run: echo a
+`);
+        const logs = captureLogs();
+        try {
+          const result = await executeWorkflow(workflowPath, {
+            containerRuntime: 'docker',
+            containerMemoryLimit: '2g'
+          });
+          expect(result.success).toBe(true);
+          expect(fake.start.mock.calls[0][0]).toMatchObject({
+            extraArgs: ['--cpus', '2'],
+            memoryLimit: '2g'
+          });
+          expect(logs.text()).toContain(
+            'jobs.a.container: ignoring options the CLI sets itself: --entrypoint, -w, --workdir, --memory'
+          );
+        } finally {
+          logs.restore();
+        }
+      });
+
+      it('ignores credentials with a warning', async () => {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const workflowPath = writeWorkflow(`
+name: Credentials
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/me/private:1
+      credentials:
+        username: me
+        password: \${{ secrets.PAT }}
+    steps:
+      - run: echo a
+`);
+        const logs = captureLogs();
+        try {
+          const result = await executeWorkflow(workflowPath, {
+            containerRuntime: 'docker'
+          });
+          expect(result.success).toBe(true);
+          expect(logs.text()).toContain(
+            'jobs.a.container: credentials are ignored; log in with `docker login` instead.'
+          );
+          expect(logs.text()).not.toContain('only image and env are supported');
+        } finally {
+          logs.restore();
+        }
+      });
+    });
+
     describe('image resolution (#32)', () => {
       const imageWorkflow = `
 name: Images
@@ -2903,6 +3108,202 @@ jobs:
       );
     });
 
+    describe('ref:, fetch-depth: and submodules:', () => {
+      const git = (...args: string[]): string =>
+        execFileSync(
+          'git',
+          [
+            '-c',
+            'user.name=t',
+            '-c',
+            'user.email=t@example.com',
+            '-c',
+            'commit.gpgsign=false',
+            '-c',
+            'tag.gpgsign=false',
+            '-c',
+            'protocol.file.allow=always',
+            ...args
+          ],
+          { cwd: workDir, encoding: 'utf8' }
+        ).trim();
+      let v1: string;
+
+      beforeEach(() => {
+        fs.rmSync(path.join(workDir, '.git'), { recursive: true });
+        git('init', '-q', '-b', 'main');
+        fs.writeFileSync(path.join(workDir, 'version.txt'), 'one');
+        git('add', 'version.txt');
+        git('commit', '-q', '-m', 'one');
+        git('tag', 'v1');
+        v1 = git('rev-parse', 'HEAD');
+        fs.writeFileSync(path.join(workDir, 'version.txt'), 'two');
+        git('commit', '-q', '-am', 'two');
+      });
+
+      function warnings(run: () => Promise<unknown>) {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        return run()
+          .then((result) => ({
+            result: result as Awaited<ReturnType<typeof executeWorkflow>>,
+            text: warnSpy.mock.calls.flat().join('\n')
+          }))
+          .finally(() => warnSpy.mockRestore());
+      }
+
+      it('checks out a ref that exists locally into path:, without touching the working copy', async () => {
+        const workflow = writeWorkflow(
+          [
+            '      - id: co',
+            '        uses: actions/checkout@v4',
+            '        with:',
+            '          ref: v1',
+            '          path: old',
+            '      - run: cat old/version.txt && git -C old rev-parse HEAD',
+            '      - run: echo "commit=${{ steps.co.outputs.commit }} ref=${{ steps.co.outputs.ref }}"'
+          ].join('\n')
+        );
+        const before = git('status', '--porcelain');
+        const result = await executeWorkflow(workflow);
+
+        expect(result.success).toBe(true);
+        const steps = result.jobs[0].steps;
+        expect(steps[0].output).toContain(
+          `Checked out v1 (${v1.slice(0, 7)}) to old`
+        );
+        expect(steps[1].output).toContain('one');
+        expect(steps[1].output).toContain(v1);
+        expect(steps[2].output).toContain(`commit=${v1} ref=v1`);
+        expect(fs.existsSync(path.join(workDir, 'old'))).toBe(false);
+        expect(fs.readFileSync(path.join(workDir, 'version.txt'), 'utf8')).toBe(
+          'two'
+        );
+        expect(git('status', '--porcelain')).toBe(before);
+        expect(git('worktree', 'list').split('\n')).toHaveLength(1);
+      });
+
+      it('warns, and uses the working copy, for a ref at the workspace root', async () => {
+        const { result, text } = await warnings(() =>
+          executeWorkflow(
+            writeWorkflow(
+              [
+                '      - uses: actions/checkout@v4',
+                '        with:',
+                '          ref: v1'
+              ].join('\n')
+            )
+          )
+        );
+        expect(result.success).toBe(true);
+        expect(text).toContain(
+          'actions/checkout: not checking out ref "v1" over your working copy; add a path: to check it out there, or pass --no-local-checkout to run the real action'
+        );
+        expect(fs.readFileSync(path.join(workDir, 'version.txt'), 'utf8')).toBe(
+          'two'
+        );
+      });
+
+      it('warns, and copies the working copy, for a ref that is not in the local repository', async () => {
+        const { result, text } = await warnings(() =>
+          executeWorkflow(
+            writeWorkflow(
+              [
+                '      - uses: actions/checkout@v4',
+                '        with:',
+                '          ref: refs/pull/1/merge',
+                '          path: pr',
+                '      - run: cat pr/version.txt'
+              ].join('\n')
+            )
+          )
+        );
+        expect(result.success).toBe(true);
+        expect(text).toContain(
+          'actions/checkout: ref "refs/pull/1/merge" isn\'t in the local repository; using the local working copy'
+        );
+        expect(result.jobs[0].steps[1].output).toContain('two');
+      });
+
+      it('never passes a ref that looks like an option to git', async () => {
+        const { result, text } = await warnings(() =>
+          executeWorkflow(
+            writeWorkflow(
+              [
+                '      - uses: actions/checkout@v4',
+                '        with:',
+                '          ref: --output=/tmp/x',
+                '          path: x'
+              ].join('\n')
+            )
+          )
+        );
+        expect(result.success).toBe(true);
+        expect(text).toContain("isn't in the local repository");
+      });
+
+      it('warns when submodules: is set and a submodule is not initialized', async () => {
+        const sub = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-sub-'));
+        try {
+          execFileSync('git', ['init', '-q', sub]);
+          execFileSync(
+            'git',
+            [
+              '-c',
+              'user.name=t',
+              '-c',
+              'user.email=t@example.com',
+              '-c',
+              'commit.gpgsign=false',
+              'commit',
+              '-q',
+              '--allow-empty',
+              '-m',
+              's'
+            ],
+            { cwd: sub }
+          );
+          git('submodule', '--quiet', 'add', sub, 'libs/sub');
+          git('commit', '-q', '-m', 'add sub');
+          git('submodule', '--quiet', 'deinit', '-f', 'libs/sub');
+
+          const { result, text } = await warnings(() =>
+            executeWorkflow(
+              writeWorkflow(
+                [
+                  '      - uses: actions/checkout@v4',
+                  '        with:',
+                  '          submodules: recursive'
+                ].join('\n')
+              )
+            )
+          );
+          expect(result.success).toBe(true);
+          expect(text).toContain(
+            "actions/checkout: submodules aren't initialized in your working copy (libs/sub); run `git submodule update --init --recursive` first"
+          );
+        } finally {
+          fs.rmSync(sub, { recursive: true, force: true });
+        }
+      });
+
+      it('says nothing about submodules when they are initialized or not asked for', async () => {
+        const { result, text } = await warnings(() =>
+          executeWorkflow(
+            writeWorkflow(
+              [
+                '      - uses: actions/checkout@v4',
+                '        with:',
+                '          submodules: true',
+                '          fetch-depth: 0'
+              ].join('\n')
+            )
+          )
+        );
+        expect(result.success).toBe(true);
+        expect(text).not.toContain('submodules');
+      });
+    });
+
     it('copies the working copy into path:, and removes it at job end', async () => {
       const result = await executeWorkflow(
         writeWorkflow(
@@ -3687,6 +4088,56 @@ jobs:
       );
       return file;
     }
+
+    it('notes once that concurrency: is not applied in a local run', async () => {
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        [
+          'name: C',
+          'on: push',
+          'concurrency: ci-${{ github.ref }}',
+          'jobs:',
+          '  a:',
+          '    runs-on: ubuntu-latest',
+          '    steps: [{ run: echo a }]',
+          '  deploy:',
+          '    runs-on: ubuntu-latest',
+          '    concurrency: { group: prod, cancel-in-progress: true }',
+          '    steps: [{ run: echo b }]'
+        ].join('\n')
+      );
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        const result = await executeWorkflow(file, {
+          containerRuntime: 'host'
+        });
+        expect(result.success).toBe(true);
+        const notes = logSpy.mock.calls
+          .flat()
+          .filter((line) => String(line).includes('concurrency'));
+        expect(notes).toHaveLength(1);
+        expect(String(notes[0])).toContain(
+          "concurrency: isn't applied in a local run (workflow, jobs.deploy): it doesn't queue behind or cancel other runs, and jobs run as needs: and --parallel allow"
+        );
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    it('says nothing about concurrency when no concurrency: is set', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await executeWorkflow(writeWorkflow('      - run: echo a\n'), {
+          containerRuntime: 'host'
+        });
+        expect(logSpy.mock.calls.flat().join('\n')).not.toContain(
+          'concurrency'
+        );
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
 
     it("runs remote JavaScript actions' pre scripts at job start (#36)", async () => {
       const actionDir = path.join(dir, 'js');

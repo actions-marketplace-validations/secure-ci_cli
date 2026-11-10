@@ -173,6 +173,30 @@ describe('config', () => {
     });
   });
 
+  describe('isolate-workspace', () => {
+    it('is a config key parsed as a strict boolean', async () => {
+      const { isValidConfigKey, parseConfigValue } = await import('./config');
+      expect(isValidConfigKey('isolate-workspace')).toBe(true);
+      expect(parseConfigValue('isolate-workspace', 'true')).toBe(true);
+      expect(parseConfigValue('isolate-workspace', 'false')).toBe(false);
+      expect(() => parseConfigValue('isolate-workspace', 'yes')).toThrow(
+        /Invalid value "yes" for isolate-workspace/
+      );
+    });
+
+    it('is off by default; the flag wins over the config file', async () => {
+      const { resolveIsolateWorkspace } = await import('./config');
+      expect(resolveIsolateWorkspace(undefined, {})).toBe(false);
+      expect(
+        resolveIsolateWorkspace(undefined, { 'isolate-workspace': true })
+      ).toBe(true);
+      expect(resolveIsolateWorkspace(true, {})).toBe(true);
+      expect(
+        resolveIsolateWorkspace(false, { 'isolate-workspace': true })
+      ).toBe(false);
+    });
+  });
+
   describe('resolveNetworkDisabled', () => {
     it('leaves networking on by default', async () => {
       const { resolveNetworkDisabled } = await import('./config');

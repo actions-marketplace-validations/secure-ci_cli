@@ -91,7 +91,7 @@ export async function stepFileSystem(
   runtime: JobRuntime
 ): Promise<StepFileSystem> {
   const container = runtime.container;
-  if (!container) return hostFileSystem(process.cwd());
+  if (!container) return hostFileSystem(runtime.workspace);
   if (container.home === undefined) {
     const probe = await container.runtime.exec(container.id, {
       command: 'printf %s "$HOME"'
@@ -100,7 +100,7 @@ export async function stepFileSystem(
   }
   return containerFileSystem({
     workspace: CONTAINER_WORKDIR,
-    hostWorkspace: process.cwd(),
+    hostWorkspace: runtime.workspace,
     home: container.home,
     copyFrom: (from, to) => container.runtime.copyFrom(container.id, from, to),
     copyTo: (from, to) => container.runtime.copyTo(container.id, from, to),
@@ -289,8 +289,11 @@ export function isLocalActionRef(uses: string): boolean {
  * Resolve a local action (`uses: ./path/to/action`) relative to the
  * workspace, like the runner does, to its action.yml / action.yaml.
  */
-export function resolveLocalAction(uses: string): string | null {
-  const dir = path.resolve(process.cwd(), uses);
+export function resolveLocalAction(
+  uses: string,
+  workspace: string = process.cwd()
+): string | null {
+  const dir = path.resolve(workspace, uses);
   for (const name of ['action.yml', 'action.yaml']) {
     const candidate = path.join(dir, name);
     if (fs.existsSync(candidate)) return candidate;
@@ -337,7 +340,7 @@ export async function executeAction(
       };
       return await executeDockerAction(
         dockerAction,
-        path.join(process.cwd(), 'action.yml'),
+        path.join(runtime.workspace, 'action.yml'),
         step,
         {},
         callerCtx.env,
@@ -367,13 +370,13 @@ export async function executeAction(
     }
 
     const actionPath = isLocalActionRef(step.uses)
-      ? resolveLocalAction(step.uses)
+      ? resolveLocalAction(step.uses, runtime.workspace)
       : await fetchActionOnce(step.uses, options, runtime);
 
     if (!actionPath) {
       const error = `Could not resolve action "${step.uses}"${
         isLocalActionRef(step.uses)
-          ? ` (no action.yml or action.yaml in ${path.resolve(process.cwd(), step.uses)})`
+          ? ` (no action.yml or action.yaml in ${path.resolve(runtime.workspace, step.uses)})`
           : ''
       }`;
       logger.error(error);

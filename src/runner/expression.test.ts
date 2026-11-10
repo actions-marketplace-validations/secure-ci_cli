@@ -7,6 +7,7 @@ import {
   evaluateCondition,
   expressionDataFlow,
   resolveExpressionValue,
+  staticCondition,
   substituteExpressions,
   validateExpression
 } from './expression';
@@ -516,5 +517,57 @@ describe('star filter vs a literal key', () => {
       'star',
       'x'
     ]);
+  });
+});
+
+describe('staticCondition', () => {
+  const push = { github: { event_name: 'push' } };
+
+  it.each([
+    [undefined, true],
+    [true, true],
+    [false, false],
+    ['', true],
+    ['false', false],
+    ['${{ false }}', false],
+    ['success()', true],
+    ['always()', true],
+    ["github.event_name == 'push'", true],
+    ["github.event_name == 'release'", false],
+    ["${{ github.event_name != 'push' }}", false],
+    [
+      "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+      undefined
+    ],
+    [
+      "github.event_name == 'release' && github.ref == 'refs/heads/main'",
+      false
+    ],
+    [
+      "github.ref == 'refs/heads/main' && github.event_name == 'release'",
+      false
+    ],
+    ["github.ref == 'refs/heads/main' || github.event_name == 'push'", true],
+    ["github.event_name == 'push' || github.ref == 'x'", true],
+    ["github.event_name == 'pull_request' || github.ref == 'x'", undefined],
+    ["!(github.event_name == 'release')", true],
+    ['contains(fromJSON(\'["push","schedule"]\'), github.event_name)', true],
+    ["startsWith(github.ref, 'refs/tags/')", undefined],
+    ["matrix.os == 'linux'", undefined],
+    ["steps.x.outputs.y == 'z'", undefined],
+    ['failure()', undefined],
+    ['cancelled()', undefined],
+    ["hashFiles('x') != ''", undefined],
+    ["(github.ref || 'a') == 'a'", undefined],
+    ['github.event_name ==', undefined],
+    ['nope.x', undefined]
+  ] as const)('%s → %s', (expr, expected) => {
+    expect(staticCondition(expr as string | boolean | undefined, push)).toBe(
+      expected
+    );
+  });
+
+  it('is unknown when nothing is known about the event', () => {
+    expect(staticCondition("github.event_name == 'push'", {})).toBe(undefined);
   });
 });

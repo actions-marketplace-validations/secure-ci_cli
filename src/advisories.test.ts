@@ -421,6 +421,93 @@ describe('fetchRepoAdvisories', () => {
     token: null as string | null
   };
 
+  describe('pagination', () => {
+    const [first, second] = JSON.parse(
+      fixture('tj-actions-changed-files.json')
+    ) as unknown[];
+    const nextLink = (url: string) => `<${url}>; rel="next", <x>; rel="last"`;
+
+    it('follows rel="next" links and caches every page', async () => {
+      const calls: string[] = [];
+      const page2 = 'https://ghe.example.com/api/v3/advisories?after=abc';
+      const http: HttpGet = async (url) => {
+        calls.push(url);
+        return url === page2
+          ? { body: JSON.stringify([second]) }
+          : { body: JSON.stringify([first]), link: nextLink(page2) };
+      };
+      const result = await fetchRepoAdvisories('tj-actions', 'changed-files', {
+        ...base,
+        httpGet: http,
+        cacheDir
+      });
+      expect(calls).toEqual([expect.stringContaining('per_page=100'), page2]);
+      expect(result.advisories?.map((a) => a.ghsaId)).toEqual([
+        'GHSA-mrrh-fwg8-r2c3',
+        'GHSA-mcph-m25j-8j63'
+      ]);
+      const again = await fetchRepoAdvisories('tj-actions', 'changed-files', {
+        ...base,
+        httpGet: async () => {
+          throw new Error('not cached');
+        },
+        cacheDir
+      });
+      expect(again.advisories).toHaveLength(2);
+    });
+
+    it('never follows a next link to another host (the token would go with it)', async () => {
+      const calls: string[] = [];
+      const http: HttpGet = async (url) => {
+        calls.push(url);
+        return {
+          body: JSON.stringify([first]),
+          link: nextLink('https://evil.example.com/advisories?after=x')
+        };
+      };
+      const result = await fetchRepoAdvisories('o', 'r', {
+        ...base,
+        httpGet: http,
+        cacheDir
+      });
+      expect(calls).toHaveLength(1);
+      expect(result.advisories).toHaveLength(1);
+    });
+
+    it('stops after 10 pages', async () => {
+      let n = 0;
+      const http: HttpGet = async () => ({
+        body: JSON.stringify([first]),
+        link: nextLink(`https://ghe.example.com/api/v3/advisories?after=${++n}`)
+      });
+      const result = await fetchRepoAdvisories('o', 'r', {
+        ...base,
+        httpGet: http,
+        cacheDir
+      });
+      expect(n).toBe(10);
+      expect(result.advisories).toHaveLength(10);
+    });
+
+    it("doesn't cache a lookup whose later page failed", async () => {
+      const page2 = 'https://ghe.example.com/api/v3/advisories?after=abc';
+      const http: HttpGet = async (url) => {
+        if (url === page2) {
+          throw Object.assign(new Error('HTTP 502'), { status: 502 });
+        }
+        return { body: JSON.stringify([first]), link: nextLink(page2) };
+      };
+      const result = await fetchRepoAdvisories('o', 'r', {
+        ...base,
+        httpGet: http,
+        cacheDir
+      });
+      expect(result.advisories).toBeUndefined();
+      expect(result.error).toContain('HTTP 502');
+      expect(fs.readdirSync(cacheDir)).toEqual([]);
+    });
+  });
+
   it('queries GET /advisories for the actions ecosystem and caches the result', async () => {
     const http = fakeHttp({
       'tj-actions/changed-files': fixture('tj-actions-changed-files.json')

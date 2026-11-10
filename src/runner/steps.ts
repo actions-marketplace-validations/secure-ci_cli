@@ -161,8 +161,8 @@ export async function executeStep(
             timeout: limit.ms,
             killSignal: 'SIGKILL',
             cwd: workingDirectory
-              ? path.resolve(process.cwd(), workingDirectory)
-              : process.cwd(),
+              ? path.resolve(runtime.workspace, workingDirectory)
+              : runtime.workspace,
             env: {
               ...hostBaseEnv(),
               ...runtime.runnerEnv,

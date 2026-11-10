@@ -2,19 +2,32 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { logger } from '../utils/logger';
-import { RunOptions, Job } from '../types';
+import { RunOptions, Job, JobContainer } from '../types';
 import {
   substituteExpressions,
   substituteRecord,
   ExpressionContext
 } from './expression';
-import { resolveContainerRuntime, ContainerRuntime } from './container-runtime';
+import {
+  resolveContainerRuntime,
+  ContainerRuntime,
+  ContainerStartOptions
+} from './container-runtime';
 import { JobRuntime } from './job-runtime';
 import { splitArgs } from './shell';
 import {
+  splitReservedOptions,
   unsafeServiceOptions,
   unsafeServiceVolumeReason
 } from './container-policy';
+
+/**
+ * `jobs.<id>.container.options` the CLI sets on the job container itself:
+ * it idles with its own entrypoint and steps run in the mounted workspace.
+ */
+const JOB_CONTAINER_RESERVED = new Set(['--entrypoint', '--workdir', '-w']);
+/** Also reserved when `--container-memory-limit` caps the job container. */
+const MEMORY_OPTIONS = ['--memory', '-m', '--memory-swap'];
 
 /**
  * Image for jobs whose `runs-on` has no image mapping. Runner-like (Node.js,
@@ -110,19 +123,6 @@ export async function startJobContainer(
     return false;
   }
 
-  if (
-    spec &&
-    'image' in spec &&
-    (('options' in spec && spec.options) ||
-      ('volumes' in spec && spec.volumes) ||
-      ('ports' in spec && spec.ports) ||
-      ('credentials' in spec && spec.credentials))
-  ) {
-    logger.warn(
-      'jobs.<id>.container: only image and env are supported; ignoring options/volumes/ports/credentials.'
-    );
-  }
-
   // `container: ${{ inputs.image || null }}` that comes out empty means no
   // container image, as on GitHub: use the image for runs-on.
   const specImage = spec?.image
@@ -136,7 +136,11 @@ export async function startJobContainer(
     specImage && spec && 'env' in spec ? spec.env : undefined,
     ctx
   );
-
+  const extras =
+    specImage && spec
+      ? jobContainerExtras(spec, ctx, options, runtime.workspace)
+      : {};
+  if (!extras) return false;
   const exchangeDir = fs.mkdtempSync(path.join(runDir, 'container-'));
   fs.chmodSync(exchangeDir, 0o777);
   fs.copyFileSync(runtime.eventPath, path.join(exchangeDir, 'event.json'));
@@ -144,13 +148,14 @@ export async function startJobContainer(
   logger.info(`Starting job container: ${image} (${containerRuntime.name})`);
   const started = await containerRuntime.start({
     image,
-    workingDir: process.cwd(),
+    workingDir: runtime.workspace,
     readOnlyPaths: protectedWorkspacePaths(options),
     exchangeDir,
     env: containerEnv,
     memoryLimit: options.containerMemoryLimit,
     networkDisabled: options.networkDisabled === true,
-    network: runtime.services?.network
+    network: runtime.services?.network,
+    ...extras
   });
 
   if (!started.success || !started.id) {
@@ -173,6 +178,63 @@ export async function startJobContainer(
   installContainerCleanup();
   activeContainers.add(runtime.container);
   return true;
+}
+
+/**
+ * The `options`, `ports` and `volumes` of `jobs.<id>.container`, checked
+ * with the same policy as service containers: options and host mounts that
+ * would reach this machine are refused (undefined: the job fails), options
+ * the CLI sets itself are dropped with a warning.
+ */
+function jobContainerExtras(
+  spec: JobContainer,
+  ctx: ExpressionContext,
+  options: RunOptions,
+  workspace: string
+): Pick<ContainerStartOptions, 'extraArgs' | 'ports' | 'volumes'> | undefined {
+  const label = `jobs.${ctx.github.job ?? '<id>'}.container`;
+  const args = spec.options
+    ? splitArgs(substituteExpressions(spec.options, ctx))
+    : [];
+  const unsafe = unsafeServiceOptions(args);
+  if (unsafe.length > 0) {
+    logger.error(
+      `${label}: refusing unsafe options ${[...new Set(unsafe)].join(', ')}: they would give the container access to this machine.`
+    );
+    return undefined;
+  }
+  const reserved = new Set([
+    ...JOB_CONTAINER_RESERVED,
+    ...(options.containerMemoryLimit ? MEMORY_OPTIONS : [])
+  ]);
+  const { kept, dropped } = splitReservedOptions(args, reserved);
+  if (dropped.length > 0) {
+    logger.warn(
+      `${label}: ignoring options the CLI sets itself: ${[...new Set(dropped)].join(', ')}.`
+    );
+  }
+  const volumes = (spec.volumes ?? []).map((v) =>
+    substituteExpressions(v, ctx)
+  );
+  for (const volume of volumes) {
+    const reason = unsafeServiceVolumeReason(volume, workspace);
+    if (reason) {
+      logger.error(`${label}: ${reason}.`);
+      return undefined;
+    }
+  }
+  if (spec.credentials) {
+    logger.warn(
+      `${label}: credentials are ignored; log in with \`docker login\` instead.`
+    );
+  }
+  return {
+    extraArgs: kept,
+    ports: (spec.ports ?? []).map((port) =>
+      substituteExpressions(String(port), ctx)
+    ),
+    volumes
+  };
 }
 
 /**
@@ -299,7 +361,7 @@ export async function startJobServices(
       return false;
     }
     for (const volume of volumes) {
-      const reason = unsafeServiceVolumeReason(volume, process.cwd());
+      const reason = unsafeServiceVolumeReason(volume, runtime.workspace);
       if (reason) {
         logger.error(`services.${serviceId}: ${reason}.`);
         return false;

@@ -21,6 +21,8 @@ export interface CliConfig {
   'allow-network'?: boolean;
   /** Jobs running at once (`--parallel`). Default: the CPU count. */
   parallel?: number;
+  /** Each job in its own copy of the working copy (`--isolate-workspace`). */
+  'isolate-workspace'?: boolean;
   /**
    * Default files for `run --env-file` etc., used when the flag isn't given.
    * Relative paths resolve against the current directory. `config set`
@@ -112,6 +114,7 @@ export const CONFIG_KEYS = [
   'container-memory',
   'allow-network',
   'parallel',
+  'isolate-workspace',
   'env-file',
   'secret-file',
   'input-file',
@@ -200,9 +203,10 @@ export function parseConfigValue(
       return num;
     }
     case 'allow-network':
+    case 'isolate-workspace':
       if (rawValue !== 'true' && rawValue !== 'false') {
         throw new Error(
-          `Invalid value "${rawValue}" for allow-network. Must be "true" or "false".`
+          `Invalid value "${rawValue}" for ${key}. Must be "true" or "false".`
         );
       }
       return rawValue === 'true';
@@ -220,6 +224,18 @@ export function parseConfigValue(
       }
       return rawValue;
   }
+}
+
+/**
+ * Whether each job runs in its own copy of the working copy:
+ * `--isolate-workspace` / `--no-isolate-workspace`, else
+ * `isolate-workspace` in the config file, else no.
+ */
+export function resolveIsolateWorkspace(
+  flag: boolean | undefined,
+  config: CliConfig = loadConfig()
+): boolean {
+  return flag ?? config['isolate-workspace'] === true;
 }
 
 /**

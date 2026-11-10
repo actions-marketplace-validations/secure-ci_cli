@@ -73,6 +73,7 @@ import {
   getConfigValue,
   setConfigValue,
   unsetConfigValue,
+  resolveIsolateWorkspace,
   resolveNetworkDisabled,
   getDefaultParallel,
   CONFIG_KEYS
@@ -218,6 +219,14 @@ program
     'Turn on container network access, overriding allow-network: false in the config'
   )
   .option(
+    '--isolate-workspace',
+    "Run each job in its own copy of the working copy, removed when the job ends, so parallel jobs can't overwrite each other's files. Config: isolate-workspace"
+  )
+  .option(
+    '--no-isolate-workspace',
+    'Share the working copy between jobs, overriding isolate-workspace: true in the config'
+  )
+  .option(
     '--parallel <n>',
     'Run up to this many jobs (and matrix combinations) at once; 1 runs them one after another. Default: the number of CPUs. Config: parallel',
     String(defaultParallel)
@@ -308,7 +317,11 @@ program
           { network: options.network, allowNetwork: options.allowNetwork },
           globalConfig
         ),
-        parallel
+        parallel,
+        isolateWorkspace: resolveIsolateWorkspace(
+          options.isolateWorkspace,
+          globalConfig
+        )
       });
 
       if (!result.success) {

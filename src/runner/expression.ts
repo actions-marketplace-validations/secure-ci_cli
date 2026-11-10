@@ -482,6 +482,34 @@ interface ExpressionScope {
   functions: Set<string>;
 }
 
+/**
+ * A value static evaluation (`staticCondition`) doesn't know, with its
+ * truthiness when that is known anyway (`unknown || true` is truthy).
+ */
+class Unknown {
+  constructor(readonly truthy?: boolean) {}
+}
+
+/** Contexts an expression may name; static evaluation knows only some. */
+const NAMED_CONTEXTS = new Set([
+  'env',
+  'inputs',
+  'secrets',
+  'steps',
+  'github',
+  'matrix',
+  'needs',
+  'job',
+  'runner',
+  'vars',
+  'strategy'
+]);
+
+/** Truthiness of a (possibly Unknown) value; undefined when unknown. */
+function truthOf(value: unknown): boolean | undefined {
+  return value instanceof Unknown ? value.truthy : toBoolean(unwrap(value));
+}
+
 class Parser {
   private pos = 0;
 
@@ -493,7 +521,9 @@ class Parser {
     private tokens: Token[],
     private ctx: ExpressionContext,
     private scope?: ExpressionScope,
-    private flow = false
+    private flow = false,
+    /** Static evaluation: only these contexts are known (see Unknown). */
+    private known?: Record<string, unknown>
   ) {}
 
   private peek(): Token {
@@ -530,6 +560,16 @@ class Parser {
     while (this.isOp('||')) {
       this.next();
       const right = this.parseAnd();
+      if (this.known) {
+        const l = truthOf(left);
+        left =
+          l === true
+            ? left
+            : l === false
+              ? right
+              : new Unknown(truthOf(right) === true ? true : undefined);
+        continue;
+      }
       left = this.flow
         ? Flow.union(left, right)
         : toBoolean(unwrap(left))
@@ -544,6 +584,16 @@ class Parser {
     while (this.isOp('&&')) {
       this.next();
       const right = this.parseEquality();
+      if (this.known) {
+        const l = truthOf(left);
+        left =
+          l === false
+            ? left
+            : l === true
+              ? right
+              : new Unknown(truthOf(right) === false ? false : undefined);
+        continue;
+      }
       left = this.flow
         ? Flow.union(left, right)
         : toBoolean(unwrap(left))
@@ -558,6 +608,10 @@ class Parser {
     while (this.isOp('==', '!=')) {
       const op = (this.next() as { value: string }).value;
       const right = this.parseComparison();
+      if (left instanceof Unknown || right instanceof Unknown) {
+        left = new Unknown();
+        continue;
+      }
       const eq = looseEquals(unwrap(left), unwrap(right));
       left = op === '==' ? eq : !eq;
     }
@@ -569,6 +623,10 @@ class Parser {
     while (this.isOp('<', '<=', '>', '>=')) {
       const op = (this.next() as { value: string }).value;
       const right = this.parseUnary();
+      if (left instanceof Unknown || right instanceof Unknown) {
+        left = new Unknown();
+        continue;
+      }
       const c = compare(unwrap(left), unwrap(right));
       left =
         !Number.isNaN(c) &&
@@ -586,7 +644,13 @@ class Parser {
   private parseUnary(): unknown {
     if (this.isOp('!')) {
       this.next();
-      return !toBoolean(unwrap(this.parseUnary()));
+      const operand = this.parseUnary();
+      if (operand instanceof Unknown) {
+        return new Unknown(
+          operand.truthy === undefined ? undefined : !operand.truthy
+        );
+      }
+      return !toBoolean(unwrap(operand));
     }
     return this.parsePostfix(this.parsePrimary());
   }
@@ -611,10 +675,15 @@ class Parser {
           value = this.access(value, STAR);
         } else {
           const key = unwrap(this.parseOr());
-          value = this.access(
-            value,
-            typeof key === 'number' || key instanceof Flow ? key : toText(key)
-          );
+          value =
+            key instanceof Unknown
+              ? new Unknown()
+              : this.access(
+                  value,
+                  typeof key === 'number' || key instanceof Flow
+                    ? key
+                    : toText(key)
+                );
         }
         this.expect('rbracket');
       } else {
@@ -634,6 +703,12 @@ class Parser {
       return value.member(
         key === STAR || key instanceof Flow ? '*' : String(key).toLowerCase()
       );
+    }
+    if (this.known) {
+      if (value instanceof Unknown) return new Unknown();
+      const result =
+        key === STAR ? star(value) : member(value, key as string | number);
+      return result === undefined ? new Unknown() : result;
     }
     if (key === STAR) return star(value);
     return member(value, key as string | number);
@@ -671,6 +746,7 @@ class Parser {
             return undefined;
           }
           if (this.flow) return flowCall(tok.value, args);
+          if (this.known) return this.staticCall(tok.value, args);
           return callFunction(tok.value, args, this.ctx);
         }
         if (this.scope) {
@@ -680,11 +756,35 @@ class Parser {
           return undefined;
         }
         if (this.flow) return new Flow([[lower]]);
+        if (this.known) {
+          if (!NAMED_CONTEXTS.has(lower)) {
+            throw new Error(`Unrecognized named-value: '${tok.value}'`);
+          }
+          return lower in this.known ? this.known[lower] : new Unknown();
+        }
         return rootContext(lower, this.ctx);
       }
       default:
         throw new Error(`Unexpected token: ${tok.type}`);
     }
+  }
+
+  /**
+   * A function call in static evaluation: `success()` and `always()` hold
+   * for a step that runs at all; other status functions, `hashFiles` and
+   * calls with an unknown argument are unknown.
+   */
+  private staticCall(name: string, args: unknown[]): unknown {
+    checkCall(name, args.length);
+    const lower = name.toLowerCase();
+    if (lower === 'success' || lower === 'always') return true;
+    if (
+      ['failure', 'cancelled', 'hashfiles'].includes(lower) ||
+      args.some((arg) => arg instanceof Unknown)
+    ) {
+      return new Unknown();
+    }
+    return callFunction(name, args, this.ctx);
   }
 }
 
@@ -793,6 +893,32 @@ export function evaluateCondition(
   // An expression that can't be evaluated is an error, as on GitHub (where
   // it fails the step or job), never a condition that passes.
   return toBoolean(evaluate(trimmed, ctx));
+}
+
+/**
+ * Whether an `if:` holds when only the `known` contexts are known, e.g.
+ * `{ github: { event_name: 'push' } }`: true or false when that settles
+ * it, undefined when it depends on anything else (or can't be parsed).
+ * Used to check a contract without running the workflow.
+ */
+export function staticCondition(
+  expr: string | boolean | undefined,
+  known: Record<string, unknown>
+): boolean | undefined {
+  if (expr === undefined || typeof expr === 'boolean') return expr ?? true;
+  let trimmed = expr.trim();
+  const wrapped = trimmed.match(/^\$\{\{([\s\S]*)\}\}$/);
+  if (wrapped) trimmed = wrapped[1].trim();
+  if (trimmed === '') return true;
+  try {
+    return truthOf(
+      new Parser(tokenize(trimmed), createContext(), undefined, false, {
+        ...known
+      }).parse()
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 /** The error for an `if:` that couldn't be evaluated, worded like GitHub's. */

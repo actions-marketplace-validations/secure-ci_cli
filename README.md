@@ -254,18 +254,24 @@ things to know:
 
 - **Linux containers only.** `windows-*` / `macos-*` jobs run in a Linux image
   with a warning.
-- **Jobs running in parallel share your working copy.** Each job has its own
-  container, but every job mounts the same directory, so jobs that write the
-  same files (e.g. `node_modules`) can collide; use `--parallel 1` to run jobs
-  one after another.
+- **Jobs running in parallel share your working copy** by default. Each job has
+  its own container, but every job mounts the same directory, so jobs that
+  write the same files (e.g. `node_modules`) can collide; pass
+  `--isolate-workspace` to give each job its own copy, or `--parallel 1` to run
+  jobs one after another.
 - **`actions/checkout` of the current repo doesn't clone** — it uses your working
-  copy as-is (so uncommitted changes are visible); `ref:`/`fetch-depth:` are
-  ignored. Other repositories check out for real and need a token.
+  copy as-is (so uncommitted changes are visible). A `ref:` your local
+  repository has is checked out only into a `path:`; other refs and
+  `fetch-depth:` don't change what you get. Other repositories check out for
+  real and need a token.
 - **Artifacts and cache are local stand-ins**, stored under `~/.secureci/`;
   nothing is uploaded to or downloaded from GitHub.
-- **Contract checks** don't evaluate `if:` conditions and, without
-  `--contract-recurse all`, don't look inside _remote_ composite actions /
-  reusable workflows.
+- **Not emulated:** `concurrency:` (noted at run start), deployment
+  `environment:` (protection rules and environment-scoped secrets/vars: pass
+  them with `--secret`/`--var`), and OIDC tokens for `id-token: write`.
+- **Contract checks** decide `if:` conditions only from the workflow's triggers
+  (`github.event_name`) and, without `--contract-recurse all`, don't look inside
+  _remote_ composite actions / reusable workflows.
 
 The exact scope of each is documented in
 [DOCS.md](DOCS.md#contract-limitations-v1-scope).

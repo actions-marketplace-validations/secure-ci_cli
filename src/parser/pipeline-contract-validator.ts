@@ -16,6 +16,7 @@ import { repositoryRoot } from '../utils/repository';
 import { fetchAction, fetchRepoFile } from '../runner/action-fetcher';
 import { findLockfile, readLockfile } from '../github-lockfile';
 import { contractPermissionErrors } from './permissions';
+import { staticCondition } from '../runner/expression';
 
 /**
  * Which composite actions / reusable workflows to look inside: none, local
@@ -35,9 +36,19 @@ interface UsageEntry {
   path: string;
   name: string;
   version?: string;
-  /** The step, or a job/step enclosing it, has an `if:` and may not run. */
-  conditional: boolean;
+  /**
+   * Whether the step runs, from the `if:` on it and the jobs/steps
+   * enclosing it, for the workflow's triggers: always, never, or maybe.
+   */
+  runs: 'always' | 'maybe' | 'never';
 }
+
+/**
+ * Whether something runs, per trigger of the workflow (one slot when the
+ * event isn't known): true, false, or undefined when it depends on more
+ * than the event.
+ */
+type Runs = (boolean | undefined)[];
 
 interface JobNode {
   /** Display name, e.g. `build` or `release > ./.github/workflows/r.yml > ship`. */
@@ -55,6 +66,8 @@ interface JobNode {
  */
 interface PipelineGraph {
   sequence: UsageEntry[];
+  /** The workflow's triggers, when `if:` conditions were decided by them. */
+  events?: string[];
   nodes: Map<string, JobNode>;
   errors: ValidationError[];
 }
@@ -113,8 +126,17 @@ export async function validatePipelineContract(
   (spec.required ?? []).forEach((entry, idx) => {
     const path = `required[${idx}]`;
     const name = normalizeActionName(entry.uses);
-    const candidates = sequence.filter((u) => u.name === name);
-    if (candidates.length > 0 && candidates.every((c) => c.conditional)) {
+    const found = sequence.filter((u) => u.name === name);
+    const candidates = found.filter((u) => u.runs !== 'never');
+    if (found.length > 0 && candidates.length === 0) {
+      errors.push({
+        path,
+        message: `Required action "${entry.uses}" never runs: its if: conditions (on its step or job) can't be true for this workflow's triggers (${(graph.events ?? []).join(', ')})`,
+        severity: 'error'
+      });
+      return;
+    }
+    if (candidates.length > 0 && candidates.every((c) => c.runs === 'maybe')) {
       errors.push({
         path,
         message: `Required action "${entry.uses}" only runs under an if: condition (on its step or job), so it may be skipped`,
@@ -343,6 +365,21 @@ async function buildGraph(
   const graph: PipelineGraph = { sequence: [], nodes: new Map(), errors: [] };
   const root = repositoryRoot(parsed.path);
 
+  // `if:` conditions are decided, where they can be, for each trigger of
+  // the workflow (called workflows run with their caller's event). With
+  // workflow_call, the event is the caller's, so it isn't known.
+  graph.events = triggerEvents(parsed.file.on);
+  const known: Record<string, unknown>[] = graph.events
+    ? graph.events.map((event) => ({ github: { event_name: event } }))
+    : [{}];
+  /** `runs`, narrowed by a job or step's own `if:`. */
+  const within = (runs: Runs, condition: string | boolean | undefined): Runs =>
+    runs.map((outer, i) => {
+      const own = staticCondition(condition, known[i]);
+      if (outer === false || own === false) return false;
+      return outer === true && own === true ? true : undefined;
+    });
+
   const isLocal = (uses: string) =>
     uses.startsWith('./') || uses.startsWith('../');
 
@@ -440,13 +477,17 @@ async function buildGraph(
     index: number,
     at: string,
     uses: string,
-    conditional: boolean
+    runs: Runs
   ): void => {
     graph.sequence.push({
       node,
       index,
       path: at,
-      conditional,
+      runs: runs.every((r) => r === false)
+        ? 'never'
+        : runs.every((r) => r === true)
+          ? 'always'
+          : 'maybe',
       ...splitActionRef(uses)
     });
   };
@@ -459,7 +500,7 @@ async function buildGraph(
     counter: { next: number },
     stack: string[],
     workflowRoot: string,
-    conditional: boolean
+    runs: Runs
   ): Promise<void> => {
     for (const [i, step] of steps.entries()) {
       const stepPath = `${at}steps[${i}]`;
@@ -467,8 +508,8 @@ async function buildGraph(
         counter.next++;
         continue;
       }
-      const stepConditional = conditional || hasCondition(step.if);
-      addUsage(node, counter.next++, stepPath, step.uses, stepConditional);
+      const stepRuns = within(runs, step.if);
+      addUsage(node, counter.next++, stepPath, step.uses, stepRuns);
       const file = await resolveRef(
         step.uses,
         'action',
@@ -485,7 +526,7 @@ async function buildGraph(
           counter,
           [...stack, file],
           workflowRoot,
-          stepConditional
+          stepRuns
         );
       }
     }
@@ -504,7 +545,7 @@ async function buildGraph(
     at: string,
     after: string[],
     stack: string[],
-    conditional: boolean
+    runs: Runs
   ): Promise<string[]> => {
     const added: string[] = [];
     // A job id -> the graph nodes standing for it (a reusable-workflow call
@@ -525,11 +566,11 @@ async function buildGraph(
       });
       added.push(node);
       const jobPath = `${at}jobs.${jobId}`;
-      const jobConditional = conditional || hasCondition(job.if);
+      const jobRuns = within(runs, job.if);
 
       if (job.uses) {
         // The call itself is a one-step "job" its called jobs run after.
-        addUsage(node, 0, jobPath, job.uses, jobConditional);
+        addUsage(node, 0, jobPath, job.uses, jobRuns);
         (graph.nodes.get(node) as JobNode).length = 1;
         const ids = [node];
         const file = await resolveRef(
@@ -550,7 +591,7 @@ async function buildGraph(
                 `${jobPath} > ${job.uses} > `,
                 [...needs, node],
                 [...stack, file],
-                jobConditional
+                jobRuns
               ))
             );
           }
@@ -569,7 +610,7 @@ async function buildGraph(
         counter,
         stack,
         workflowRoot,
-        jobConditional
+        jobRuns
       );
       (graph.nodes.get(node) as JobNode).length = counter.next;
     }
@@ -584,24 +625,28 @@ async function buildGraph(
     '',
     [],
     [path.resolve(parsed.path)],
-    false
+    known.map(() => true)
   );
   return graph;
 }
 
 /**
- * Whether an `if:` can skip the step/job: anything but a missing value,
- * `true`, `success()` (the default) or `always()`.
+ * The events that trigger a workflow (`on:` as a string, list or map), or
+ * undefined when the event isn't known: none are listed, or the workflow
+ * is reusable (it runs with its caller's event).
  */
-function hasCondition(condition: unknown): boolean {
-  if (condition === undefined || condition === null || condition === true) {
-    return false;
-  }
-  const text = String(condition)
-    .trim()
-    .replace(/^\$\{\{([\s\S]*)\}\}$/, '$1')
-    .trim();
-  return !['', 'true', 'success()', 'always()'].includes(text);
+function triggerEvents(on: unknown): string[] | undefined {
+  const events =
+    typeof on === 'string'
+      ? [on]
+      : Array.isArray(on)
+        ? on.map(String)
+        : on && typeof on === 'object'
+          ? Object.keys(on)
+          : [];
+  return events.length === 0 || events.includes('workflow_call')
+    ? undefined
+    : events;
 }
 
 function splitActionRef(uses: string): { name: string; version?: string } {
