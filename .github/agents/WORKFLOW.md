@@ -348,3 +348,12 @@ exists on a different commit, so pick a version that has no tag yet.
 `secureci init workflow` emits `secure-ci/cli@v<version>` and, by default,
 pins it to that tag's commit, so each release tag must exist for the workflows
 it generates to resolve and be pinned.
+
+### Website docs (secure-ci.dev/docs)
+
+After a release that changes `README.md` or `DOCS.md`, the website's
+`docs.html` (in `secure-ci/website`) is regenerated from them. When you
+regenerate it, keep `<script src="/assets/first-touch.js" defer></script>`
+before `</body>`: it records the visit's first page for signup attribution.
+The website build fails without it. See the website README's "Signup data"
+section.
