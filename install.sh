@@ -16,7 +16,7 @@
 # installs it as `secureci`. It never uses sudo.
 #
 # Environment variables:
-#   SECURECI_VERSION              release to install, e.g. 1.1.0 (default: latest)
+#   SECURECI_VERSION              release to install, e.g. 1.2.0 (default: latest)
 #   SECURECI_INSTALL_DIR          where to put `secureci` (default: ~/.local/bin)
 #   SECURECI_REQUIRE_ATTESTATION  1 = fail unless gh verifies build provenance
 #   SECURECI_DOWNLOAD_BASE        releases URL, for mirrors and tests

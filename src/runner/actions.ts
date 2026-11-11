@@ -354,7 +354,9 @@ export async function executeAction(
       options.localCheckout !== false &&
       isLocalCheckout(step.uses, step.with, callerCtx)
     ) {
-      return localCheckout(step, callerCtx, runtime, startTime);
+      return localCheckout(step, callerCtx, runtime, startTime, {
+        fetchRefs: options.fetchRefs
+      });
     }
 
     const builtin = builtinActionFor(step.uses);

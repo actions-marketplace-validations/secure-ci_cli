@@ -16,7 +16,7 @@ import { repositoryRoot } from '../utils/repository';
 import { fetchAction, fetchRepoFile } from '../runner/action-fetcher';
 import { findLockfile, readLockfile } from '../github-lockfile';
 import { contractPermissionErrors } from './permissions';
-import { staticCondition } from '../runner/expression';
+import { staticCondition, knownPrefix } from '../runner/expression';
 
 /**
  * Which composite actions / reusable workflows to look inside: none, local
@@ -370,7 +370,7 @@ async function buildGraph(
   // workflow_call, the event is the caller's, so it isn't known.
   graph.events = triggerEvents(parsed.file.on);
   const known: Record<string, unknown>[] = graph.events
-    ? graph.events.map((event) => ({ github: { event_name: event } }))
+    ? graph.events.map((event) => triggerFacts(parsed.file.on, event))
     : [{}];
   /** `runs`, narrowed by a job or step's own `if:`. */
   const within = (runs: Runs, condition: string | boolean | undefined): Runs =>
@@ -647,6 +647,113 @@ function triggerEvents(on: unknown): string[] | undefined {
   return events.length === 0 || events.includes('workflow_call')
     ? undefined
     : events;
+}
+
+/** Characters that make a branch/tag filter pattern a glob. */
+const GLOB_CHARS = /[*?+[\]]/;
+
+/** The literal text a filter pattern starts with (before any glob). */
+function literalStart(pattern: string): string {
+  const at = pattern.search(GLOB_CHARS);
+  return at === -1 ? pattern : pattern.slice(0, at);
+}
+
+/** Longest common prefix of `values` ('' for none). */
+function commonPrefix(values: string[]): string {
+  if (values.length === 0) return '';
+  let prefix = values[0];
+  for (const value of values.slice(1)) {
+    while (!value.startsWith(prefix)) prefix = prefix.slice(0, -1);
+  }
+  return prefix;
+}
+
+/**
+ * `github.ref` / `github.ref_name` for a ref under `kind` (`refs/heads/`
+ * or `refs/tags/`) matching the positive `patterns`: exact for a single
+ * literal pattern, else known by prefix. `!negations` only narrow further.
+ */
+function refFromPatterns(
+  kind: string,
+  patterns: unknown
+): Record<string, unknown> {
+  const positive = (Array.isArray(patterns) ? patterns : [])
+    .map(String)
+    .filter((p) => !p.startsWith('!'));
+  if (positive.length === 1 && !GLOB_CHARS.test(positive[0])) {
+    return { ref: kind + positive[0], ref_name: positive[0] };
+  }
+  const start = commonPrefix(positive.map(literalStart));
+  return { ref: knownPrefix(kind + start), ref_name: knownPrefix(start) };
+}
+
+/**
+ * What a workflow's `on.<event>` filters tell about `github.ref`: a push
+ * filtered only by branches (or only by tags) runs only for those refs;
+ * pull_request runs on `refs/pull/<n>/merge`; pull_request_target on the
+ * base branch, which its `branches:` filter matches. Unfiltered pushes and
+ * other events leave the ref unknown.
+ */
+function refFacts(event: string, config: unknown): Record<string, unknown> {
+  const filters =
+    config && typeof config === 'object' && !Array.isArray(config)
+      ? (config as Record<string, unknown>)
+      : {};
+  const has = (key: string) => key in filters;
+  const branchFilter = has('branches') || has('branches-ignore');
+  const tagFilter = has('tags') || has('tags-ignore');
+  if (event === 'push') {
+    if (branchFilter && !tagFilter) {
+      return refFromPatterns('refs/heads/', filters.branches);
+    }
+    if (tagFilter && !branchFilter) {
+      return refFromPatterns('refs/tags/', filters.tags);
+    }
+    return {};
+  }
+  if (event === 'pull_request') return { ref: knownPrefix('refs/pull/') };
+  if (event === 'pull_request_target') {
+    return refFromPatterns('refs/heads/', filters.branches);
+  }
+  return {};
+}
+
+/**
+ * What's known about one trigger of a workflow for static `if:` checks:
+ * `github.event_name`, `github.ref` / `ref_name` where its filters pin
+ * them, and `inputs.*`. Inputs are empty on events other than
+ * workflow_dispatch, so a declared dispatch input is null there; on
+ * workflow_dispatch only a choice with a single option is known (a
+ * `default` can be overridden by whoever dispatches).
+ */
+function triggerFacts(on: unknown, event: string): Record<string, unknown> {
+  const config =
+    on && typeof on === 'object' && !Array.isArray(on)
+      ? (on as Record<string, unknown>)[event]
+      : undefined;
+  const dispatch =
+    on && typeof on === 'object' && !Array.isArray(on)
+      ? (on as Record<string, { inputs?: Record<string, unknown> } | null>)
+          .workflow_dispatch
+      : undefined;
+  const declared = Object.entries(dispatch?.inputs ?? {});
+  const inputs: Record<string, unknown> = {};
+  for (const [name, spec] of declared) {
+    const input = (spec ?? {}) as { type?: unknown; options?: unknown };
+    if (event !== 'workflow_dispatch') {
+      inputs[name] = null;
+    } else if (
+      input.type === 'choice' &&
+      Array.isArray(input.options) &&
+      input.options.length === 1
+    ) {
+      inputs[name] = String(input.options[0]);
+    }
+  }
+  return {
+    github: { event_name: event, ...refFacts(event, config) },
+    ...(declared.length > 0 ? { inputs } : {})
+  };
 }
 
 function splitActionRef(uses: string): { name: string; version?: string } {

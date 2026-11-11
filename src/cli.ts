@@ -74,6 +74,7 @@ import {
   setConfigValue,
   unsetConfigValue,
   resolveIsolateWorkspace,
+  resolveConcurrency,
   resolveNetworkDisabled,
   getDefaultParallel,
   CONFIG_KEYS
@@ -194,6 +195,14 @@ program
     '--no-local-checkout',
     'Run the real actions/checkout for this repository instead of using the working copy'
   )
+  .option(
+    '--fetch-refs',
+    "Fetch an actions/checkout ref: the local repository doesn't have (e.g. refs/pull/N/merge) from origin into its path: copy. Uses your git credentials, or GITHUB_TOKEN for the server's own host. Off by default: a run doesn't touch the network for checkouts"
+  )
+  .option(
+    '--registry-login',
+    'Pull job and service container images that set credentials: with them: a temporary login, removed right after the pull, with the password on stdin and masked in logs. Off by default: credentials: are warned about and your own docker login is used'
+  )
   .addOption(
     new Option(
       '--container-runtime <name>',
@@ -235,6 +244,10 @@ program
     '--parallel <n>',
     'Run up to this many jobs (and matrix combinations) at once; 1 runs them one after another. Default: the number of CPUs. Config: parallel',
     String(defaultParallel)
+  )
+  .option(
+    '--concurrency <mode>',
+    'How jobs sharing a concurrency: group run: serialize (one at a time, all of them) or github (also cancel as GitHub does: one pending per group, newer pending replaces older, cancel-in-progress). Default: serialize. Config: concurrency'
   )
   .action(async (file: string, options) => {
     if (configError) {
@@ -296,6 +309,7 @@ program
         fromEnv: process.env
       });
       const parallel = parseParallel(options.parallel);
+      const concurrency = resolveConcurrency(options.concurrency, globalConfig);
 
       const result = await executeWorkflow(file, {
         dryRun: false,
@@ -308,6 +322,8 @@ program
         job: options.job,
         matrix,
         localCheckout: options.localCheckout,
+        fetchRefs: options.fetchRefs === true,
+        registryLogin: options.registryLogin === true,
         offline: options.offline,
         verbose: program.opts().verbose,
         containerRuntime: options.containerRuntime,
@@ -323,6 +339,7 @@ program
           globalConfig
         ),
         parallel,
+        concurrency,
         isolateWorkspace: resolveIsolateWorkspace(
           options.isolateWorkspace,
           globalConfig

@@ -11,7 +11,9 @@ import {
 import {
   resolveContainerRuntime,
   ContainerRuntime,
-  ContainerStartOptions
+  ContainerStartOptions,
+  CONTAINER_WORKDIR,
+  registryOf
 } from './container-runtime';
 import { JobRuntime } from './job-runtime';
 import { splitArgs } from './shell';
@@ -141,6 +143,20 @@ export async function startJobContainer(
       ? jobContainerExtras(spec, ctx, options, runtime.workspace)
       : {};
   if (!extras) return false;
+  if (
+    specImage &&
+    spec &&
+    !(await pullWithCredentials(
+      `jobs.${ctx.github.job ?? '<id>'}.container`,
+      image,
+      spec.credentials,
+      ctx,
+      options,
+      containerRuntime
+    ))
+  ) {
+    return false;
+  }
   const exchangeDir = fs.mkdtempSync(path.join(runDir, 'container-'));
   fs.chmodSync(exchangeDir, 0o777);
   fs.copyFileSync(runtime.eventPath, path.join(exchangeDir, 'event.json'));
@@ -223,11 +239,6 @@ function jobContainerExtras(
       return undefined;
     }
   }
-  if (spec.credentials) {
-    logger.warn(
-      `${label}: credentials are ignored; log in with \`docker login\` instead.`
-    );
-  }
   return {
     extraArgs: kept,
     ports: (spec.ports ?? []).map((port) =>
@@ -235,6 +246,51 @@ function jobContainerExtras(
     ),
     volumes
   };
+}
+
+/**
+ * `credentials:` of a job or service container. Without --registry-login
+ * they're only warned about. With it, the image is pulled with them first
+ * (a private, temporary login: see ContainerRuntime.pull), and the
+ * password is masked in the logs. False (the job fails) when they're
+ * incomplete or the pull fails.
+ */
+async function pullWithCredentials(
+  label: string,
+  image: string,
+  credentials: Record<string, string> | undefined,
+  ctx: ExpressionContext,
+  options: RunOptions,
+  runtime: ContainerRuntime
+): Promise<boolean> {
+  if (!credentials) return true;
+  if (!options.registryLogin) {
+    logger.warn(
+      `${label}: credentials are ignored; pass --registry-login to log in for this run, or log in with \`docker login\`.`
+    );
+    return true;
+  }
+  const username = substituteExpressions(
+    String(credentials.username ?? ''),
+    ctx
+  ).trim();
+  const password = substituteExpressions(
+    String(credentials.password ?? ''),
+    ctx
+  );
+  logger.registerSecrets({ password });
+  if (!username || !password) {
+    logger.error(`${label}: credentials need a username and a password.`);
+    return false;
+  }
+  const registry = registryOf(image);
+  logger.info(`${label}: pulling ${image} with credentials for ${registry}`);
+  const pulled = await runtime.pull(image, { registry, username, password });
+  if (!pulled.success) {
+    logger.error(`${label}: couldn't pull ${image}: ${pulled.error}`);
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -276,6 +332,66 @@ export function runnerImage(
     );
   }
   return fallback;
+}
+
+/**
+ * Empty a job's --isolate-workspace copy from inside its container, as
+ * root, before the container is stopped: files a step created as root
+ * (rootful engines) can't always be removed by the host user afterwards.
+ * Removing them from inside works with rootful and rootless engines alike
+ * (a chown back would map to a subordinate uid when rootless). `.git` is
+ * mounted read-only, so it's left for the host to remove. Only ever call
+ * this for an isolated copy, never for the user's working copy.
+ */
+export async function clearIsolatedWorkspace(
+  runtime: JobRuntime
+): Promise<void> {
+  const container = runtime.container;
+  if (!container) return;
+  const result = await container.runtime.exec(container.id, {
+    args: [
+      'find',
+      CONTAINER_WORKDIR,
+      '-mindepth',
+      '1',
+      '-maxdepth',
+      '1',
+      '!',
+      '-name',
+      '.git',
+      '-exec',
+      'rm',
+      '-rf',
+      '--',
+      '{}',
+      '+'
+    ],
+    user: '0',
+    workingDir: '/'
+  });
+  if (!result.success) {
+    logger.debug(
+      `Couldn't empty the workspace copy in the job container: ${result.stderr.trim()}`
+    );
+  }
+}
+
+/**
+ * Remove `containerPath` from inside the job's container, as root, so a
+ * copy holding files a step created as root can then be removed on the
+ * host. No-op without a container.
+ */
+export async function removeInContainer(
+  runtime: JobRuntime,
+  containerPath: string
+): Promise<void> {
+  const container = runtime.container;
+  if (!container) return;
+  await container.runtime.exec(container.id, {
+    args: ['rm', '-rf', '--', containerPath],
+    user: '0',
+    workingDir: '/'
+  });
 }
 
 export async function stopJobContainer(runtime: JobRuntime): Promise<void> {
@@ -367,12 +483,19 @@ export async function startJobServices(
         return false;
       }
     }
-    if (service.credentials) {
-      logger.warn(
-        `services.${serviceId}: credentials are ignored; log in with \`docker login\` instead.`
-      );
-    }
     const image = substituteExpressions(service.image, ctx);
+    if (
+      !(await pullWithCredentials(
+        `services.${serviceId}`,
+        image,
+        service.credentials,
+        ctx,
+        options,
+        containerRuntime
+      ))
+    ) {
+      return false;
+    }
     logger.info(`Starting service ${serviceId}: ${image}`);
     const started = await containerRuntime.start({
       image,

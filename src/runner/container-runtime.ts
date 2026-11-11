@@ -127,6 +127,8 @@ export interface ContainerExecInOptions {
   env?: Record<string, string>;
   /** Path inside the container. Default: the mounted workspace. */
   workingDir?: string;
+  /** User to exec as (`-u`), e.g. `0` for cleanup. Default: the image's. */
+  user?: string;
   timeoutMs?: number;
 }
 
@@ -162,12 +164,40 @@ export interface ContainerRuntime {
   health(id: string): Promise<string>;
   /** Published ports: container port -> host port. */
   ports(id: string): Promise<Record<string, string>>;
+  /**
+   * Pull `image` with registry credentials (`container.credentials`):
+   * log in to a private, temporary config (password on stdin), pull, and
+   * remove the config, so the credentials never outlive the pull.
+   */
+  pull(
+    image: string,
+    auth: RegistryAuth
+  ): Promise<{ success: boolean; error?: string }>;
   /** Build an image from a Dockerfile directory, for Docker-type actions. */
   build(
     contextDir: string,
     tag: string,
     dockerfile?: string
   ): Promise<ContainerBuildResult>;
+}
+
+/** Credentials for one registry, from `credentials:` in a workflow. */
+export interface RegistryAuth {
+  registry: string;
+  username: string;
+  password: string;
+}
+
+/**
+ * The registry an image reference pulls from: its first path component
+ * when that names a host (has a `.` or `:`, or is `localhost`), else
+ * Docker Hub.
+ */
+export function registryOf(image: string): string {
+  const slash = image.indexOf('/');
+  if (slash === -1) return 'docker.io';
+  const first = image.slice(0, slash);
+  return /[.:]/.test(first) || first === 'localhost' ? first : 'docker.io';
 }
 
 export const CONTAINER_WORKDIR = '/secureci-workspace';
@@ -391,6 +421,7 @@ class CliContainerRuntime implements ContainerRuntime {
       'exec',
       '-w',
       options.workingDir || CONTAINER_WORKDIR,
+      ...(options.user ? ['-u', options.user] : []),
       ...env.args
     ];
     if (options.args) {
@@ -467,10 +498,73 @@ class CliContainerRuntime implements ContainerRuntime {
     }
   }
 
+  async pull(
+    image: string,
+    auth: RegistryAuth
+  ): Promise<{ success: boolean; error?: string }> {
+    const invalid = invalidImageReason(image);
+    if (invalid) return { success: false, error: invalid };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-auth-'));
+    fs.chmodSync(dir, 0o700);
+    try {
+      const clientEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (this.name === 'podman') {
+        clientEnv.REGISTRY_AUTH_FILE = path.join(dir, 'auth.json');
+      } else {
+        clientEnv.DOCKER_CONFIG = dir;
+        // A docker context lives in the user's config dir: pin its
+        // endpoint so the private config dir talks to the same engine.
+        if (this.name === 'docker' && !process.env.DOCKER_HOST) {
+          const context = await this.runCli([
+            'context',
+            'inspect',
+            '--format',
+            '{{.Endpoints.docker.Host}}'
+          ]);
+          const host = context.stdout.trim();
+          if (context.success && host) clientEnv.DOCKER_HOST = host;
+        }
+      }
+      const transport: EnvTransport = {
+        args: [],
+        clientEnv,
+        cleanup: () => {}
+      };
+      const login = await this.runCli(
+        [
+          'login',
+          '--username',
+          auth.username,
+          '--password-stdin',
+          auth.registry
+        ],
+        undefined,
+        transport,
+        auth.password
+      );
+      if (!login.success) {
+        return {
+          success: false,
+          error: `login to ${auth.registry} failed: ${login.stderr.trim() || `exit code ${login.exitCode}`}`
+        };
+      }
+      const pulled = await this.runCli(['pull', image], undefined, transport);
+      return pulled.success
+        ? { success: true }
+        : {
+            success: false,
+            error: pulled.stderr.trim() || `exit code ${pulled.exitCode}`
+          };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   private runCli(
     args: string[],
     timeoutMs?: number,
-    env?: EnvTransport
+    env?: EnvTransport,
+    input?: string
   ): Promise<ContainerExecResult> {
     const startTime = Date.now();
     return new Promise<ContainerExecResult>((resolve) => {
@@ -481,6 +575,7 @@ class CliContainerRuntime implements ContainerRuntime {
         env?.cleanup();
         throw err;
       }
+      if (input !== undefined) child.stdin.end(input);
       let stdout = '';
       let stderr = '';
       let timedOut = false;

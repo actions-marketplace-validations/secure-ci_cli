@@ -173,6 +173,30 @@ describe('config', () => {
     });
   });
 
+  describe('concurrency (#90)', () => {
+    it('is a config key: serialize or github', async () => {
+      const { isValidConfigKey, parseConfigValue, resolveConcurrency } =
+        await import('./config');
+      expect(isValidConfigKey('concurrency')).toBe(true);
+      expect(parseConfigValue('concurrency', 'github')).toBe('github');
+      expect(() => parseConfigValue('concurrency', 'off')).toThrow(
+        /Invalid value "off" for concurrency/
+      );
+      expect(resolveConcurrency(undefined, {})).toBe('serialize');
+      expect(resolveConcurrency(undefined, { concurrency: 'github' })).toBe(
+        'github'
+      );
+      expect(resolveConcurrency('serialize', { concurrency: 'github' })).toBe(
+        'serialize'
+      );
+      expect(() =>
+        resolveConcurrency(undefined, {
+          concurrency: 'nope' as 'github'
+        })
+      ).toThrow(/Invalid value "nope" for concurrency/);
+    });
+  });
+
   describe('isolate-workspace', () => {
     it('is a config key parsed as a strict boolean', async () => {
       const { isValidConfigKey, parseConfigValue } = await import('./config');

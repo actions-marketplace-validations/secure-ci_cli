@@ -282,6 +282,17 @@ export interface RunOptions {
   isolateWorkspace?: boolean;
   /** Use only cached remote actions; never download. */
   offline?: boolean;
+  /**
+   * Fetch an `actions/checkout` `ref:` the local repository doesn't have
+   * from origin into its `path:` copy (`--fetch-refs`). Default: false.
+   */
+  fetchRefs?: boolean;
+  /**
+   * Pull job and service container images that set `credentials:` with
+   * them, through a temporary login removed right after the pull
+   * (`--registry-login`). Default: false (credentials are warned about).
+   */
+  registryLogin?: boolean;
   /** `github.run_id`, shared by every job and called workflow of a run. */
   runId?: string;
   /**
@@ -289,6 +300,12 @@ export interface RunOptions {
    * Default: 1, one job after another.
    */
   parallel?: number;
+  /**
+   * How job-level `concurrency:` groups apply (`--concurrency`): `serialize`
+   * (default) runs a group's jobs one at a time; `github` also cancels as
+   * GitHub does (one pending per group, `cancel-in-progress`).
+   */
+  concurrency?: 'serialize' | 'github';
 }
 
 export interface StepResult {

@@ -939,6 +939,118 @@ describe('validatePipelineContract', () => {
       ]);
     });
 
+    describe('github.ref and inputs facts from the triggers (#90)', () => {
+      const scanIf = (on: ParsedWorkflow['file']['on'], condition: string) =>
+        onEvents(on, {
+          build: {
+            'runs-on': 'ubuntu-latest',
+            steps: [{ uses: 'org/security-scan@v1', if: condition }]
+          }
+        });
+      const neverRuns = expect.objectContaining({
+        severity: 'error',
+        message: expect.stringContaining('never runs')
+      });
+      const maySkip = expect.objectContaining({
+        severity: 'warning',
+        message: expect.stringContaining('may be skipped')
+      });
+
+      it.each([
+        [
+          'push.branches: [main] pins github.ref',
+          { push: { branches: ['main'] } },
+          "github.ref == 'refs/heads/main'",
+          []
+        ],
+        [
+          'push.branches: [main] pins github.ref_name',
+          { push: { branches: ['main'] } },
+          "github.ref_name == 'main'",
+          []
+        ],
+        [
+          'a branch the trigger excludes',
+          { push: { branches: ['main'] } },
+          "github.ref == 'refs/heads/release'",
+          [neverRuns]
+        ],
+        [
+          'tags-only push and a branch condition',
+          { push: { tags: ['v*'] } },
+          "github.ref == 'refs/heads/main'",
+          [neverRuns]
+        ],
+        [
+          'tags-only push and a tag-prefix condition',
+          { push: { tags: ['v*', 'release-*'] } },
+          "startsWith(github.ref, 'refs/tags/')",
+          []
+        ],
+        [
+          'pull_request and a branch condition',
+          { pull_request: {} },
+          "github.ref == 'refs/heads/main'",
+          [neverRuns]
+        ],
+        [
+          'several branches: not decided',
+          { push: { branches: ['main', 'release'] } },
+          "github.ref == 'refs/heads/main'",
+          [maySkip]
+        ],
+        [
+          'push with no filter: branch or tag, not decided',
+          'push',
+          "startsWith(github.ref, 'refs/tags/')",
+          [maySkip]
+        ],
+        [
+          'decided only when every trigger is known',
+          { push: { branches: ['main'] }, schedule: [{ cron: '0 0 * * *' }] },
+          "github.ref == 'refs/heads/main'",
+          [maySkip]
+        ],
+        [
+          'a dispatch input on a trigger without inputs is null',
+          {
+            push: { branches: ['main'] },
+            workflow_dispatch: {
+              inputs: { skip: { type: 'boolean', default: false } }
+            }
+          },
+          "!inputs.skip || github.event_name == 'workflow_dispatch'",
+          []
+        ],
+        [
+          'a dispatch input default is not assumed',
+          {
+            workflow_dispatch: {
+              inputs: { skip: { type: 'boolean', default: false } }
+            }
+          },
+          '!inputs.skip',
+          [maySkip]
+        ],
+        [
+          'a choice input with a single option is known',
+          {
+            workflow_dispatch: {
+              inputs: { env: { type: 'choice', options: ['prod'] } }
+            }
+          },
+          "inputs.env == 'staging'",
+          [neverRuns]
+        ]
+      ] as const)('%s', async (_name, on, condition, errors) => {
+        const result = await validatePipelineContract(
+          scanIf(on as ParsedWorkflow['file']['on'], condition),
+          contract
+        );
+        expect(result.errors).toEqual(errors);
+      });
+    });
+
     it('matches the occurrence that can run, for ordering', async () => {
       const wf = onEvents('push', {
         build: {

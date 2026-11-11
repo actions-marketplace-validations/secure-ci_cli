@@ -57,6 +57,23 @@ Follow TDD: write tests first, then implementation.
 
 Respect minimal dependencies philosophy - avoid adding new packages unless necessary.
 
+## Keep docs and the website in step with the CLI
+
+Any change to the CLI's behavior, flags, config keys, output or limitations
+must be reflected in the docs **and** on the website, in the same piece of work:
+
+- **This repo, same PR:** [DOCS.md](DOCS.md) (the reference), and
+  [README.md](README.md) when it's headline-level (overview, limitations,
+  install). Internal design changes go in the relevant `.github/agents/*` doc.
+- **[secure-ci/website](https://github.com/secure-ci/website), a companion PR:**
+  `docs.html` (generated from this repo's README.md and DOCS.md, so mirror the
+  same wording; mark new behavior "CLI x.y.z or later" for the release it ships
+  in), `llms.txt`, and any page that describes the changed behavior (e.g.
+  `compare/`, `index.html`, `compliance.html`; bump `sitemap.xml` `lastmod` for
+  pages you change).
+- **Link the two PRs** to each other. A CLI PR isn't done while the site still
+  describes the old behavior.
+
 ## Non-negotiables for any agent
 
 - **TDD:** write the failing test first, then the implementation. Don't add code
@@ -66,3 +83,5 @@ Respect minimal dependencies philosophy - avoid adding new packages unless neces
 - **Minimal dependencies** and **small, focused changes** — stay within the scope
   you were asked for.
 - **Report real results** of the pre-commit gate; don't claim green when it isn't.
+- **Docs and website in step:** every CLI change updates DOCS.md/README.md here
+  and the website in a linked secure-ci/website PR (see above).

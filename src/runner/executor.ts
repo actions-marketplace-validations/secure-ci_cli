@@ -16,6 +16,7 @@ import {
   createContext,
   evaluateCondition,
   ifEvaluationError,
+  substituteExpressions,
   substituteRecord,
   ExpressionContext,
   NeedsInfo,
@@ -51,6 +52,7 @@ import {
   noRuntimeMessage,
   startJobContainer,
   stopJobContainer,
+  clearIsolatedWorkspace,
   startJobServices
 } from './job-container';
 import { executeStep } from './steps';
@@ -60,7 +62,14 @@ import {
   runPreSteps,
   isLocalActionRef
 } from './actions';
-import { Slots, UnitOutcome, runJobGraph, runMatrix } from './scheduler';
+import {
+  Admission,
+  ConcurrencyGroups,
+  Slots,
+  UnitOutcome,
+  runJobGraph,
+  runMatrix
+} from './scheduler';
 
 // Public API, kept here so `executor` stays the entry point.
 export { parseRepositoryFromRemote } from './github-context';
@@ -79,6 +88,8 @@ export interface RunInternals {
   slots?: Slots;
   /** Aborted when the calling job is cancelled. */
   signal?: AbortSignal;
+  /** The run's `concurrency:` groups, shared by called workflows' jobs. */
+  groups?: ConcurrencyGroups;
 }
 
 /**
@@ -206,17 +217,30 @@ export async function executeWorkflow(
       }
 
       logger.info(`Executing workflow: ${parsed.file.name}`);
-      const concurrencyAt = [
-        ...(parsed.file.concurrency ? ['workflow'] : []),
-        ...Object.entries(parsed.file.jobs)
-          .filter(([, job]) => job.concurrency)
-          .map(([id]) => `jobs.${id}`)
-      ];
-      if (concurrencyAt.length > 0) {
+      const concurrencyMode = options.concurrency ?? 'serialize';
+      if (parsed.file.concurrency && !internal.groups) {
         logger.info(
-          `concurrency: isn't applied in a local run (${concurrencyAt.join(', ')}): it doesn't queue behind or cancel other runs, and jobs run as needs: and --parallel allow`
+          "workflow-level concurrency: isn't applied in a local run: there are no other runs to queue behind or cancel"
         );
       }
+      const notCancelling = Object.entries(parsed.file.jobs)
+        .filter(
+          ([, job]) =>
+            typeof job.concurrency === 'object' &&
+            job.concurrency['cancel-in-progress'] !== undefined &&
+            job.concurrency['cancel-in-progress'] !== false
+        )
+        .map(([id]) => `jobs.${id}`);
+      if (concurrencyMode === 'serialize' && notCancelling.length > 0) {
+        logger.info(
+          `cancel-in-progress isn't applied with --concurrency serialize (${notCancelling.join(', ')}): jobs in a group run one at a time, all of them; pass --concurrency github to cancel as GitHub does`
+        );
+      }
+      const groups =
+        internal.groups ??
+        new ConcurrencyGroups(concurrencyMode, (message) =>
+          logger.info(message)
+        );
 
       options = {
         ...options,
@@ -360,6 +384,53 @@ export async function executeWorkflow(
           const unitResults: Array<JobResult | undefined> = [];
           const unitOutputs: Array<Record<string, string>> = [];
 
+          // `concurrency:`: each combination waits for its group (with the
+          // group evaluated for its matrix values) before taking a slot.
+          const concurrencySpec =
+            typeof job.concurrency === 'string'
+              ? { group: job.concurrency }
+              : job.concurrency;
+          const concurrencyGate = concurrencySpec
+            ? {
+                gate: (
+                  index: number,
+                  abort: () => void
+                ): Promise<Admission> => {
+                  const values = selected[index].values;
+                  const ctx = { ...jobIfCtx, matrix: values };
+                  let group = '';
+                  try {
+                    group = substituteExpressions(
+                      String(concurrencySpec.group ?? ''),
+                      ctx
+                    ).trim();
+                  } catch (error) {
+                    logger.warn(
+                      `jobs.${jobId}.concurrency: ${error instanceof Error ? error.message : String(error)}; running without a group`
+                    );
+                  }
+                  if (!group) return Promise.resolve(() => undefined);
+                  return groups.enter(
+                    group,
+                    isTruthySetting(concurrencySpec['cancel-in-progress'], ctx),
+                    abort,
+                    labelOf(values)
+                  );
+                },
+                onGateCancelled: (index: number): UnitOutcome => {
+                  const { index: combinationIndex, values } = selected[index];
+                  unitResults[combinationIndex] = {
+                    job: labelOf(values),
+                    success: false,
+                    cancelled: true,
+                    steps: [],
+                    duration: 0
+                  };
+                  return { result: 'cancelled' };
+                }
+              }
+            : {};
+
           let outcomes: Array<UnitOutcome | undefined>;
           if (job.uses) {
             // A reusable workflow call (once per matrix combination). The
@@ -379,7 +450,7 @@ export async function executeWorkflow(
                       filePath,
                       options,
                       { ...jobIfCtx, matrix: matrixValues },
-                      { slots, signal }
+                      { slots, signal, groups }
                     );
                     const cancelled = !reusableResult.success && signal.aborted;
                     unitResults[combinationIndex] = cancelled
@@ -398,7 +469,12 @@ export async function executeWorkflow(
                   true
                 );
               },
-              { failFast, maxParallel, signal: internal.signal }
+              {
+                failFast,
+                maxParallel,
+                signal: internal.signal,
+                ...concurrencyGate
+              }
             );
           } else {
             // Outputs so far, as each combination's result reports them.
@@ -726,6 +802,9 @@ export async function executeWorkflow(
                 } finally {
                   signal.removeEventListener('abort', onAbort);
                   await stopping;
+                  if (options.isolateWorkspace) {
+                    await clearIsolatedWorkspace(runtime);
+                  }
                   await stopJobContainer(runtime);
                 }
               } finally {
@@ -776,6 +855,7 @@ export async function executeWorkflow(
                 maxParallel,
                 slots,
                 signal: internal.signal,
+                ...concurrencyGate,
                 onFailFast: () =>
                   logger.info(
                     concurrent

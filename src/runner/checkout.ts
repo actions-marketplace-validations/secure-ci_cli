@@ -5,6 +5,8 @@ import { logger } from '../utils/logger';
 import { StepResult, Step } from '../types';
 import { substituteRecord, ExpressionContext } from './expression';
 import { JobRuntime } from './job-runtime';
+import { removeInContainer } from './job-container';
+import { CONTAINER_WORKDIR } from './container-runtime';
 
 /** Marks a `path:` copy made by localCheckout, so it may be replaced. */
 const CHECKOUT_MARKER = '.secureci-checkout';
@@ -108,16 +110,124 @@ function escapesViaSymlink(workspace: string, dest: string): boolean {
 }
 
 /** Run git in `cwd` on the host; undefined when it fails. */
-function gitOutput(cwd: string, args: string[]): string | undefined {
+function gitOutput(
+  cwd: string,
+  args: string[],
+  env?: Record<string, string>
+): string | undefined {
   try {
     return execFileSync('git', args, {
       cwd,
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore']
+      stdio: ['ignore', 'pipe', 'ignore'],
+      ...(env ? { env: { ...process.env, ...env } } : {})
     }).trim();
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Environment for a git fetch from `url`: never prompts, and sends
+ * `token` (as actions/checkout does) only to an https URL on the server's
+ * own host, scoped to that host by the config key. Passed through the
+ * environment, so it never shows in the process list.
+ */
+export function gitAuthEnv(
+  url: string,
+  token: string,
+  serverUrl: string
+): Record<string, string> {
+  const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
+  let target: URL;
+  let server: URL;
+  try {
+    target = new URL(url);
+    server = new URL(serverUrl);
+  } catch {
+    return env;
+  }
+  if (!token || target.protocol !== 'https:' || target.host !== server.host) {
+    return env;
+  }
+  return {
+    ...env,
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: `http.https://${target.host}/.extraheader`,
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`
+  };
+}
+
+/** `fetch-depth`: a non-negative integer, default 1 as on GitHub; 0 is all. */
+function fetchDepth(raw: string | undefined): number {
+  const n = Number(raw === undefined || raw === '' ? 1 : raw);
+  return Number.isInteger(n) && n >= 0 ? n : 1;
+}
+
+/**
+ * Check out `commit` (fetched from `source` when given, else from the
+ * local repository) into an empty `dest`, with `depth` commits of history
+ * (0: all). The working copy's `.git` is only read: a full-depth local
+ * checkout shares its objects; anything fetched lands in `dest` only.
+ * Returns the commit checked out, or undefined.
+ */
+function cloneInto(
+  workspace: string,
+  dest: string,
+  what:
+    | { commit: string }
+    | { ref: string; source: string; env: Record<string, string> },
+  depth: number
+): string | undefined {
+  const ok = (args: string[], cwd = dest, env?: Record<string, string>) =>
+    gitOutput(cwd, args, env) !== undefined;
+  const depthArgs = depth > 0 ? ['--depth', String(depth)] : [];
+  if ('commit' in what && depth === 0) {
+    return ok(
+      ['clone', '--quiet', '--shared', '--no-checkout', '--', workspace, dest],
+      workspace
+    ) && ok(['checkout', '--quiet', '--detach', what.commit])
+      ? what.commit
+      : undefined;
+  }
+  fs.mkdirSync(dest, { recursive: true });
+  if (!ok(['init', '--quiet']) || !ok(['remote', 'add', 'origin', workspace])) {
+    return undefined;
+  }
+  const [source, ref, env] =
+    'commit' in what
+      ? [`file://${workspace}`, what.commit, undefined]
+      : [what.source, what.ref, what.env];
+  // `source` (the origin URL) and `ref` come from outside: never let either
+  // be read as an option (`--upload-pack=<cmd>`), and never allow the
+  // `ext::` transport, which runs a command, whatever the user's config says.
+  if (
+    !ok(
+      [
+        '-c',
+        'protocol.ext.allow=never',
+        'fetch',
+        '--quiet',
+        '--no-tags',
+        ...depthArgs,
+        '--end-of-options',
+        source,
+        ref
+      ],
+      dest,
+      env
+    )
+  ) {
+    return undefined;
+  }
+  const commit = gitOutput(dest, [
+    'rev-parse',
+    '--verify',
+    'FETCH_HEAD^{commit}'
+  ]);
+  return commit && ok(['checkout', '--quiet', '--detach', commit])
+    ? commit
+    : undefined;
 }
 
 /**
@@ -158,7 +268,8 @@ export function localCheckout(
   step: Step,
   ctx: ExpressionContext,
   runtime: JobRuntime,
-  startTime: number
+  startTime: number,
+  options: { fetchRefs?: boolean } = {}
 ): StepResult {
   const withValues = substituteRecord(step.with, ctx);
   const outputs = {
@@ -185,22 +296,32 @@ export function localCheckout(
 
   // A ref other than the current one: check out that commit, when the local
   // repository has it, into path: (never over the user's working copy).
+  // With --fetch-refs, a ref the local repository lacks is fetched from
+  // origin into the path: copy (never into the user's repository).
   const ref = withValues.ref;
   let commit: string | undefined;
+  let fetchFrom: string | undefined;
   if (
     ref &&
     ![ctx.github.ref, ctx.github.ref_name, ctx.github.sha].includes(ref)
   ) {
     commit = resolveLocalRef(workspace, ref);
-    if (!commit) {
-      logger.warn(
-        `actions/checkout: ref "${ref}" isn't in the local repository; using the local working copy (fetch it, or pass --no-local-checkout to run the real action)`
-      );
-    } else if (relative === '') {
+    if (relative === '') {
       logger.warn(
         `actions/checkout: not checking out ref "${ref}" over your working copy; add a path: to check it out there, or pass --no-local-checkout to run the real action`
       );
       commit = undefined;
+    } else if (!commit && options.fetchRefs && !ref.startsWith('-')) {
+      fetchFrom = gitOutput(workspace, ['remote', 'get-url', 'origin']);
+      if (!fetchFrom) {
+        return fail(
+          `actions/checkout: can't fetch ref "${ref}": the local repository has no origin remote`
+        );
+      }
+    } else if (!commit) {
+      logger.warn(
+        `actions/checkout: ref "${ref}" isn't in the local repository; using the local working copy (pass --fetch-refs to fetch it from origin, or --no-local-checkout to run the real action)`
+      );
     }
   }
 
@@ -225,22 +346,36 @@ export function localCheckout(
         );
       }
     }
-    if (commit) {
-      // A local clone, sharing the repository's objects: nothing is fetched
-      // and the working copy's .git is only read.
-      const cloned =
-        gitOutput(workspace, [
-          'clone',
-          '--quiet',
-          '--shared',
-          '--no-checkout',
-          '--',
-          workspace,
-          dest
-        ]) !== undefined &&
-        gitOutput(dest, ['checkout', '--quiet', '--detach', commit]) !==
-          undefined;
-      if (!cloned) {
+    const depth = fetchDepth(withValues['fetch-depth']);
+    if (fetchFrom) {
+      const token = withValues.token || String(ctx.github.token ?? '');
+      const fetched = cloneInto(
+        workspace,
+        dest,
+        {
+          ref: String(ref),
+          source: fetchFrom,
+          env: gitAuthEnv(
+            fetchFrom,
+            token,
+            String(ctx.github.server_url ?? 'https://github.com')
+          )
+        },
+        depth
+      );
+      if (!fetched) {
+        fs.rmSync(dest, { recursive: true, force: true });
+        return fail(
+          `actions/checkout: couldn't fetch ref "${ref}" from origin (${fetchFrom})`
+        );
+      }
+      outputs.ref = String(ref);
+      outputs.commit = fetched;
+      output = `Fetched ${ref} (${fetched.slice(0, 7)}) to ${relative}`;
+    } else if (commit) {
+      // A local clone (sharing the repository's objects at full depth):
+      // nothing is fetched and the working copy's .git is only read.
+      if (!cloneInto(workspace, dest, { commit }, depth)) {
         fs.rmSync(dest, { recursive: true, force: true });
         return fail(
           `actions/checkout: couldn't check out ref "${ref}" to "${withValues.path}"`
@@ -260,6 +395,12 @@ export function localCheckout(
       step: postStep,
       condition: 'always()',
       run: async () => {
+        // Files a container step created as root may not be removable by
+        // the host user: remove the copy from inside the container first.
+        await removeInContainer(
+          runtime,
+          path.posix.join(CONTAINER_WORKDIR, ...relative.split(path.sep))
+        );
         fs.rmSync(dest, { recursive: true, force: true });
         return { step: postStep, success: true, duration: 0 };
       }

@@ -49,7 +49,7 @@ src/
 │   ├── dry-run.ts         # Dry-run mode
 │   ├── executor.ts        # Entry point: jobs in needs: order, matrix, reusable workflows
 │   ├── job-plan.ts        # Matrix expansion + needs: topological sort (pure)
-│   ├── scheduler.ts       # --parallel slots, job graph, matrix max-parallel/fail-fast (pure)
+│   ├── scheduler.ts       # --parallel slots, job graph, matrix max-parallel/fail-fast, concurrency: groups (pure)
 │   ├── github-context.ts  # github context, event payload, typed inputs
 │   ├── job-runtime.ts     # Per-job state (JobRuntime), step files, post steps
 │   ├── job-container.ts   # Job container, runs-on→image mapping, services, cleanup
@@ -58,7 +58,7 @@ src/
 │   ├── node-action.ts     # JavaScript actions (pre/main/post)
 │   ├── node-binary.ts     # Which node runs JS actions on the host (SEA-aware)
 │   ├── docker-action.ts   # Docker actions and docker:// steps
-│   ├── checkout.ts        # actions/checkout from the local working copy
+│   ├── checkout.ts        # actions/checkout from the local working copy (--fetch-refs, fetch-depth)
 │   ├── builtin-actions.ts # Local upload/download-artifact and cache
 │   ├── expression.ts      # ${{ ... }} evaluation + if: validation
 │   ├── hash-files.ts      # hashFiles() and glob matching
@@ -153,13 +153,17 @@ by concern:
 - **Planning:** `job-plan.ts` (matrix expansion, `needs:` topological sort — pure
   and unit-tested in isolation) and `scheduler.ts` (concurrency: the global
   `--parallel` slots, starting a job once its `needs:` are done, matrix
-  `max-parallel` and `fail-fast` cancellation via `AbortSignal` — tested with
-  fake jobs). Concurrent jobs' log lines are told apart by the logger's
+  `max-parallel` and `fail-fast` cancellation via `AbortSignal`, and
+  `ConcurrencyGroups` for job `concurrency:` (`--concurrency serialize|github`),
+  which `runMatrix` waits on through its `gate` before a combination takes a
+  slot — tested with fake jobs). Concurrent jobs' log lines are told apart by the logger's
   `withJob()` prefix (`AsyncLocalStorage`).
 - **Context:** `github-context.ts` (the `github` context, event payload, typed
   inputs).
 - **Per-job:** `job-runtime.ts` (state, step files, post steps) and
-  `job-container.ts` (the container, `runs-on`→image mapping, services, cleanup).
+  `job-container.ts` (the container, `runs-on`→image mapping, services, cleanup,
+  `--registry-login` pulls via `ContainerRuntime.pull`, and emptying an
+  `--isolate-workspace` copy from inside the container before it's removed).
 - **Per-step:** `steps.ts` (`run:`), `actions.ts` (`uses:` dispatch + composite +
   built-ins), with `node-action.ts` and `docker-action.ts` for the other action
   types. `checkout.ts` and `builtin-actions.ts` are local stand-ins for

@@ -78,7 +78,8 @@ function fakeJobContainerRuntime(
     removeNetwork: vi.fn().mockResolvedValue(undefined),
     removeNetworkSync: vi.fn(),
     health: vi.fn().mockResolvedValue('healthy'),
-    ports: vi.fn().mockResolvedValue({ '5432': '49153' })
+    ports: vi.fn().mockResolvedValue({ '5432': '49153' }),
+    pull: vi.fn().mockResolvedValue({ success: true })
   };
 }
 
@@ -1775,6 +1776,82 @@ jobs:
       });
     });
 
+    describe('--isolate-workspace cleanup in container mode (#90)', () => {
+      const CLEAR_ARGS = [
+        'find',
+        '/secureci-workspace',
+        '-mindepth',
+        '1',
+        '-maxdepth',
+        '1',
+        '!',
+        '-name',
+        '.git',
+        '-exec',
+        'rm',
+        '-rf',
+        '--',
+        '{}',
+        '+'
+      ];
+
+      it('empties the workspace copy from inside the container, as root, before stopping it', async () => {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-iso-'));
+        const cwd = vi.spyOn(process, 'cwd').mockReturnValue(ws);
+        try {
+          const result = await executeWorkflow(
+            writeWorkflow(`
+name: Iso
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo a
+`),
+            { containerRuntime: 'docker', isolateWorkspace: true }
+          );
+          expect(result.success).toBe(true);
+          const clearCall = fake.exec.mock.calls.findIndex(
+            (c) => JSON.stringify(c[1].args) === JSON.stringify(CLEAR_ARGS)
+          );
+          expect(clearCall).toBeGreaterThanOrEqual(0);
+          expect(fake.exec.mock.calls[clearCall][1]).toMatchObject({
+            user: '0'
+          });
+          expect(fake.exec.mock.invocationCallOrder[clearCall]).toBeLessThan(
+            fake.stop.mock.invocationCallOrder[0]
+          );
+        } finally {
+          cwd.mockRestore();
+          fs.rmSync(ws, { recursive: true, force: true });
+        }
+      });
+
+      it('never empties the shared working copy without --isolate-workspace', async () => {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const result = await executeWorkflow(
+          writeWorkflow(`
+name: Shared
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo a
+`),
+          { containerRuntime: 'docker' }
+        );
+        expect(result.success).toBe(true);
+        expect(
+          fake.exec.mock.calls.some((c) => c[1].args?.[0] === 'find')
+        ).toBe(false);
+      });
+    });
+
     describe('jobs.<id>.container options, ports, volumes and credentials', () => {
       function captureLogs() {
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -1826,6 +1903,73 @@ jobs:
           volumes: ['my_cache:/cache']
         });
       });
+
+      // Real-engine check: opt in with RUN_DOCKER_TESTS=1 (needs a running
+      // docker daemon and the node:20-bookworm-slim image or network access).
+      it.skipIf(!process.env.RUN_DOCKER_TESTS)(
+        'applies options, a named volume and a port in a real job container, and refuses an unsafe option',
+        async () => {
+          const actual = await vi.importActual<
+            typeof import('./container-runtime')
+          >('./container-runtime');
+          resolveContainerRuntimeMock.mockImplementation(
+            actual.resolveContainerRuntime
+          );
+          const volume = `secureci-test-${Date.now()}`;
+          try {
+            const ok = await executeWorkflow(
+              writeWorkflow(`
+name: Real Container Options
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20-bookworm-slim
+      options: --user 1001 --shm-size 1g
+      ports:
+        - 8080
+      volumes:
+        - ${volume}:/cache
+    steps:
+      - run: echo "uid=$(id -u) shm=$(df -k /dev/shm | awk 'NR==2{print $2}') cache=$(test -d /cache && echo yes)"
+`),
+              { containerRuntime: 'docker' }
+            );
+            expect(ok.success).toBe(true);
+            expect(ok.jobs[0].steps[0].output).toContain(
+              'uid=1001 shm=1048576 cache=yes'
+            );
+
+            const refused = await executeWorkflow(
+              writeWorkflow(`
+name: Real Unsafe
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20-bookworm-slim
+      options: --user 1001 --privileged
+    steps:
+      - run: echo should-not-run
+`),
+              { containerRuntime: 'docker' }
+            );
+            expect(refused.success).toBe(false);
+            for (const step of refused.jobs[0]?.steps ?? []) {
+              expect(step.output ?? '').not.toContain('should-not-run');
+            }
+          } finally {
+            try {
+              execFileSync('docker', ['volume', 'rm', '-f', volume]);
+            } catch {
+              // best effort
+            }
+          }
+        },
+        180_000
+      );
 
       it('refuses options that give the container access to this machine, failing the job', async () => {
         const fake = fakeJobContainerRuntime();
@@ -1946,6 +2090,102 @@ jobs:
         }
       });
 
+      it('with --registry-login, pulls with the credentials before starting (#90)', async () => {
+        const fake = fakeJobContainerRuntime();
+        resolveContainerRuntimeMock.mockResolvedValue(fake);
+        const workflowPath = writeWorkflow(`
+name: Credentials
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/me/private:1
+      credentials:
+        username: \${{ github.actor }}
+        password: \${{ secrets.PAT }}
+    services:
+      db:
+        image: registry.example.com:5000/db:2
+        credentials:
+          username: svc
+          password: \${{ secrets.DB_PAT }}
+    steps:
+      - run: echo a
+`);
+        const logs = captureLogs();
+        try {
+          const result = await executeWorkflow(workflowPath, {
+            containerRuntime: 'docker',
+            registryLogin: true,
+            secrets: { PAT: 'pat-value', DB_PAT: 'db-pat' }
+          });
+          expect(result.success).toBe(true);
+          expect(fake.pull).toHaveBeenCalledWith(
+            'registry.example.com:5000/db:2',
+            {
+              registry: 'registry.example.com:5000',
+              username: 'svc',
+              password: 'db-pat'
+            }
+          );
+          expect(fake.pull).toHaveBeenCalledWith('ghcr.io/me/private:1', {
+            registry: 'ghcr.io',
+            username: expect.any(String),
+            password: 'pat-value'
+          });
+          expect(fake.pull.mock.invocationCallOrder[1]).toBeLessThan(
+            fake.start.mock.invocationCallOrder[1]
+          );
+          expect(logs.text()).not.toContain('credentials are ignored');
+          expect(logs.text()).not.toContain('pat-value');
+        } finally {
+          logs.restore();
+        }
+      });
+
+      it('with --registry-login, fails the job when the pull fails or a password is missing', async () => {
+        for (const [password, pullOk, message] of [
+          ['${{ secrets.PAT }}', false, 'login to ghcr.io failed: denied'],
+          ["''", true, 'credentials need a username and a password']
+        ] as const) {
+          const fake = fakeJobContainerRuntime();
+          fake.pull.mockResolvedValue(
+            pullOk
+              ? { success: true }
+              : { success: false, error: 'login to ghcr.io failed: denied' }
+          );
+          resolveContainerRuntimeMock.mockResolvedValue(fake);
+          const workflowPath = writeWorkflow(`
+name: Credentials
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/me/private:1
+      credentials:
+        username: me
+        password: ${password}
+    steps:
+      - run: echo a
+`);
+          const logs = captureLogs();
+          try {
+            const result = await executeWorkflow(workflowPath, {
+              containerRuntime: 'docker',
+              registryLogin: true,
+              secrets: { PAT: 'pat-value' }
+            });
+            expect(result.success).toBe(false);
+            expect(fake.start).not.toHaveBeenCalled();
+            expect(logs.text()).toContain(message);
+          } finally {
+            logs.restore();
+          }
+        }
+      });
+
       it('ignores credentials with a warning', async () => {
         const fake = fakeJobContainerRuntime();
         resolveContainerRuntimeMock.mockResolvedValue(fake);
@@ -1970,8 +2210,9 @@ jobs:
           });
           expect(result.success).toBe(true);
           expect(logs.text()).toContain(
-            'jobs.a.container: credentials are ignored; log in with `docker login` instead.'
+            'jobs.a.container: credentials are ignored; pass --registry-login to log in for this run, or log in with `docker login`.'
           );
+          expect(fake.pull).not.toHaveBeenCalled();
           expect(logs.text()).not.toContain('only image and env are supported');
         } finally {
           logs.restore();
@@ -3079,6 +3320,30 @@ jobs:
       expect(result.success).toBe(true);
     });
 
+    it('removes a path: copy from inside the job container first, so root-owned files go too (#90)', async () => {
+      const fake = fakeJobContainerRuntime();
+      resolveContainerRuntimeMock.mockResolvedValue(fake);
+      const result = await executeWorkflow(
+        writeWorkflow(
+          [
+            '      - uses: actions/checkout@v4',
+            '        with:',
+            '          path: sub/copy'
+          ].join('\n')
+        ),
+        { containerRuntime: 'docker' }
+      );
+      expect(result.success).toBe(true);
+      const rm = fake.exec.mock.calls.findIndex(
+        (c) =>
+          JSON.stringify(c[1].args) ===
+          JSON.stringify(['rm', '-rf', '--', '/secureci-workspace/sub/copy'])
+      );
+      expect(rm).toBeGreaterThanOrEqual(0);
+      expect(fake.exec.mock.calls[rm][1]).toMatchObject({ user: '0' });
+      expect(fs.existsSync(path.join(workDir, 'sub', 'copy'))).toBe(false);
+    });
+
     it('runs the real action for another repository', async () => {
       fetchActionMock.mockResolvedValueOnce(null);
       await executeWorkflow(
@@ -3222,6 +3487,191 @@ jobs:
           'actions/checkout: ref "refs/pull/1/merge" isn\'t in the local repository; using the local working copy'
         );
         expect(result.jobs[0].steps[1].output).toContain('two');
+      });
+
+      describe('--fetch-refs and fetch-depth (#90)', () => {
+        let origin: string;
+        let prSha: string;
+        beforeEach(() => {
+          // An "origin" with a ref the local repository doesn't have.
+          origin = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-origin-'));
+          git('clone', '-q', '--bare', workDir, origin);
+          const scratch = fs.mkdtempSync(
+            path.join(os.tmpdir(), 'secureci-pr-')
+          );
+          try {
+            git('clone', '-q', origin, scratch);
+            fs.writeFileSync(path.join(scratch, 'version.txt'), 'three');
+            git('-C', scratch, 'commit', '-q', '-am', 'three');
+            prSha = git('-C', scratch, 'rev-parse', 'HEAD');
+            git(
+              '-C',
+              scratch,
+              'push',
+              '-q',
+              'origin',
+              'HEAD:refs/pull/1/merge'
+            );
+          } finally {
+            fs.rmSync(scratch, { recursive: true, force: true });
+          }
+          git('remote', 'add', 'origin', origin);
+        });
+        afterEach(() => {
+          fs.rmSync(origin, { recursive: true, force: true });
+        });
+
+        const prCheckout = (extra: string[] = []) =>
+          writeWorkflow(
+            [
+              '      - id: co',
+              '        uses: actions/checkout@v4',
+              '        with:',
+              '          ref: refs/pull/1/merge',
+              '          path: pr',
+              ...extra,
+              '      - run: cat pr/version.txt && git -C pr rev-list --count HEAD',
+              '      - run: echo "commit=${{ steps.co.outputs.commit }}"'
+            ].join('\n')
+          );
+
+        it('fetches a ref missing locally into the path: copy only, with --fetch-refs', async () => {
+          const result = await executeWorkflow(prCheckout(), {
+            fetchRefs: true
+          });
+          expect(result.success).toBe(true);
+          const steps = result.jobs[0].steps;
+          expect(steps[0].output).toContain(
+            `Fetched refs/pull/1/merge (${prSha.slice(0, 7)}) to pr`
+          );
+          // fetch-depth defaults to 1, as on GitHub.
+          expect(steps[1].output).toMatch(/three\s*1\s*$/);
+          expect(steps[2].output).toContain(`commit=${prSha}`);
+          // The user's repository got no objects or refs from the fetch.
+          expect(() => git('cat-file', '-e', prSha)).toThrow();
+          expect(fs.existsSync(path.join(workDir, '.git', 'FETCH_HEAD'))).toBe(
+            false
+          );
+        });
+
+        it('suggests --fetch-refs when the ref is missing and fetching is off', async () => {
+          const { result, text } = await warnings(() =>
+            executeWorkflow(prCheckout())
+          );
+          expect(result.success).toBe(true);
+          expect(text).toContain(
+            'actions/checkout: ref "refs/pull/1/merge" isn\'t in the local repository; using the local working copy (pass --fetch-refs to fetch it from origin, or --no-local-checkout to run the real action)'
+          );
+        });
+
+        it('fails the step when --fetch-refs cannot fetch the ref', async () => {
+          const result = await executeWorkflow(
+            writeWorkflow(
+              [
+                '      - uses: actions/checkout@v4',
+                '        with:',
+                '          ref: refs/pull/404/merge',
+                '          path: pr'
+              ].join('\n')
+            ),
+            { fetchRefs: true }
+          );
+          expect(result.success).toBe(false);
+          expect(result.jobs[0].steps[0].error).toContain(
+            'actions/checkout: couldn\'t fetch ref "refs/pull/404/merge" from origin'
+          );
+          expect(fs.existsSync(path.join(workDir, 'pr'))).toBe(false);
+        });
+
+        for (const [label, url] of [
+          [
+            'an option (--upload-pack)',
+            '--upload-pack=touch PWNED;git-upload-pack'
+          ],
+          ['an ext:: command transport', 'ext::sh -c touch% PWNED']
+        ] as const) {
+          it(`never runs a command from an origin URL that is ${label} (CodeQL)`, async () => {
+            const marker = path.join(workDir, 'PWNED');
+            const gitConfig = path.join(origin, 'allow-ext.gitconfig');
+            // Even with the user's own config allowing ext::.
+            fs.writeFileSync(gitConfig, '[protocol "ext"]\n\tallow = always\n');
+            const saved = process.env.GIT_CONFIG_GLOBAL;
+            process.env.GIT_CONFIG_GLOBAL = gitConfig;
+            try {
+              git(
+                'remote',
+                'set-url',
+                'origin',
+                '--',
+                url.replace('PWNED', marker)
+              );
+              const result = await executeWorkflow(prCheckout(), {
+                fetchRefs: true
+              });
+              expect(result.success).toBe(false);
+              expect(result.jobs[0].steps[0].error).toContain(
+                'couldn\'t fetch ref "refs/pull/1/merge" from origin'
+              );
+              expect(fs.existsSync(marker)).toBe(false);
+            } finally {
+              if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+              else process.env.GIT_CONFIG_GLOBAL = saved;
+            }
+          });
+        }
+
+        it('honours fetch-depth for a ref checked out into path:', async () => {
+          git('tag', 'v2');
+          const run = (depth: string) =>
+            executeWorkflow(
+              writeWorkflow(
+                [
+                  '      - uses: actions/checkout@v4',
+                  '        with:',
+                  '          ref: v2',
+                  '          path: x',
+                  ...(depth ? [`          fetch-depth: ${depth}`] : []),
+                  '      - run: git -C x rev-list --count HEAD'
+                ].join('\n')
+              )
+            );
+          for (const [depth, count] of [
+            ['', '1'],
+            ['1', '1'],
+            ['0', '2'],
+            ['5', '2']
+          ]) {
+            const result = await run(depth);
+            expect(result.success).toBe(true);
+            expect(result.jobs[0].steps[1].output?.trim()).toContain(count);
+          }
+        });
+
+        it('sends the token only to the server host, via environment config', async () => {
+          const { gitAuthEnv } = await import('./checkout');
+          expect(
+            gitAuthEnv(
+              'https://github.com/o/r.git',
+              'tok',
+              'https://github.com'
+            )
+          ).toEqual({
+            GIT_TERMINAL_PROMPT: '0',
+            GIT_CONFIG_COUNT: '1',
+            GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+            GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from('x-access-token:tok').toString('base64')}`
+          });
+          for (const [url, token] of [
+            ['https://evil.example.com/o/r.git', 'tok'],
+            ['git@github.com:o/r.git', 'tok'],
+            ['http://github.com/o/r.git', 'tok'],
+            ['https://github.com/o/r.git', '']
+          ]) {
+            expect(gitAuthEnv(url, token, 'https://github.com')).toEqual({
+              GIT_TERMINAL_PROMPT: '0'
+            });
+          }
+        });
       });
 
       it('never passes a ref that looks like an option to git', async () => {
@@ -4089,7 +4539,7 @@ jobs:
       return file;
     }
 
-    it('notes once that concurrency: is not applied in a local run', async () => {
+    it('notes once each what concurrency: does not apply in a local run (#90)', async () => {
       const file = path.join(dir, 'wf.yml');
       fs.writeFileSync(
         file,
@@ -4116,9 +4566,12 @@ jobs:
         const notes = logSpy.mock.calls
           .flat()
           .filter((line) => String(line).includes('concurrency'));
-        expect(notes).toHaveLength(1);
+        expect(notes).toHaveLength(2);
         expect(String(notes[0])).toContain(
-          "concurrency: isn't applied in a local run (workflow, jobs.deploy): it doesn't queue behind or cancel other runs, and jobs run as needs: and --parallel allow"
+          "workflow-level concurrency: isn't applied in a local run: there are no other runs to queue behind or cancel"
+        );
+        expect(String(notes[1])).toContain(
+          "cancel-in-progress isn't applied with --concurrency serialize (jobs.deploy)"
         );
       } finally {
         logSpy.mockRestore();
