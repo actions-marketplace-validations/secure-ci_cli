@@ -18,6 +18,11 @@ lives in **[AGENTS.md](AGENTS.md)** and the docs it links to. Read those first.
   ```bash
   npm run lint && npm run format && npm test && npm run build
   ```
+- **Every CLI change updates the docs and the website:** DOCS.md (and
+  README.md when headline-level) in the same PR, plus a linked
+  [secure-ci/website](https://github.com/secure-ci/website) PR for `docs.html`,
+  `llms.txt` and any affected page. See
+  [AGENTS.md](AGENTS.md#keep-docs-and-the-website-in-step-with-the-cli).
 - **Stay in scope and keep dependencies minimal** — this is a security tool; see
   the ground rules in [CONTRIBUTING.md](CONTRIBUTING.md).
 

@@ -68,7 +68,95 @@ export function parseParallel(raw: string | number): number {
   return n;
 }
 
-export interface MatrixOptions {
+/**
+ * How `concurrency:` groups are applied in a local run (`--concurrency`):
+ * `serialize` runs the jobs of a group one at a time, all of them;
+ * `github` follows GitHub: one running and one pending per group, a newer
+ * pending job cancels the older one, and `cancel-in-progress` cancels the
+ * running one.
+ */
+export type ConcurrencyMode = 'serialize' | 'github';
+
+/** Parse `--concurrency` / config `concurrency`. */
+export function parseConcurrencyMode(raw: string): ConcurrencyMode {
+  const mode = raw.trim().toLowerCase();
+  if (mode === 'serialize' || mode === 'github') return mode;
+  throw new Error(
+    `Invalid value "${raw}" for concurrency. Must be serialize or github.`
+  );
+}
+
+/** Admission to a group: call it to leave; 'cancelled' if never admitted. */
+export type Admission = (() => void) | 'cancelled';
+
+interface GroupEntry {
+  label: string;
+  abort: () => void;
+  admit: (admission: Admission) => void;
+}
+
+/** `concurrency:` groups of one run, keyed case-insensitively. */
+export class ConcurrencyGroups {
+  private readonly holders = new Map<string, GroupEntry>();
+  private readonly waiting = new Map<string, GroupEntry[]>();
+
+  constructor(
+    readonly mode: ConcurrencyMode,
+    private readonly note: (message: string) => void = () => undefined
+  ) {}
+
+  /**
+   * Wait to run in `group`. `abort` cancels this job once it's running
+   * (github mode, for a newcomer with cancel-in-progress).
+   */
+  enter(
+    group: string,
+    cancelInProgress: boolean,
+    abort: () => void,
+    label: string
+  ): Promise<Admission> {
+    const key = group.toLowerCase();
+    return new Promise<Admission>((admit) => {
+      const entry: GroupEntry = { label, abort, admit };
+      const holder = this.holders.get(key);
+      if (!holder) {
+        this.admit(key, entry);
+        return;
+      }
+      const queue = this.waiting.get(key) ?? [];
+      this.waiting.set(key, queue);
+      if (this.mode === 'github') {
+        if (cancelInProgress) {
+          this.note(
+            `Cancelling ${holder.label}: ${label} joined concurrency group "${group}" with cancel-in-progress`
+          );
+          holder.abort();
+        }
+        for (const older of queue.splice(0)) {
+          this.note(
+            `Cancelling ${older.label}: ${label} is now pending in concurrency group "${group}"`
+          );
+          older.admit('cancelled');
+        }
+      }
+      queue.push(entry);
+    });
+  }
+
+  private admit(key: string, entry: GroupEntry): void {
+    this.holders.set(key, entry);
+    let left = false;
+    entry.admit(() => {
+      if (left) return;
+      left = true;
+      const next = this.waiting.get(key)?.shift();
+      if (next) this.admit(key, next);
+      else this.holders.delete(key);
+    });
+  }
+}
+
+export interface MatrixOptions<R extends UnitOutcome = UnitOutcome> {
   /** `strategy.fail-fast`: cancel the other combinations on a failure. */
   failFast: boolean;
   /** `strategy.max-parallel`: combinations of this job running at once. */
@@ -79,6 +167,13 @@ export interface MatrixOptions {
   signal?: AbortSignal;
   /** Called once when fail-fast leaves combinations unstarted or cancelled. */
   onFailFast?: () => void;
+  /**
+   * Waited on before a combination takes its slots (its `concurrency:`
+   * group); `abort` cancels the combination once it runs.
+   */
+  gate?: (index: number, abort: () => void) => Promise<Admission>;
+  /** The outcome of a combination the gate cancelled before it started. */
+  onGateCancelled?: (index: number) => R | Promise<R>;
 }
 
 /**
@@ -92,7 +187,7 @@ export interface MatrixOptions {
 export async function runMatrix<R extends UnitOutcome>(
   count: number,
   run: (index: number, signal: AbortSignal) => Promise<R>,
-  options: MatrixOptions
+  options: MatrixOptions<R>
 ): Promise<Array<R | undefined>> {
   const outcomes: Array<R | undefined> = new Array(count).fill(undefined);
   const local = new Slots(options.maxParallel ?? count);
@@ -106,6 +201,31 @@ export async function runMatrix<R extends UnitOutcome>(
   options.signal?.addEventListener('abort', onParentAbort);
 
   const runOne = async (index: number): Promise<void> => {
+    const controller = new AbortController();
+    let leaveGroup: (() => void) | undefined;
+    if (options.gate) {
+      const admission = await options.gate(index, () => controller.abort());
+      if (admission === 'cancelled' || controller.signal.aborted) {
+        if (admission !== 'cancelled') admission();
+        if (!stopped && options.onGateCancelled) {
+          outcomes[index] = await options.onGateCancelled(index);
+          finished++;
+        }
+        return;
+      }
+      leaveGroup = admission;
+    }
+    try {
+      await runAdmitted(index, controller);
+    } finally {
+      leaveGroup?.();
+    }
+  };
+
+  const runAdmitted = async (
+    index: number,
+    controller: AbortController
+  ): Promise<void> => {
     const releaseLocal = await local.acquire();
     try {
       if (stopped) return;
@@ -114,7 +234,6 @@ export async function runMatrix<R extends UnitOutcome>(
         : undefined;
       try {
         if (stopped) return;
-        const controller = new AbortController();
         controllers.set(index, controller);
         try {
           const outcome = await run(index, controller.signal);

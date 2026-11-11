@@ -8,6 +8,7 @@ import {
   expressionDataFlow,
   resolveExpressionValue,
   staticCondition,
+  knownPrefix,
   substituteExpressions,
   validateExpression
 } from './expression';
@@ -569,5 +570,39 @@ describe('staticCondition', () => {
 
   it('is unknown when nothing is known about the event', () => {
     expect(staticCondition("github.event_name == 'push'", {})).toBe(undefined);
+  });
+
+  describe('a ref known only by its prefix (#90)', () => {
+    const tags = {
+      github: {
+        event_name: 'push',
+        ref: knownPrefix('refs/tags/v'),
+        ref_name: knownPrefix('v')
+      }
+    };
+    it.each([
+      ["startsWith(github.ref, 'refs/tags/')", true],
+      ["startsWith(github.ref, 'REFS/TAGS/V')", true],
+      ["startsWith(github.ref, 'refs/tags/v1')", undefined],
+      ["startsWith(github.ref, 'refs/heads/')", false],
+      ["github.ref == 'refs/heads/main'", false],
+      ["github.ref != 'refs/heads/main'", true],
+      ["github.ref == 'refs/tags/v1.0.0'", undefined],
+      ["'refs/heads/main' == github.ref", false],
+      ["github.ref_name == 'main'", false],
+      ["endsWith(github.ref, '.0')", undefined],
+      ['github.ref', true],
+      ['!github.ref', false],
+      ["github.ref == 'refs/heads/main' && failure()", false]
+    ] as const)('%s → %s', (expr, expected) => {
+      expect(staticCondition(expr, tags)).toBe(expected);
+    });
+  });
+
+  it('decides on an input known to be null (a trigger without inputs)', () => {
+    const known = { github: { event_name: 'push' }, inputs: { deploy: null } };
+    expect(staticCondition('inputs.deploy', known)).toBe(false);
+    expect(staticCondition("inputs.deploy == 'true'", known)).toBe(false);
+    expect(staticCondition('inputs.other', known)).toBe(undefined);
   });
 });

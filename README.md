@@ -73,10 +73,10 @@ less install.sh
 sh install.sh
 ```
 
-Set `SECURECI_VERSION=1.1.0` to install a specific release,
+Set `SECURECI_VERSION=1.2.0` to install a specific release,
 `SECURECI_INSTALL_DIR` to install somewhere else, and
 `SECURECI_REQUIRE_ATTESTATION=1` to fail unless `gh` verifies build provenance
-(e.g. `curl -fsSL https://secure-ci.dev/install.sh | SECURECI_VERSION=1.1.0 sh`).
+(e.g. `curl -fsSL https://secure-ci.dev/install.sh | SECURECI_VERSION=1.2.0 sh`).
 If the release's download link fails (GitHub has returned `504` for one while
 its API still served the files), the script fetches the same files through the
 GitHub API instead; the `SHA256SUMS` and provenance checks are unchanged.
@@ -263,18 +263,24 @@ things to know:
   `--isolate-workspace` to give each job its own copy, or `--parallel 1` to run
   jobs one after another.
 - **`actions/checkout` of the current repo doesn't clone** — it uses your working
-  copy as-is (so uncommitted changes are visible). A `ref:` your local
-  repository has is checked out only into a `path:`; other refs and
-  `fetch-depth:` don't change what you get. Other repositories check out for
-  real and need a token.
+  copy as-is (so uncommitted changes are visible). A `ref:` is checked out only
+  into a `path:`, from your local repository, or fetched from `origin` with
+  `--fetch-refs` (opt-in); `fetch-depth:` applies to that clone. Other
+  repositories check out for real and need a token.
 - **Artifacts and cache are local stand-ins**, stored under `~/.secureci/`;
   nothing is uploaded to or downloaded from GitHub.
-- **Not emulated:** `concurrency:` (noted at run start), deployment
-  `environment:` (protection rules and environment-scoped secrets/vars: pass
-  them with `--secret`/`--var`), and OIDC tokens for `id-token: write`.
+- **`concurrency:`** groups of jobs run one at a time within a run;
+  `--concurrency github` also cancels as GitHub does. Workflow-level
+  `concurrency:` has no other runs to apply to.
+- **Container `credentials:`** are used only with `--registry-login`, through a
+  temporary login removed right after the pull; otherwise use `docker login`.
+- **Not emulated:** deployment `environment:` (protection rules and
+  environment-scoped secrets/vars: pass them with `--secret`/`--var`), and OIDC
+  tokens for `id-token: write`.
 - **Contract checks** decide `if:` conditions only from the workflow's triggers
-  (`github.event_name`) and, without `--contract-recurse all`, don't look inside
-  _remote_ composite actions / reusable workflows.
+  (`github.event_name`, and `github.ref` / `inputs` where the triggers pin
+  them) and, without `--contract-recurse all`, don't look inside _remote_
+  composite actions / reusable workflows.
 
 The exact scope of each is documented in
 [DOCS.md](DOCS.md#contract-limitations-v1-scope).

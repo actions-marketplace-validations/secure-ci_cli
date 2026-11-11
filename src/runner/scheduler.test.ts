@@ -5,6 +5,8 @@ import {
   runJobGraph,
   defaultParallelism,
   parseParallel,
+  parseConcurrencyMode,
+  ConcurrencyGroups,
   UnitOutcome
 } from './scheduler';
 import { NeedsInfo } from './expression';
@@ -385,5 +387,169 @@ describe('runJobGraph', () => {
     ).rejects.toThrow('a broke');
     expect(started).toEqual(['a', 'b']);
     expect(bDone).toBe(true);
+  });
+});
+
+describe('ConcurrencyGroups (#90)', () => {
+  const noop = () => undefined;
+
+  describe('serialize (default)', () => {
+    it('admits one holder per group at a time, in arrival order; other groups are independent', async () => {
+      const groups = new ConcurrencyGroups('serialize');
+      const a = await groups.enter('g', false, noop, 'a');
+      expect(typeof a).toBe('function');
+      const order: string[] = [];
+      const b = groups.enter('G', false, noop, 'b').then((r) => {
+        order.push('b');
+        return r;
+      });
+      const c = groups.enter('g', false, noop, 'c').then((r) => {
+        order.push('c');
+        return r;
+      });
+      const other = await groups.enter('other', false, noop, 'x');
+      expect(typeof other).toBe('function');
+      await flush();
+      expect(order).toEqual([]);
+      (a as () => void)();
+      const released = await b;
+      expect(order).toEqual(['b']);
+      (released as () => void)();
+      expect(typeof (await c)).toBe('function');
+      expect(order).toEqual(['b', 'c']);
+    });
+
+    it('never cancels, even with cancel-in-progress', async () => {
+      const groups = new ConcurrencyGroups('serialize');
+      let aborted = 0;
+      const a = await groups.enter('g', true, () => aborted++, 'a');
+      const b = groups.enter('g', true, noop, 'b');
+      const c = groups.enter('g', true, noop, 'c');
+      await flush();
+      expect(aborted).toBe(0);
+      (a as () => void)();
+      ((await b) as () => void)();
+      expect(typeof (await c)).toBe('function');
+    });
+  });
+
+  describe('github', () => {
+    it('keeps one running and one pending: a newer pending job cancels the older one', async () => {
+      const notes: string[] = [];
+      const groups = new ConcurrencyGroups('github', (m) => notes.push(m));
+      const a = await groups.enter('g', false, noop, 'a');
+      const b = groups.enter('g', false, noop, 'b');
+      const c = groups.enter('g', false, noop, 'c');
+      expect(await b).toBe('cancelled');
+      expect(notes).toEqual([
+        'Cancelling b: c is now pending in concurrency group "g"'
+      ]);
+      (a as () => void)();
+      expect(typeof (await c)).toBe('function');
+    });
+
+    it('with cancel-in-progress, cancels the running job for the newcomer', async () => {
+      const notes: string[] = [];
+      const groups = new ConcurrencyGroups('github', (m) => notes.push(m));
+      let aborted = 0;
+      const a = await groups.enter('g', false, () => aborted++, 'a');
+      const b = groups.enter('g', true, noop, 'b');
+      expect(aborted).toBe(1);
+      expect(notes).toEqual([
+        'Cancelling a: b joined concurrency group "g" with cancel-in-progress'
+      ]);
+      (a as () => void)();
+      expect(typeof (await b)).toBe('function');
+    });
+  });
+
+  it('parses --concurrency', () => {
+    expect(parseConcurrencyMode('serialize')).toBe('serialize');
+    expect(parseConcurrencyMode('GitHub')).toBe('github');
+    expect(() => parseConcurrencyMode('off')).toThrow(
+      'Invalid value "off" for concurrency. Must be serialize or github.'
+    );
+  });
+});
+
+describe('runMatrix gate (#90)', () => {
+  const ok: UnitOutcome = { result: 'success' };
+
+  it('waits at the gate before taking a global slot, and releases it after', async () => {
+    const slots = new Slots(2);
+    const groups = new ConcurrencyGroups('serialize');
+    const events: string[] = [];
+    const finish = [deferred(), deferred()];
+    const run = runMatrix(
+      2,
+      async (i) => {
+        events.push(`start ${i}`);
+        await finish[i].promise;
+        events.push(`end ${i}`);
+        return ok;
+      },
+      {
+        failFast: false,
+        slots,
+        gate: (i, abort) => groups.enter('g', false, abort, String(i)),
+        onGateCancelled: () => ({ result: 'cancelled' })
+      }
+    );
+    await flush();
+    expect(events).toEqual(['start 0']);
+    // The waiting combination holds no global slot.
+    const other = await slots.acquire();
+    other();
+    finish[0].resolve();
+    await flush();
+    expect(events).toEqual(['start 0', 'end 0', 'start 1']);
+    finish[1].resolve();
+    await run;
+  });
+
+  it('reports a combination the gate cancelled through onGateCancelled', async () => {
+    const groups = new ConcurrencyGroups('github');
+    const finish = deferred();
+    const outcomes = runMatrix(
+      3,
+      async () => {
+        await finish.promise;
+        return ok;
+      },
+      {
+        failFast: false,
+        gate: (i, abort) => groups.enter('g', false, abort, String(i)),
+        onGateCancelled: () => ({ result: 'cancelled' })
+      }
+    );
+    await flush();
+    finish.resolve();
+    expect((await outcomes).map((o) => o?.result)).toEqual([
+      'success',
+      'cancelled',
+      'success'
+    ]);
+  });
+
+  it('aborts the running combination when the gate says so (cancel-in-progress)', async () => {
+    const groups = new ConcurrencyGroups('github');
+    const outcomes = await runMatrix(
+      2,
+      (i, signal) =>
+        new Promise<UnitOutcome>((resolve) => {
+          if (signal.aborted) resolve({ result: 'cancelled' });
+          else if (i === 0) {
+            signal.addEventListener('abort', () =>
+              resolve({ result: 'cancelled' })
+            );
+          } else resolve(ok);
+        }),
+      {
+        failFast: false,
+        gate: (i, abort) => groups.enter('g', true, abort, String(i)),
+        onGateCancelled: () => ({ result: 'cancelled' })
+      }
+    );
+    expect(outcomes.map((o) => o?.result)).toEqual(['cancelled', 'success']);
   });
 });

@@ -490,6 +490,32 @@ class Unknown {
   constructor(readonly truthy?: boolean) {}
 }
 
+/**
+ * A string static evaluation knows only the start of (lower-cased), e.g.
+ * `github.ref` on a tags-only push: `refs/tags/`. Decides `==` / `!=`
+ * against a literal that can't share the prefix and `startsWith`.
+ */
+class KnownPrefix extends Unknown {
+  constructor(readonly prefix: string) {
+    super(prefix !== '' ? true : undefined);
+  }
+}
+
+/** A string known to start with `prefix` (compared case-insensitively). */
+export function knownPrefix(prefix: string): unknown {
+  return new KnownPrefix(prefix.toLowerCase());
+}
+
+/** False when `a == b` can't hold because of a known prefix, else undefined. */
+function prefixRulesOutEquality(a: unknown, b: unknown): boolean {
+  const [known, other] =
+    a instanceof KnownPrefix ? [a, unwrap(b)] : [b as KnownPrefix, unwrap(a)];
+  if (!(known instanceof KnownPrefix) || typeof other !== 'string') {
+    return false;
+  }
+  return !other.toLowerCase().startsWith(known.prefix);
+}
+
 /** Contexts an expression may name; static evaluation knows only some. */
 const NAMED_CONTEXTS = new Set([
   'env',
@@ -608,6 +634,10 @@ class Parser {
     while (this.isOp('==', '!=')) {
       const op = (this.next() as { value: string }).value;
       const right = this.parseComparison();
+      if (prefixRulesOutEquality(left, right)) {
+        left = op !== '==';
+        continue;
+      }
       if (left instanceof Unknown || right instanceof Unknown) {
         left = new Unknown();
         continue;
@@ -778,6 +808,16 @@ class Parser {
     checkCall(name, args.length);
     const lower = name.toLowerCase();
     if (lower === 'success' || lower === 'always') return true;
+    if (lower === 'startswith' && args[0] instanceof KnownPrefix) {
+      const search = unwrap(args[1]);
+      if (typeof search === 'string') {
+        const { prefix } = args[0];
+        const wanted = search.toLowerCase();
+        if (prefix.startsWith(wanted)) return true;
+        if (!wanted.startsWith(prefix)) return false;
+      }
+      return new Unknown();
+    }
     if (
       ['failure', 'cancelled', 'hashfiles'].includes(lower) ||
       args.some((arg) => arg instanceof Unknown)

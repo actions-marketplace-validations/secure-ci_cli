@@ -17,6 +17,9 @@ links to.
 - **Keep dependencies minimal** — prefer the standard library and existing
   helpers over new packages. This is a security tool; don't weaken container
   isolation, secret masking, or the host-mode opt-in.
+- **Every CLI change updates the docs and the website:** DOCS.md/README.md in
+  the same PR, plus a linked secure-ci/website PR (`docs.html`, `llms.txt`,
+  affected pages). See [AGENTS.md](../AGENTS.md).
 - **Before committing, all four checks must pass:**
   ```bash
   npm run lint && npm run format && npm test && npm run build

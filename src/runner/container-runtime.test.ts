@@ -17,6 +17,7 @@ vi.mock('child_process', () => ({
 
 import {
   resolveContainerRuntime,
+  registryOf,
   _resetRuntimeCacheForTests,
   type ContainerRuntime
 } from './container-runtime';
@@ -69,6 +70,126 @@ describe('container-runtime', () => {
     execMock.mockReset();
     spawnMock.mockReset();
     _resetRuntimeCacheForTests();
+  });
+
+  it.each([
+    ['node:20', 'docker.io'],
+    ['library/node:20', 'docker.io'],
+    ['me/app', 'docker.io'],
+    ['ghcr.io/me/app:1', 'ghcr.io'],
+    ['registry.example.com:5000/db:2', 'registry.example.com:5000'],
+    ['localhost/app', 'localhost'],
+    ['localhost:5000/app', 'localhost:5000']
+  ])('registryOf(%s) is %s', (image, registry) => {
+    expect(registryOf(image)).toBe(registry);
+  });
+
+  describe('pull with registry credentials (#90)', () => {
+    interface Call {
+      args: string[];
+      env?: NodeJS.ProcessEnv;
+      input?: string;
+      configMode?: number;
+    }
+    /** Every spawn closes at once, with `stdout(args)` and `code(args)`. */
+    function autoSpawn(
+      stdout: (args: string[]) => string = () => '',
+      code: (args: string[]) => number = () => 0
+    ) {
+      const calls: Call[] = [];
+      spawnMock.mockImplementation(
+        (_bin: string, args: string[], opts?: { env?: NodeJS.ProcessEnv }) => {
+          const child = fakeChildProcess() as ReturnType<
+            typeof fakeChildProcess
+          > & { stdin: { end: Mock } };
+          const call: Call = { args, env: opts?.env };
+          const dir =
+            opts?.env?.DOCKER_CONFIG ??
+            (opts?.env?.REGISTRY_AUTH_FILE
+              ? path.dirname(opts.env.REGISTRY_AUTH_FILE)
+              : undefined);
+          if (dir) call.configMode = fs.statSync(dir).mode & 0o777;
+          child.stdin = {
+            end: vi.fn((input?: string) => {
+              call.input = input;
+            })
+          };
+          calls.push(call);
+          setImmediate(() => {
+            child.stdout.emit('data', Buffer.from(stdout(args)));
+            child.emit('close', code(args));
+          });
+          return child;
+        }
+      );
+      return calls;
+    }
+    const auth = {
+      registry: 'ghcr.io',
+      username: 'me',
+      password: 's3cret'
+    };
+
+    async function runtimeNamed(name: 'docker' | 'podman') {
+      execMock.mockImplementation((_cmd, _opts, cb) => cb(null, '', ''));
+      return (await resolveContainerRuntime(name)) as ContainerRuntime;
+    }
+
+    it('docker: logs in to a private config dir (password on stdin), pulls, then removes it', async () => {
+      const saved = process.env.DOCKER_HOST;
+      delete process.env.DOCKER_HOST;
+      try {
+        const calls = autoSpawn((args) =>
+          args[0] === 'context' ? 'unix:///run/user.sock\n' : ''
+        );
+        const runtime = await runtimeNamed('docker');
+        const result = await runtime.pull('ghcr.io/me/app:1', auth);
+        expect(result).toEqual({ success: true });
+        expect(calls.map((c) => c.args)).toEqual([
+          ['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'],
+          ['login', '--username', 'me', '--password-stdin', 'ghcr.io'],
+          ['pull', 'ghcr.io/me/app:1']
+        ]);
+        const [, login, pull] = calls;
+        expect(login.input).toBe('s3cret');
+        expect(JSON.stringify(login.args)).not.toContain('s3cret');
+        expect(login.configMode).toBe(0o700);
+        // Keep talking to the same engine though the config dir changed.
+        expect(login.env?.DOCKER_HOST).toBe('unix:///run/user.sock');
+        expect(pull.env?.DOCKER_CONFIG).toBe(login.env?.DOCKER_CONFIG);
+        expect(fs.existsSync(login.env?.DOCKER_CONFIG as string)).toBe(false);
+      } finally {
+        if (saved !== undefined) process.env.DOCKER_HOST = saved;
+      }
+    });
+
+    it('podman: uses a private auth file', async () => {
+      const calls = autoSpawn();
+      const runtime = await runtimeNamed('podman');
+      expect(await runtime.pull('ghcr.io/me/app:1', auth)).toEqual({
+        success: true
+      });
+      expect(calls.map((c) => c.args[0])).toEqual(['login', 'pull']);
+      const file = calls[0].env?.REGISTRY_AUTH_FILE as string;
+      expect(path.basename(file)).toBe('auth.json');
+      expect(calls[1].env?.REGISTRY_AUTH_FILE).toBe(file);
+      expect(fs.existsSync(path.dirname(file))).toBe(false);
+    });
+
+    it('reports a failed login without pulling, and still cleans up', async () => {
+      const calls = autoSpawn(
+        () => '',
+        (args) => (args[0] === 'login' ? 1 : 0)
+      );
+      const runtime = await runtimeNamed('podman');
+      const result = await runtime.pull('ghcr.io/me/app:1', auth);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('login to ghcr.io failed');
+      expect(calls.map((c) => c.args[0])).toEqual(['login']);
+      expect(
+        fs.existsSync(path.dirname(calls[0].env?.REGISTRY_AUTH_FILE as string))
+      ).toBe(false);
+    });
   });
 
   describe('resolveContainerRuntime', () => {
@@ -458,6 +579,34 @@ describe('container-runtime', () => {
         'echo hi'
       ]);
       expect(captures[0].envFile).toBe('A=1\n');
+    });
+
+    it('execs as another user when one is given (e.g. root, for cleanup)', async () => {
+      const runtime = await dockerRuntime();
+      const child = fakeChildProcess();
+      const captures = captureSpawn(child);
+
+      const resultPromise = runtime.exec('abc123', {
+        args: ['rm', '-rf', '--', '/secureci-workspace/x'],
+        user: '0'
+      });
+      child.emit('close', 0);
+      await resultPromise;
+
+      expect(captures[0].args.slice(0, 5)).toEqual([
+        'exec',
+        '-w',
+        '/secureci-workspace',
+        '-u',
+        '0'
+      ]);
+      expect(captures[0].args.slice(-5)).toEqual([
+        'abc123',
+        'rm',
+        '-rf',
+        '--',
+        '/secureci-workspace/x'
+      ]);
     });
 
     it('execs argv directly (no shell) when args are given', async () => {

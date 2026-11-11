@@ -2,7 +2,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as YAML from 'yaml';
 import type { ContainerRuntimePreference } from './runner/container-runtime';
-import { defaultParallelism, parseParallel } from './runner/scheduler';
+import {
+  ConcurrencyMode,
+  defaultParallelism,
+  parseConcurrencyMode,
+  parseParallel
+} from './runner/scheduler';
 
 /**
  * Global SecureCI configuration, stored as YAML at `~/.secureci/config.yml`.
@@ -23,6 +28,8 @@ export interface CliConfig {
   parallel?: number;
   /** Each job in its own copy of the working copy (`--isolate-workspace`). */
   'isolate-workspace'?: boolean;
+  /** How job `concurrency:` groups apply (`--concurrency`). */
+  concurrency?: ConcurrencyMode;
   /**
    * Default files for `run --env-file` etc., used when the flag isn't given.
    * Relative paths resolve against the current directory. `config set`
@@ -115,6 +122,7 @@ export const CONFIG_KEYS = [
   'allow-network',
   'parallel',
   'isolate-workspace',
+  'concurrency',
   'env-file',
   'secret-file',
   'input-file',
@@ -212,6 +220,8 @@ export function parseConfigValue(
       return rawValue === 'true';
     case 'parallel':
       return parseParallel(rawValue);
+    case 'concurrency':
+      return parseConcurrencyMode(rawValue);
     case 'container-image':
     case 'container-memory':
       return rawValue;
@@ -236,6 +246,18 @@ export function resolveIsolateWorkspace(
   config: CliConfig = loadConfig()
 ): boolean {
   return flag ?? config['isolate-workspace'] === true;
+}
+
+/**
+ * How job `concurrency:` groups apply: `--concurrency`, else
+ * `concurrency` in the config file, else serialize.
+ */
+export function resolveConcurrency(
+  flag: string | undefined,
+  config: CliConfig = loadConfig()
+): ConcurrencyMode {
+  const value = flag ?? config.concurrency;
+  return value === undefined ? 'serialize' : parseConcurrencyMode(value);
 }
 
 /**

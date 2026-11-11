@@ -461,6 +461,115 @@ jobs:
     expect(logged()).toContain('[call (n: 1)]');
   });
 
+  describe('concurrency: groups (#90)', () => {
+    // Each job records when it starts and ends, so overlap is visible.
+    const timed = (name: string) =>
+      `echo "start ${name}" >> "${dir}/log" && sleep 0.3 && echo "end ${name}" >> "${dir}/log"`;
+    const log = () =>
+      fs.readFileSync(path.join(dir, 'log'), 'utf8').trim().split('\n');
+
+    it('runs jobs that share a group one at a time, even with --parallel', async () => {
+      const file = workflow(`
+name: Groups
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    concurrency: deploy-\${{ github.ref }}
+    steps:
+      - run: ${timed('a')}
+  b:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: DEPLOY-\${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - run: ${timed('b')}
+  c:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ${timed('c')}
+`);
+      const result = await executeWorkflow(file, { parallel: 3 });
+      expect(result.success).toBe(true);
+      const lines = log();
+      // a and b never overlap; c (no group) runs alongside.
+      const ab = lines.filter((l) => / [ab]$/.test(l));
+      expect(ab[0].replace('start', 'end')).toBe(ab[1]);
+      expect(lines.indexOf('start c')).toBeLessThan(lines.indexOf('end a'));
+      expect(logged()).toContain(
+        "cancel-in-progress isn't applied with --concurrency serialize (jobs.b)"
+      );
+    });
+
+    it('serializes matrix combinations whose group includes no matrix value', async () => {
+      const file = workflow(`
+name: Matrix Group
+on: push
+jobs:
+  m:
+    runs-on: ubuntu-latest
+    concurrency: one-at-a-time
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - run: ${timed('m${{ matrix.n }}')}
+`);
+      const result = await executeWorkflow(file, { parallel: 2 });
+      expect(result.success).toBe(true);
+      expect(log()).toEqual(['start m1', 'end m1', 'start m2', 'end m2']);
+    });
+
+    it('with --concurrency github, a newer pending job cancels the older one', async () => {
+      const file = workflow(`
+name: Github Mode
+on: push
+jobs:
+  m:
+    runs-on: ubuntu-latest
+    concurrency: shared
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3]
+    steps:
+      - run: ${timed('m${{ matrix.n }}')}
+`);
+      const result = await executeWorkflow(file, {
+        parallel: 3,
+        concurrency: 'github'
+      });
+      expect(result.success).toBe(false);
+      expect(result.jobs.map((j) => [j.job, j.cancelled ?? false])).toEqual([
+        ['m (n: 1)', false],
+        ['m (n: 2)', true],
+        ['m (n: 3)', false]
+      ]);
+      expect(log()).toEqual(['start m1', 'end m1', 'start m3', 'end m3']);
+      expect(logged()).toContain(
+        'Cancelling m (n: 2): m (n: 3) is now pending in concurrency group "shared"'
+      );
+    });
+
+    it('notes that workflow-level concurrency has nothing to apply to', async () => {
+      const file = workflow(`
+name: Workflow Level
+on: push
+concurrency: whole-run
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo a
+`);
+      await executeWorkflow(file, { parallel: 2 });
+      expect(logged()).toContain(
+        "workflow-level concurrency: isn't applied in a local run"
+      );
+    });
+  });
+
   describe('--isolate-workspace', () => {
     let ws: string;
     beforeEach(() => {

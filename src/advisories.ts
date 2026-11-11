@@ -88,6 +88,8 @@ export interface AdvisoryReport {
   unchecked: Array<{ repo: string; reason: string }>;
   /** `owner/repo` answered from a cache older than the TTL. */
   stale: string[];
+  /** `owner/repo` with more advisories than were read (see MAX_ADVISORY_PAGES). */
+  truncated?: string[];
 }
 
 /** GET `url`; rejects with an error carrying `status` on a non-200. */
@@ -454,6 +456,8 @@ interface CacheFile {
   api: string;
   fetchedAt: number;
   advisories: Advisory[];
+  /** More pages remained after MAX_ADVISORY_PAGES. */
+  truncated?: boolean;
 }
 
 export interface AdvisoryLookup {
@@ -462,6 +466,8 @@ export interface AdvisoryLookup {
   stale?: boolean;
   /** Why the API couldn't answer. */
   error?: string;
+  /** Only the first MAX_ADVISORY_PAGES pages were read. */
+  truncated?: boolean;
 }
 
 function describeError(error: unknown, authenticated: boolean): string {
@@ -501,10 +507,13 @@ export async function fetchRepoAdvisories(
     cached = undefined;
   }
   const isStale = cached ? now - cached.fetchedAt >= ttl : false;
-  if (cached && !isStale) return { advisories: cached.advisories };
+  const cachedTruncated = cached?.truncated ? { truncated: true } : {};
+  if (cached && !isStale) {
+    return { advisories: cached.advisories, ...cachedTruncated };
+  }
   if (options.offline) {
     return cached
-      ? { advisories: cached.advisories, stale: true }
+      ? { advisories: cached.advisories, stale: true, ...cachedTruncated }
       : { error: 'offline and not cached' };
   }
 
@@ -545,20 +554,37 @@ export async function fetchRepoAdvisories(
     const advisories = parseAdvisories(JSON.parse(response.body));
     // Later pages only from the API's own origin, which the token is for.
     const origin = new URL(url).origin;
-    for (let pages = 1; pages < MAX_ADVISORY_PAGES; pages++) {
+    const sameOriginNext = (): string | undefined => {
       const next = nextPageUrl(response.link);
-      if (!next || new URL(next, url).origin !== origin) break;
-      response = await page(new URL(next, url).toString());
+      return next && new URL(next, url).origin === origin
+        ? new URL(next, url).toString()
+        : undefined;
+    };
+    for (let pages = 1; pages < MAX_ADVISORY_PAGES; pages++) {
+      const next = sameOriginNext();
+      if (!next) break;
+      response = await page(next);
       advisories.push(...parseAdvisories(JSON.parse(response.body)));
     }
+    const truncated = sameOriginNext() !== undefined;
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const entry: CacheFile = { api, fetchedAt: now, advisories };
+    const entry: CacheFile = {
+      api,
+      fetchedAt: now,
+      advisories,
+      ...(truncated ? { truncated } : {})
+    };
     fs.writeFileSync(file, JSON.stringify(entry, null, 2));
-    return { advisories };
+    return { advisories, ...(truncated ? { truncated } : {}) };
   } catch (error) {
     const message = describeError(error, !!token);
     return cached
-      ? { advisories: cached.advisories, stale: true, error: message }
+      ? {
+          advisories: cached.advisories,
+          stale: true,
+          error: message,
+          ...cachedTruncated
+        }
       : { error: message };
   }
 }
@@ -626,6 +652,9 @@ export class AdvisoryChecker {
           });
         } else if (result.stale) {
           report.stale.push(repoName);
+        }
+        if (result.truncated) {
+          (report.truncated ??= []).push(repoName);
         }
       }
       const advisories = relevant(target, result.advisories ?? []);
@@ -723,6 +752,13 @@ export function describeReport(
       text: `Used cached security advisories older than 24h for ${report.stale.join(', ')} (they could not be refreshed).`
     });
   }
+  if (report.truncated?.length) {
+    lines.push({
+      level: 'warn',
+      kind: 'note',
+      text: `Only the first ${(MAX_ADVISORY_PAGES * 100).toLocaleString('en-US')} security advisories were read for ${report.truncated.join(', ')}; later ones were not checked.`
+    });
+  }
   return lines;
 }
 
@@ -764,6 +800,9 @@ export function mergeReports(reports: AdvisoryReport[]): AdvisoryReport {
     }
     for (const s of r.stale) {
       if (!merged.stale.includes(s)) merged.stale.push(s);
+    }
+    for (const t of r.truncated ?? []) {
+      if (!merged.truncated?.includes(t)) (merged.truncated ??= []).push(t);
     }
   }
   return merged;

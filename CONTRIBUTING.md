@@ -95,6 +95,11 @@ rewrites in place). The CLI also validates its own workflow in CI, so keep
 - **Update the docs you touched:** user-facing behavior → [DOCS.md](DOCS.md) and,
   if it's headline-level, [README.md](README.md); internal design → the relevant
   file under [.github/agents/](.github/agents/).
+- **Update the website too:** a change to what the CLI does (flags, config,
+  output, limitations) also needs a companion PR in
+  [secure-ci/website](https://github.com/secure-ci/website) (`docs.html`,
+  `llms.txt` and any page describing it), linked from this PR. See
+  [AGENTS.md](AGENTS.md#keep-docs-and-the-website-in-step-with-the-cli).
 - **A PR is ready when** lint, format, tests and build all pass, new behavior has
   tests, and the diff is scoped to one concern.
 

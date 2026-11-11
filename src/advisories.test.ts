@@ -487,6 +487,47 @@ describe('fetchRepoAdvisories', () => {
       });
       expect(n).toBe(10);
       expect(result.advisories).toHaveLength(10);
+      expect(result.truncated).toBe(true);
+      // Remembered with the cache, so a cached answer is flagged too.
+      const again = await fetchRepoAdvisories('o', 'r', {
+        ...base,
+        httpGet: async () => {
+          throw new Error('not cached');
+        },
+        cacheDir
+      });
+      expect(again.truncated).toBe(true);
+    });
+
+    it('is not truncated when the last page has no next link', async () => {
+      const result = await fetchRepoAdvisories('o', 'r', {
+        ...base,
+        httpGet: async () => ({ body: JSON.stringify([first]) }),
+        cacheDir
+      });
+      expect(result.truncated).toBeUndefined();
+    });
+
+    it('reports a repository whose advisories hit the cap (#90)', async () => {
+      let n = 0;
+      const checker = new AdvisoryChecker({
+        ...base,
+        cacheDir,
+        listTags: async () => undefined,
+        httpGet: async () => ({
+          body: JSON.stringify([first]),
+          link: nextLink(
+            `https://ghe.example.com/api/v3/advisories?after=${++n}`
+          )
+        })
+      });
+      const report = await checker.check([
+        { owner: 'o', repo: 'r', ref: 'v1', uses: 'o/r@v1' }
+      ]);
+      expect(report.truncated).toEqual(['o/r']);
+      expect(describeReport(report).map((l) => l.text)).toContain(
+        'Only the first 1,000 security advisories were read for o/r; later ones were not checked.'
+      );
     });
 
     it("doesn't cache a lookup whose later page failed", async () => {
@@ -1106,5 +1147,21 @@ describe('mergeReports', () => {
       unchecked: one.unchecked,
       stale: one.stale
     });
+  });
+
+  it('lists each truncated repository once', () => {
+    const base = {
+      findings: [],
+      unknownVersions: [],
+      unchecked: [],
+      stale: []
+    };
+    expect(
+      mergeReports([
+        { ...base, truncated: ['a/b'] },
+        { ...base, truncated: ['a/b', 'c/d'] },
+        base
+      ]).truncated
+    ).toEqual(['a/b', 'c/d']);
   });
 });
