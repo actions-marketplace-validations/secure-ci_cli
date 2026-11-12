@@ -37,7 +37,7 @@ inputs:
   version:
     description: 'Version of @secureci/cli to run (npm version or dist-tag). Default: the release this action ships with (kept equal to package.json).'
     required: false
-    default: '1.3.0'
+    default: '1.3.1'
   github-token:
     description: 'Token used by the CLI to look up security advisories for the actions you use (raising the API rate limit), and to fetch a private remote contract or private actions/workflows for --contract-recurse all.'
     required: false

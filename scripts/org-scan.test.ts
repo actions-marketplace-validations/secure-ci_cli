@@ -520,6 +520,34 @@ describe('org-scan.sh', () => {
     expect(result.stdout).toContain('--repos');
   });
 
+  it('runs secureci from PATH when SECURECI is unset', async () => {
+    const s = setup();
+    bareRepo(s.gitRoot, 'acme/api', { '.github/workflows/ci.yml': WORKFLOW });
+    fs.writeFileSync(path.join(s.cwd, 'repos.txt'), 'api\n');
+    const result = await run(['--repos', 'repos.txt', 'acme'], {
+      cwd: s.cwd,
+      env: {
+        ...env(s, undefined),
+        SECURECI: undefined,
+        PATH: `${path.dirname(s.secureci)}${path.delimiter}${process.env.PATH}`
+      }
+    });
+    expect(result.stderr).not.toContain('error:');
+    expect(result.code).toBe(0);
+    expect(s.calls().map((c) => c.split('|')[1])).toEqual([
+      '--version',
+      'validate --format json .github/workflows/ci.yml',
+      'inventory --dry-run .github/workflows/ci.yml'
+    ]);
+    const manifest = JSON.parse(
+      fs.readFileSync(
+        path.join(s.cwd, 'secureci-org-scan-acme', 'manifest.json'),
+        'utf8'
+      )
+    );
+    expect(manifest.secureciVersion).toBe('9.9.9');
+  });
+
   it('fails clearly when secureci is not installed', async () => {
     const s = setup();
     const result = await run(['acme'], {
