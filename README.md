@@ -73,10 +73,10 @@ less install.sh
 sh install.sh
 ```
 
-Set `SECURECI_VERSION=1.2.0` to install a specific release,
+Set `SECURECI_VERSION=1.3.0` to install a specific release,
 `SECURECI_INSTALL_DIR` to install somewhere else, and
 `SECURECI_REQUIRE_ATTESTATION=1` to fail unless `gh` verifies build provenance
-(e.g. `curl -fsSL https://secure-ci.dev/install.sh | SECURECI_VERSION=1.2.0 sh`).
+(e.g. `curl -fsSL https://secure-ci.dev/install.sh | SECURECI_VERSION=1.3.0 sh`).
 If the release's download link fails (GitHub has returned `504` for one while
 its API still served the files), the script fetches the same files through the
 GitHub API instead; the `SHA256SUMS` and provenance checks are unchanged.
@@ -212,6 +212,9 @@ in the job reuses it, so tools and files from earlier steps persist.
   `--container-runtime`. The image follows `jobs.<id>.container`,
   `--container-image`, or a `runs-on` → runner-image mapping you can override in
   config.
+- **Profiles** (`secureci.yml`, `--profile dev`) — swap a private self-hosted
+  `runs-on`, job container image or service image for ones you can reach, plus
+  per-profile env, vars and settings, without editing the workflow.
 - **Service containers** (`jobs.<id>.services`) — databases, caches and other
   sidecars start before the job, join its network (reachable by hostname like
   `postgres:5432`), wait for health checks, and are torn down with the job.

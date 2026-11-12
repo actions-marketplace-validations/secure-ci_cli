@@ -30,6 +30,50 @@ describe('Dry Run', () => {
       }
     });
 
+    it('applies profile workflow overrides, logging each replacement', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-dry-'));
+      const file = path.join(dir, 'wf.yml');
+      fs.writeFileSync(
+        file,
+        [
+          'name: P',
+          'on: push',
+          'jobs:',
+          '  a:',
+          '    runs-on: [self-hosted, corp]',
+          '    container: registry.corp/img:1',
+          '    steps:',
+          '      - run: echo x'
+        ].join('\n')
+      );
+      const logs: string[] = [];
+      const originalLog = console.log;
+      console.log = (...args: unknown[]) => {
+        logs.push(args.join(' '));
+      };
+      try {
+        const result = dryRun(file, {
+          profile: 'dev',
+          workflowOverrides: {
+            'runs-on': { corp: 'ubuntu-latest' },
+            'container-image': 'node:23'
+          }
+        });
+        expect(result.success).toBe(true);
+        const out = logs.join('\n');
+        expect(out).toContain(
+          'Profile "dev": jobs.a.runs-on: self-hosted, corp -> ubuntu-latest'
+        );
+        expect(out).toContain(
+          'Profile "dev": jobs.a.container: registry.corp/img:1 -> node:23'
+        );
+        expect(out).toContain('Runs on: ubuntu-latest');
+      } finally {
+        console.log = originalLog;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('should display workflow structure without executing', () => {
       const workflowPath = path.join(fixturesDir, 'simple-workflow.yml');
 

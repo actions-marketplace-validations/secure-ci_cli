@@ -65,20 +65,28 @@ import { logger, LogLevel } from './utils/logger';
 import { loadKeyValues } from './utils/env-file';
 import {
   loadConfig,
-  saveConfig,
   getConfigFilePath,
   getDefaultContainerRuntime,
   DEFAULT_CONFIG,
   isValidConfigKey,
   getConfigValue,
-  setConfigValue,
-  unsetConfigValue,
   resolveIsolateWorkspace,
   resolveConcurrency,
   resolveNetworkDisabled,
   getDefaultParallel,
-  CONFIG_KEYS
+  CONFIG_KEYS,
+  CONFIG_KEY_FORMS,
+  profileEntries,
+  updateConfigFile,
+  SecureciConfig
 } from './config';
+import {
+  findRepoRoot,
+  loadRepoConfig,
+  resolveRunConfig,
+  REPO_CONFIG_FILE,
+  ResolvedRunConfig
+} from './project-config';
 import { parseParallel } from './runner/scheduler';
 import { readVersion } from './version';
 import { runOrgScan } from './org-scan';
@@ -95,21 +103,32 @@ const LOCKFILE_NAME = 'secureci.lock';
 const program = new Command();
 const globalConfig = loadConfig();
 
-// An invalid container-runtime in the config file only stops `run`, so
-// `secureci config set` can still fix it.
-let configError: string | undefined;
-let defaultContainerRuntime: ReturnType<typeof getDefaultContainerRuntime>;
-try {
-  defaultContainerRuntime = getDefaultContainerRuntime(globalConfig);
-} catch (error) {
-  configError = error instanceof Error ? error.message : String(error);
-  defaultContainerRuntime = 'docker';
-}
-let defaultParallel = 1;
-try {
-  defaultParallel = getDefaultParallel(globalConfig);
-} catch (error) {
-  configError ??= error instanceof Error ? error.message : String(error);
+/**
+ * The effective settings for `run`: the active profile (`--profile`, else
+ * $SECURECI_PROFILE) over the repository's secureci.yml (or package.json
+ * `secureci` key) over ~/.secureci/config.yml. Exits on an invalid config,
+ * so other commands (and `secureci config set`) still work while it's
+ * broken.
+ */
+function resolveRunSettings(profile: string | undefined): ResolvedRunConfig & {
+  containerRuntime: ReturnType<typeof getDefaultContainerRuntime>;
+  parallel: number;
+} {
+  try {
+    const resolved = resolveRunConfig({
+      global: globalConfig,
+      repo: loadRepoConfig(findRepoRoot()),
+      profile
+    });
+    return {
+      ...resolved,
+      containerRuntime: getDefaultContainerRuntime(resolved.config),
+      parallel: getDefaultParallel(resolved.config)
+    };
+  } catch (error) {
+    logger.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
 }
 
 program
@@ -203,13 +222,15 @@ program
     '--registry-login',
     'Pull job and service container images that set credentials: with them: a temporary login, removed right after the pull, with the password on stdin and masked in logs. Off by default: credentials: are warned about and your own docker login is used'
   )
+  .option(
+    '--profile <name>',
+    `Apply a profile from ${REPO_CONFIG_FILE} or ~/.secureci/config.yml: its settings, env, vars and workflow rewrites (runs-on, container and service images). Default: $SECURECI_PROFILE`
+  )
   .addOption(
     new Option(
       '--container-runtime <name>',
-      'Container engine for jobs. "host" runs steps directly on this machine, without a container. Config: container-runtime'
-    )
-      .choices(['auto', 'docker', 'podman', 'containerd', 'host'])
-      .default(defaultContainerRuntime)
+      'Container engine for jobs. "host" runs steps directly on this machine, without a container. Default: docker. Config: container-runtime'
+    ).choices(['auto', 'docker', 'podman', 'containerd', 'host'])
   )
   .option(
     '--container-image <image>',
@@ -217,15 +238,11 @@ program
   )
   .option(
     '--container-timeout <ms>',
-    'Fail a step that runs longer than this, in milliseconds (container mode). Config: container-timeout',
-    globalConfig['container-timeout'] !== undefined
-      ? String(globalConfig['container-timeout'])
-      : undefined
+    'Fail a step that runs longer than this, in milliseconds (container mode). Config: container-timeout'
   )
   .option(
     '--container-memory <limit>',
-    'Limit job container memory, e.g. 512m. Config: container-memory',
-    globalConfig['container-memory']
+    'Limit job container memory, e.g. 512m. Config: container-memory'
   )
   .option('--no-network', 'Turn off container network access (on by default)')
   .option(
@@ -242,18 +259,17 @@ program
   )
   .option(
     '--parallel <n>',
-    'Run up to this many jobs (and matrix combinations) at once; 1 runs them one after another. Default: the number of CPUs. Config: parallel',
-    String(defaultParallel)
+    'Run up to this many jobs (and matrix combinations) at once; 1 runs them one after another. Default: the number of CPUs. Config: parallel'
   )
   .option(
     '--concurrency <mode>',
     'How jobs sharing a concurrency: group run: serialize (one at a time, all of them) or github (also cancel as GitHub does: one pending per group, newer pending replaces older, cancel-in-progress). Default: serialize. Config: concurrency'
   )
   .action(async (file: string, options) => {
-    if (configError) {
-      logger.error(configError);
-      process.exit(1);
-    }
+    const profile: string | undefined =
+      options.profile ?? (process.env.SECURECI_PROFILE || undefined);
+    const settings = resolveRunSettings(profile);
+    const config = settings.config;
     requireFile(file);
 
     let matrix: MatrixFilter;
@@ -265,7 +281,12 @@ program
     }
 
     if (options.dryRun) {
-      const result = dryRun(file, { job: options.job, matrix });
+      const result = dryRun(file, {
+        job: options.job,
+        matrix,
+        profile,
+        workflowOverrides: settings.workflow
+      });
       if (!result.success) {
         process.exit(1);
       }
@@ -282,34 +303,46 @@ program
         fileFlagName: '--input-file',
         pairs: options.input,
         files: options.inputFile,
-        configFiles: globalConfig['input-file']
+        configFiles: config['input-file']
       });
       const secrets = loadKeyValues({
         flagName: '--secret',
         fileFlagName: '--secret-file',
         pairs: options.secret,
         files: options.secretFile,
-        configFiles: globalConfig['secret-file'],
+        configFiles: config['secret-file'],
         secret: true,
         fromEnv: process.env
       });
-      const vars = loadKeyValues({
-        flagName: '--var',
-        fileFlagName: '--var-file',
-        pairs: options.var,
-        files: options.varFile,
-        configFiles: globalConfig['var-file']
-      });
-      const env = loadKeyValues({
-        flagName: '--env',
-        fileFlagName: '--env-file',
-        pairs: options.env,
-        files: options.envFile,
-        configFiles: globalConfig['env-file'],
-        fromEnv: process.env
-      });
-      const parallel = parseParallel(options.parallel);
-      const concurrency = resolveConcurrency(options.concurrency, globalConfig);
+      // A profile's env and vars sit below files and flags.
+      const vars = {
+        ...settings.vars,
+        ...loadKeyValues({
+          flagName: '--var',
+          fileFlagName: '--var-file',
+          pairs: options.var,
+          files: options.varFile,
+          configFiles: config['var-file']
+        })
+      };
+      const env = {
+        ...settings.env,
+        ...loadKeyValues({
+          flagName: '--env',
+          fileFlagName: '--env-file',
+          pairs: options.env,
+          files: options.envFile,
+          configFiles: config['env-file'],
+          fromEnv: process.env
+        })
+      };
+      const parallel =
+        options.parallel !== undefined
+          ? parseParallel(options.parallel)
+          : settings.parallel;
+      const concurrency = resolveConcurrency(options.concurrency, config);
+      const containerTimeout =
+        options.containerTimeout ?? config['container-timeout'];
 
       const result = await executeWorkflow(file, {
         dryRun: false,
@@ -326,24 +359,27 @@ program
         registryLogin: options.registryLogin === true,
         offline: options.offline,
         verbose: program.opts().verbose,
-        containerRuntime: options.containerRuntime,
+        containerRuntime: options.containerRuntime ?? settings.containerRuntime,
         containerImage: options.containerImage,
-        runnerImages: globalConfig['runner-images'],
-        defaultContainerImage: globalConfig['container-image'],
-        containerTimeoutMs: options.containerTimeout
-          ? Number(options.containerTimeout)
+        runnerImages: config['runner-images'],
+        defaultContainerImage: config['container-image'],
+        containerTimeoutMs: containerTimeout
+          ? Number(containerTimeout)
           : undefined,
-        containerMemoryLimit: options.containerMemory,
+        containerMemoryLimit:
+          options.containerMemory ?? config['container-memory'],
         networkDisabled: resolveNetworkDisabled(
           { network: options.network, allowNetwork: options.allowNetwork },
-          globalConfig
+          config
         ),
         parallel,
         concurrency,
         isolateWorkspace: resolveIsolateWorkspace(
           options.isolateWorkspace,
-          globalConfig
-        )
+          config
+        ),
+        profile,
+        workflowOverrides: settings.workflow
       });
 
       if (!result.success) {
@@ -1326,22 +1362,80 @@ function listWorkflows(): void {
 
 const configCmd = program
   .command('config')
-  .description('Manage global configuration (~/.secureci/config.yml)');
+  .description(
+    `Manage configuration: ~/.secureci/config.yml, or with --local the repository's ${REPO_CONFIG_FILE}`
+  );
+
+const LOCAL_HELP = `Use the repository's ${REPO_CONFIG_FILE} (at the git root) instead of ~/.secureci/config.yml`;
+
+/** The file `config` reads and writes: global, or with --local the repo's. */
+function configFile(local: boolean | undefined): string {
+  if (!local) return getConfigFilePath();
+  const root = findRepoRoot();
+  const file = path.join(root, REPO_CONFIG_FILE);
+  if (!fs.existsSync(file)) {
+    let fromPackage = false;
+    try {
+      fromPackage = loadRepoConfig(root) !== undefined;
+    } catch {
+      // Reported when the config is read.
+    }
+    if (fromPackage) {
+      logger.error(
+        `This repository's SecureCI config is the "secureci" key of package.json; edit it there (config --local only edits ${REPO_CONFIG_FILE})`
+      );
+      process.exit(1);
+    }
+  }
+  return file;
+}
+
+/** The config `config get|list` shows; the repository's is checked. */
+function readConfig(local: boolean | undefined): SecureciConfig {
+  if (!local) return loadConfig();
+  try {
+    return loadRepoConfig(findRepoRoot())?.config ?? {};
+  } catch (error) {
+    logger.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+function requireConfigKey(key: string): void {
+  if (!isValidConfigKey(key)) {
+    logger.error(
+      `Unknown config key "${key}". Valid keys: ${CONFIG_KEY_FORMS.join(', ')}`
+    );
+    process.exit(1);
+  }
+}
+
+function showValue(value: unknown): string {
+  if (value === undefined) return '(unset)';
+  return typeof value === 'object' && !Array.isArray(value)
+    ? JSON.stringify(value)
+    : String(value);
+}
 
 configCmd
   .command('path')
   .description('Print the config file path')
-  .action(() => {
-    logger.info(getConfigFilePath());
+  .option('--local', LOCAL_HELP)
+  .action((options: { local?: boolean }) => {
+    logger.info(configFile(options.local));
   });
 
 configCmd
   .command('list')
-  .description('List config values, including built-in defaults')
-  .action(() => {
-    const config = loadConfig();
+  .description(
+    'List config values (globally, including built-in defaults) and profiles'
+  )
+  .option('--local', LOCAL_HELP)
+  .action((options: { local?: boolean }) => {
+    const config = readConfig(options.local);
     for (const key of CONFIG_KEYS) {
       const value = config[key];
+      if (options.local && value === undefined) continue;
       const fallback = DEFAULT_CONFIG[key as keyof typeof DEFAULT_CONFIG];
       logger.info(
         `${key}=${
@@ -1358,37 +1452,45 @@ configCmd
     )) {
       logger.info(`runner-images.${label}=${image}`);
     }
+    for (const [key, value] of profileEntries(config)) {
+      logger.info(`${key}=${value}`);
+    }
   });
 
 configCmd
   .command('get <key>')
   .description('Print a config value')
-  .action((key: string) => {
-    if (!isValidConfigKey(key)) {
-      logger.error(
-        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}, runner-images.<label>`
-      );
-      process.exit(1);
-    }
-    const value = getConfigValue(loadConfig(), key);
-    logger.info(value === undefined ? '(unset)' : String(value));
+  .option('--local', LOCAL_HELP)
+  .action((key: string, options: { local?: boolean }) => {
+    requireConfigKey(key);
+    logger.info(showValue(getConfigValue(readConfig(options.local), key)));
   });
 
 configCmd
   .command('set <key> <value>')
-  .description('Set a config value')
-  .action((key: string, value: string) => {
-    if (!isValidConfigKey(key)) {
-      logger.error(
-        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}, runner-images.<label>`
-      );
-      process.exit(1);
-    }
+  .description(
+    'Set a config value, e.g. profiles.dev.workflow.runs-on ubuntu-latest'
+  )
+  .option('--local', LOCAL_HELP)
+  .action((key: string, value: string, options: { local?: boolean }) => {
+    requireConfigKey(key);
+    const file = configFile(options.local);
+    const before = fs.existsSync(file)
+      ? fs.readFileSync(file, 'utf-8')
+      : undefined;
     try {
-      const config = loadConfig();
-      const parsedValue = setConfigValue(config, key, value);
-      saveConfig(config);
-      logger.success(`Set ${key}=${parsedValue} in ${getConfigFilePath()}`);
+      const parsedValue = updateConfigFile(file, key, value);
+      if (options.local) {
+        try {
+          // Refuse what a repository's config can't hold.
+          loadRepoConfig(path.dirname(file));
+        } catch (error) {
+          if (before === undefined) fs.rmSync(file, { force: true });
+          else fs.writeFileSync(file, before);
+          throw error;
+        }
+      }
+      logger.success(`Set ${key}=${showValue(parsedValue)} in ${file}`);
     } catch (error) {
       logger.error(error instanceof Error ? error.message : 'Invalid value');
       process.exit(1);
@@ -1398,17 +1500,17 @@ configCmd
 configCmd
   .command('unset <key>')
   .description('Remove a config value, reverting to the built-in default')
-  .action((key: string) => {
-    if (!isValidConfigKey(key)) {
-      logger.error(
-        `Unknown config key "${key}". Valid keys: ${CONFIG_KEYS.join(', ')}, runner-images.<label>`
-      );
+  .option('--local', LOCAL_HELP)
+  .action((key: string, options: { local?: boolean }) => {
+    requireConfigKey(key);
+    const file = configFile(options.local);
+    try {
+      updateConfigFile(file, key, undefined);
+    } catch (error) {
+      logger.error(error instanceof Error ? error.message : String(error));
       process.exit(1);
     }
-    const config = loadConfig();
-    unsetConfigValue(config, key);
-    saveConfig(config);
-    logger.success(`Unset ${key} in ${getConfigFilePath()}`);
+    logger.success(`Unset ${key} in ${file}`);
   });
 
 const orgCmd = program

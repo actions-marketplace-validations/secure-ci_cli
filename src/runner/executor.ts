@@ -1,6 +1,5 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { parseFile } from '../parser/workflow-parser';
 import { workflowExpressionErrors } from '../parser/validator';
 import { logger } from '../utils/logger';
 import {
@@ -56,6 +55,7 @@ import {
   startJobServices
 } from './job-container';
 import { executeStep } from './steps';
+import { parseFileForRun } from './workflow-overrides';
 import { createIsolatedWorkspace, removeIsolatedWorkspace } from './checkout';
 import {
   warnUnsandboxedActions,
@@ -203,7 +203,11 @@ export async function executeWorkflow(
   const runDir = createRunDir();
 
   try {
-    const parsed = parseFile(filePath);
+    const parsed = parseFileForRun(
+      filePath,
+      options.workflowOverrides,
+      options.profile
+    );
 
     if (parsed.type === 'workflow') {
       // Like GitHub, refuse a workflow with an invalid if: before any job.

@@ -233,7 +233,28 @@ export interface ParsedAction {
 
 export type ParsedFile = ParsedWorkflow | ParsedAction;
 
+/**
+ * A replacement for one workflow value: a string replaces it in every job,
+ * a mapping replaces only the values it lists (original -> replacement).
+ */
+export type WorkflowOverride = string | Record<string, string>;
+
+/**
+ * What a profile (`run --profile`) rewrites in a workflow before it runs:
+ * the jobs' `runs-on`, the image of `jobs.<id>.container`, and the images of
+ * `jobs.<id>.services`.
+ */
+export interface WorkflowOverrides {
+  'runs-on'?: WorkflowOverride;
+  'container-image'?: WorkflowOverride;
+  'service-images'?: WorkflowOverride;
+}
+
 export interface RunOptions {
+  /** The active profile, for messages. */
+  profile?: string;
+  /** Rewrites of this workflow and the workflows it calls. */
+  workflowOverrides?: WorkflowOverrides;
   dryRun?: boolean;
   inputs?: Record<string, string>;
   secrets?: Record<string, string>;

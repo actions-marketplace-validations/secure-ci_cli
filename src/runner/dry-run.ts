@@ -1,6 +1,6 @@
-import { parseFile } from '../parser/workflow-parser';
 import { logger } from '../utils/logger';
-import { ParsedWorkflow, ParsedAction } from '../types';
+import { ParsedWorkflow, ParsedAction, WorkflowOverrides } from '../types';
+import { parseFileForRun } from './workflow-overrides';
 import {
   actionExpressionErrors,
   workflowExpressionErrors
@@ -20,6 +20,10 @@ export interface DryRunOptions {
   job?: string;
   /** `--matrix key:value` filters. */
   matrix?: MatrixFilter;
+  /** The active profile (`--profile`), for messages. */
+  profile?: string;
+  /** The profile's workflow rewrites. */
+  workflowOverrides?: WorkflowOverrides;
 }
 
 // A matrix expression reading a context a dry run doesn't have.
@@ -48,7 +52,11 @@ export function dryRun(
   options: DryRunOptions = {}
 ): DryRunResult {
   try {
-    const parsed = parseFile(filePath);
+    const parsed = parseFileForRun(
+      filePath,
+      options.workflowOverrides,
+      options.profile
+    );
 
     // A file a real run would reject fails the dry run too.
     const invalid =

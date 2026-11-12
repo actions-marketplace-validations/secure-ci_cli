@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { execFile, execFileSync, spawnSync } from 'child_process';
 import * as http from 'http';
 import type { AddressInfo } from 'net';
@@ -560,6 +560,285 @@ describe('secureci commands', () => {
     expect(result.stdout).not.toContain('hello world');
     // No "really executing" banner on the dry-run path.
     expect(result.stdout + result.stderr).not.toMatch(/not a dry run/i);
+  });
+
+  describe('profiles (secureci.yml, --profile)', () => {
+    let dir: string;
+    let home: string;
+
+    const writeFile = (name: string, content: string): void => {
+      fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+      fs.writeFileSync(path.join(dir, name), content);
+    };
+    const cleanRepoConfig = (): void => {
+      fs.rmSync(path.join(dir, 'secureci.yml'), { force: true });
+      fs.rmSync(path.join(dir, 'package.json'), { force: true });
+      fs.rmSync(path.join(home, '.secureci'), { recursive: true, force: true });
+    };
+    const env = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => {
+      const base = { ...process.env, HOME: home, ...extra };
+      if (!('SECURECI_PROFILE' in extra)) delete base.SECURECI_PROFILE;
+      return base;
+    };
+    const dry = (args: string[], extra?: NodeJS.ProcessEnv) =>
+      run(['run', 'wf.yml', '--dry-run', ...args], dir, env(extra));
+    const hostRun = (args: string[], extra?: NodeJS.ProcessEnv) =>
+      run(
+        ['run', 'wf.yml', '--container-runtime', 'host', ...args],
+        dir,
+        env(extra)
+      );
+
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-profiles-'));
+      home = fs.mkdtempSync(path.join(os.tmpdir(), 'secureci-profiles-home-'));
+      fs.mkdirSync(path.join(dir, '.git'));
+      writeFile(
+        'wf.yml',
+        [
+          'name: Profiles',
+          'on: push',
+          'jobs:',
+          '  build:',
+          '    runs-on: [self-hosted, corp-runner]',
+          '    steps:',
+          '      - run: echo "E=$PROFILE_E V=${{ vars.PROFILE_V }}"',
+          '  call:',
+          '    uses: ./called.yml'
+        ].join('\n')
+      );
+      writeFile(
+        'called.yml',
+        [
+          'name: Called',
+          'on: workflow_call',
+          'jobs:',
+          '  inner:',
+          '    runs-on: corp-runner',
+          '    steps:',
+          '      - run: echo inner ran'
+        ].join('\n')
+      );
+    });
+
+    afterAll(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    beforeEach(cleanRepoConfig);
+
+    const devProfile = [
+      'profiles:',
+      '  dev:',
+      '    env:',
+      '      PROFILE_E: from-profile',
+      '    vars:',
+      '      PROFILE_V: profile-var',
+      '    workflow:',
+      '      runs-on:',
+      '        corp-runner: ubuntu-latest',
+      '  ci:',
+      '    workflow:',
+      '      runs-on: ubuntu-24.04'
+    ].join('\n');
+
+    it('applies the --profile rewrites, and none without a profile', () => {
+      writeFile('secureci.yml', devProfile);
+      const out = dry(['--profile', 'dev']).stdout;
+      expect(out).toContain(
+        'Profile "dev": jobs.build.runs-on: self-hosted, corp-runner -> ubuntu-latest'
+      );
+      expect(out).toContain('Runs on: ubuntu-latest');
+
+      const plain = dry([]);
+      expect(plain.status).toBe(0);
+      expect(plain.stdout).not.toContain('Profile "');
+      expect(plain.stdout).toContain('Runs on: self-hosted,corp-runner');
+    });
+
+    it('selects a profile with SECURECI_PROFILE; --profile wins', () => {
+      writeFile('secureci.yml', devProfile);
+      expect(dry([], { SECURECI_PROFILE: 'ci' }).stdout).toContain(
+        'Profile "ci": jobs.build.runs-on: self-hosted, corp-runner -> ubuntu-24.04'
+      );
+      expect(
+        dry(['--profile', 'dev'], { SECURECI_PROFILE: 'ci' }).stdout
+      ).toContain('Profile "dev"');
+    });
+
+    it('fails on an unknown profile, naming the defined ones', () => {
+      writeFile('secureci.yml', devProfile);
+      const result = dry(['--profile', 'prod']);
+      expect(result.status).toBe(1);
+      expect(result.stdout + result.stderr).toContain(
+        'Unknown profile "prod". Defined profiles: ci, dev'
+      );
+    });
+
+    it('feeds profile env and vars to steps, below files and flags, and rewrites called workflows', () => {
+      writeFile('secureci.yml', devProfile);
+      const result = hostRun(['--profile', 'dev']);
+      const out = result.stdout + result.stderr;
+      expect(result.status).toBe(0);
+      expect(out).toContain('E=from-profile V=profile-var');
+      expect(out).toContain(
+        'Profile "dev": jobs.inner.runs-on: corp-runner -> ubuntu-latest'
+      );
+      expect(out).toContain('inner ran');
+
+      const flags = hostRun([
+        '--profile',
+        'dev',
+        '--env',
+        'PROFILE_E=from-flag',
+        '--var',
+        'PROFILE_V=flag-var'
+      ]);
+      expect(flags.stdout + flags.stderr).toContain('E=from-flag V=flag-var');
+    });
+
+    it('merges the global profile under the repository one, per key', () => {
+      writeFile('secureci.yml', devProfile);
+      fs.mkdirSync(path.join(home, '.secureci'));
+      fs.writeFileSync(
+        path.join(home, '.secureci', 'config.yml'),
+        [
+          'profiles:',
+          '  dev:',
+          '    env:',
+          '      PROFILE_E: from-global',
+          '    vars:',
+          '      PROFILE_V: global-var',
+          '  mine:',
+          '    workflow:',
+          '      runs-on: ubuntu-22.04'
+        ].join('\n')
+      );
+      const out = hostRun(['--profile', 'dev']).stdout;
+      expect(out).toContain('E=from-profile V=profile-var');
+      expect(dry(['--profile', 'mine']).stdout).toContain(
+        'Runs on: ubuntu-22.04'
+      );
+    });
+
+    it('reads the secureci key of package.json, and refuses both sources', () => {
+      writeFile(
+        'package.json',
+        JSON.stringify({
+          name: 'x',
+          secureci: {
+            profiles: { dev: { workflow: { 'runs-on': 'ubuntu-latest' } } }
+          }
+        })
+      );
+      expect(dry(['--profile', 'dev']).stdout).toContain(
+        'Runs on: ubuntu-latest'
+      );
+      writeFile('secureci.yml', devProfile);
+      const both = dry([]);
+      expect(both.status).toBe(1);
+      expect(both.stdout + both.stderr).toContain('keep one');
+    });
+
+    it('refuses sandbox-weakening keys from the repository, without blocking validate', () => {
+      writeFile(
+        'secureci.yml',
+        'profiles:\n  dev:\n    container-runtime: host\n'
+      );
+      const result = dry(['--profile', 'dev']);
+      expect(result.status).toBe(1);
+      expect(result.stdout + result.stderr).toContain(
+        "profiles.dev.container-runtime: can't be set in a repository's config"
+      );
+      expect(run(['validate', 'wf.yml'], dir, env()).status).toBe(0);
+    });
+
+    it('manages the repository file with config --local, keeping comments', () => {
+      writeFile('secureci.yml', '# team settings\n');
+      expect(
+        run(
+          [
+            'config',
+            'set',
+            '--local',
+            'profiles.dev.workflow.container-image.corp/img:1',
+            'node:23'
+          ],
+          dir,
+          env()
+        ).status
+      ).toBe(0);
+      const raw = fs.readFileSync(path.join(dir, 'secureci.yml'), 'utf-8');
+      expect(raw).toContain('# team settings');
+      expect(raw).toContain('corp/img:1: node:23');
+      expect(
+        run(
+          [
+            'config',
+            'get',
+            '--local',
+            'profiles.dev.workflow.container-image.corp/img:1'
+          ],
+          dir,
+          env()
+        ).stdout.trim()
+      ).toMatch(/(^|\s)node:23$/);
+      expect(run(['config', 'list', '--local'], dir, env()).stdout).toContain(
+        'profiles.dev.workflow.container-image.corp/img:1=node:23'
+      );
+      expect(
+        run(['config', 'path', '--local'], dir, env()).stdout.trim()
+      ).toContain(path.join(fs.realpathSync(dir), 'secureci.yml'));
+
+      // A key a repository can't set is refused, leaving the file as it was.
+      const refused = run(
+        ['config', 'set', '--local', 'profiles.dev.allow-network', 'true'],
+        dir,
+        env()
+      );
+      expect(refused.status).toBe(1);
+      expect(refused.stdout + refused.stderr).toContain(
+        "can't be set in a repository's config"
+      );
+      expect(fs.readFileSync(path.join(dir, 'secureci.yml'), 'utf-8')).toBe(
+        raw
+      );
+
+      run(
+        [
+          'config',
+          'unset',
+          '--local',
+          'profiles.dev.workflow.container-image.corp/img:1'
+        ],
+        dir,
+        env()
+      );
+      expect(fs.readFileSync(path.join(dir, 'secureci.yml'), 'utf-8')).toBe(
+        '# team settings\n'
+      );
+      // The global file is untouched.
+      expect(fs.existsSync(path.join(home, '.secureci', 'config.yml'))).toBe(
+        false
+      );
+    });
+
+    it('sets profile keys in the global file, and lists them', () => {
+      expect(
+        run(
+          ['config', 'set', 'profiles.mine.workflow.runs-on', 'ubuntu-latest'],
+          dir,
+          env()
+        ).status
+      ).toBe(0);
+      expect(run(['config', 'list'], dir, env()).stdout).toContain(
+        'profiles.mine.workflow.runs-on=ubuntu-latest'
+      );
+      expect(
+        run(['config', 'set', 'profiles.mine.bogus', 'x'], dir, env()).status
+      ).toBe(1);
+    });
   });
 
   describe('run --matrix (#50)', () => {

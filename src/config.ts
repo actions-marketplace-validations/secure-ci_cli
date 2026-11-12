@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as YAML from 'yaml';
 import type { ContainerRuntimePreference } from './runner/container-runtime';
+import type { WorkflowOverrides } from './types';
 import {
   ConcurrencyMode,
   defaultParallelism,
@@ -43,6 +44,35 @@ export interface CliConfig {
   'runner-images'?: Record<string, string>;
 }
 
+export type { WorkflowOverride, WorkflowOverrides } from './types';
+
+export const WORKFLOW_OVERRIDE_KEYS = [
+  'runs-on',
+  'container-image',
+  'service-images'
+] as const;
+
+/**
+ * A named set of settings selected with `run --profile <name>` (or
+ * `SECURECI_PROFILE`): any config key, plus env vars and vars for every
+ * step and rewrites of the workflow.
+ */
+export interface Profile extends CliConfig {
+  /** Env vars for every step, below --env-file and --env. */
+  env?: Record<string, string>;
+  /** Values for the vars context, below --var-file and --var. */
+  vars?: Record<string, string>;
+  workflow?: WorkflowOverrides;
+}
+
+/**
+ * The shape of `~/.secureci/config.yml` and of a repository's
+ * `secureci.yml` (or the `secureci` key of its package.json).
+ */
+export interface SecureciConfig extends CliConfig {
+  profiles?: Record<string, Profile>;
+}
+
 /** Built-in defaults, used when a key is absent from the config file. */
 export const DEFAULT_CONFIG: Required<Pick<CliConfig, 'container-runtime'>> &
   CliConfig = {
@@ -70,21 +100,23 @@ export function getConfigFilePath(): string {
 }
 
 /** Load the global config file, returning `{}` if absent or unreadable. */
-export function loadConfig(): CliConfig {
+export function loadConfig(): SecureciConfig {
   const configFile = getConfigFilePath();
   if (!fs.existsSync(configFile)) return {};
 
   try {
     const raw = fs.readFileSync(configFile, 'utf-8');
     const parsed: unknown = YAML.parse(raw);
-    return parsed && typeof parsed === 'object' ? (parsed as CliConfig) : {};
+    return parsed && typeof parsed === 'object'
+      ? (parsed as SecureciConfig)
+      : {};
   } catch {
     return {};
   }
 }
 
 /** Persist the given config object to the global config file. */
-export function saveConfig(config: CliConfig): void {
+export function saveConfig(config: SecureciConfig): void {
   const configDir = getConfigDir();
   if (!fs.existsSync(configDir)) {
     fs.mkdirSync(configDir, { recursive: true });
@@ -131,54 +163,228 @@ export const CONFIG_KEYS = [
 
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
 
-/** `runner-images.<label>`: one entry of the runs-on -> image mapping. */
-const RUNNER_IMAGE_KEY = /^runner-images\.(.+)$/;
+/** How a dotted config key maps onto the config object. */
+interface KeyPath {
+  path: string[];
+  /** Parse and validate the raw string from `config set`. */
+  parse: (rawValue: string) => unknown;
+}
 
-/** A plain key, or `runner-images.<label>`. */
+const PROFILE_KEY = /^profiles\.([^.]+)\.(.+)$/;
+
+function nonEmpty(key: string): (rawValue: string) => string {
+  return (rawValue) => {
+    if (rawValue === '') {
+      throw new Error(`Invalid value "" for ${key}: must not be empty.`);
+    }
+    return rawValue;
+  };
+}
+
+/** Keys valid both at the top level and inside a profile. */
+function settingsKeyPath(key: string, fullKey: string): KeyPath | undefined {
+  if ((CONFIG_KEYS as readonly string[]).includes(key)) {
+    return {
+      path: [key],
+      parse: (raw) => parseConfigValue(key as ConfigKey, raw)
+    };
+  }
+  const label = key.match(/^runner-images\.(.+)$/)?.[1];
+  if (label !== undefined) {
+    return { path: ['runner-images', label], parse: nonEmpty(fullKey) };
+  }
+  return undefined;
+}
+
+/** Keys inside `profiles.<name>`. */
+function profileKeyPath(key: string, fullKey: string): KeyPath | undefined {
+  const settings = settingsKeyPath(key, fullKey);
+  if (settings) return settings;
+  const named = key.match(/^(env|vars)\.(.+)$/);
+  if (named) return { path: [named[1], named[2]], parse: (raw) => raw };
+  for (const field of WORKFLOW_OVERRIDE_KEYS) {
+    const prefix = `workflow.${field}`;
+    if (key === prefix) {
+      return { path: ['workflow', field], parse: nonEmpty(fullKey) };
+    }
+    if (key.startsWith(`${prefix}.`) && key.length > prefix.length + 1) {
+      return {
+        path: ['workflow', field, key.slice(prefix.length + 1)],
+        parse: nonEmpty(fullKey)
+      };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The path of a dotted config key: a plain key, `runner-images.<label>`,
+ * or `profiles.<name>.<key>`, where `<key>` is one of those, `env.<NAME>`,
+ * `vars.<NAME>`, `workflow.<field>` or `workflow.<field>.<original>`.
+ */
+function configKeyPath(key: string): KeyPath | undefined {
+  const profile = key.match(PROFILE_KEY);
+  if (profile) {
+    const inner = profileKeyPath(profile[2], key);
+    return inner && { ...inner, path: ['profiles', profile[1], ...inner.path] };
+  }
+  return settingsKeyPath(key, key);
+}
+
+/** Every key form `config get|set|unset` accepts, for error messages. */
+export const CONFIG_KEY_FORMS = [
+  ...CONFIG_KEYS,
+  'runner-images.<label>',
+  'profiles.<name>.<key>',
+  'profiles.<name>.env.<NAME>',
+  'profiles.<name>.vars.<NAME>',
+  `profiles.<name>.workflow.(${WORKFLOW_OVERRIDE_KEYS.join('|')})[.<original>]`
+];
+
 export function isValidConfigKey(key: string): boolean {
-  return (
-    (CONFIG_KEYS as readonly string[]).includes(key) ||
-    RUNNER_IMAGE_KEY.test(key)
-  );
+  return configKeyPath(key) !== undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Read a key (see isValidConfigKey) from a config object. */
-export function getConfigValue(
-  config: CliConfig,
-  key: string
-): CliConfig[ConfigKey] | undefined {
-  const label = key.match(RUNNER_IMAGE_KEY)?.[1];
-  if (label !== undefined) return config['runner-images']?.[label];
-  return config[key as ConfigKey];
+export function getConfigValue(config: SecureciConfig, key: string): unknown {
+  const keyPath = configKeyPath(key);
+  if (!keyPath) return undefined;
+  let node: unknown = config;
+  for (const part of keyPath.path) {
+    if (!isRecord(node)) return undefined;
+    node = node[part];
+  }
+  return node;
 }
 
 /** Parse `rawValue` for `key` and set it on `config`. Throws if invalid. */
 export function setConfigValue(
-  config: CliConfig,
+  config: SecureciConfig,
   key: string,
   rawValue: string
-): CliConfig[ConfigKey] {
-  const label = key.match(RUNNER_IMAGE_KEY)?.[1];
-  if (label !== undefined) {
-    config['runner-images'] = { ...config['runner-images'], [label]: rawValue };
-    return rawValue;
-  }
-  const value = parseConfigValue(key as ConfigKey, rawValue);
-  (config as Record<string, unknown>)[key] = value;
+): unknown {
+  const keyPath = configKeyPath(key);
+  if (!keyPath) throw new Error(`Unknown config key "${key}".`);
+  const value = keyPath.parse(rawValue);
+  let node = config as Record<string, unknown>;
+  const parents = keyPath.path.slice(0, -1);
+  parents.forEach((part, index) => {
+    const next = node[part];
+    if (next === undefined) {
+      node[part] = {};
+    } else if (!isRecord(next)) {
+      const at = keyPath.path.slice(0, index + 1).join('.');
+      throw new Error(
+        `${at} is a single value, not a mapping: unset it first, or set ${at} itself.`
+      );
+    }
+    node = node[part] as Record<string, unknown>;
+  });
+  node[keyPath.path[keyPath.path.length - 1]] = value;
   return value;
 }
 
-/** Remove `key` from `config`, dropping an emptied runner-images map. */
-export function unsetConfigValue(config: CliConfig, key: string): void {
-  const label = key.match(RUNNER_IMAGE_KEY)?.[1];
-  if (label === undefined) {
-    delete config[key as ConfigKey];
-    return;
+/** Remove `key` from `config`, dropping mappings it leaves empty. */
+export function unsetConfigValue(config: SecureciConfig, key: string): void {
+  const keyPath = configKeyPath(key);
+  if (!keyPath) return;
+  const chain: Array<Record<string, unknown>> = [
+    config as Record<string, unknown>
+  ];
+  for (const part of keyPath.path.slice(0, -1)) {
+    const next = chain[chain.length - 1][part];
+    if (!isRecord(next)) return;
+    chain.push(next);
   }
-  const images = { ...config['runner-images'] };
-  delete images[label];
-  if (Object.keys(images).length > 0) config['runner-images'] = images;
-  else delete config['runner-images'];
+  delete chain[chain.length - 1][keyPath.path[keyPath.path.length - 1]];
+  for (let i = chain.length - 1; i > 0; i--) {
+    if (Object.keys(chain[i]).length > 0) break;
+    delete chain[i - 1][keyPath.path[i - 1]];
+  }
+}
+
+/**
+ * Every value under `profiles:` as `[dotted key, value]`, for `config list`.
+ * Lists show as `a, b`; a profile with no values as `(empty)`.
+ */
+export function profileEntries(
+  config: SecureciConfig
+): Array<[string, string]> {
+  const entries: Array<[string, string]> = [];
+  const walk = (prefix: string, value: unknown): void => {
+    if (isRecord(value)) {
+      for (const [key, inner] of Object.entries(value)) {
+        walk(`${prefix}.${key}`, inner);
+      }
+    } else {
+      entries.push([
+        prefix,
+        Array.isArray(value) ? value.join(', ') : String(value)
+      ]);
+    }
+  };
+  for (const [name, profile] of Object.entries(config.profiles ?? {})) {
+    if (!isRecord(profile) || Object.keys(profile).length === 0) {
+      entries.push([`profiles.${name}`, '(empty)']);
+    } else {
+      walk(`profiles.${name}`, profile);
+    }
+  }
+  return entries;
+}
+
+/**
+ * Set (or, with `rawValue` undefined, unset) one key in a config file,
+ * keeping its comments and layout. Creates the file if needed. Returns the
+ * parsed value set.
+ */
+export function updateConfigFile(
+  file: string,
+  key: string,
+  rawValue: string | undefined
+): unknown {
+  const keyPath = configKeyPath(key);
+  if (!keyPath) throw new Error(`Unknown config key "${key}".`);
+  const doc = YAML.parseDocument(
+    fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : ''
+  );
+  if (doc.errors.length > 0) {
+    throw new Error(`Invalid YAML in ${file}: ${doc.errors[0].message}`);
+  }
+  const current = doc.toJS() as unknown;
+  const config: SecureciConfig = isRecord(current) ? current : {};
+  let value: unknown;
+  if (rawValue === undefined) {
+    doc.deleteIn(keyPath.path);
+    for (let i = keyPath.path.length - 1; i > 0; i--) {
+      const parent = doc.getIn(keyPath.path.slice(0, i));
+      if (!YAML.isMap(parent) || parent.items.length > 0) break;
+      doc.deleteIn(keyPath.path.slice(0, i));
+    }
+  } else {
+    // Validates the value and refuses an entry under a single value.
+    value = setConfigValue(config, key, rawValue);
+    doc.setIn(keyPath.path, value);
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const contents = doc.contents;
+  // With nothing left, keep only the file's leading comments (YAML would
+  // write `{}`).
+  const emptied =
+    contents === null || (YAML.isMap(contents) && contents.items.length === 0);
+  const comments = (doc.commentBefore ?? '')
+    .split('\n')
+    .map((line) => `#${line}\n`)
+    .join('');
+  fs.writeFileSync(
+    file,
+    emptied ? (doc.commentBefore ? comments : '') : doc.toString()
+  );
+  return value;
 }
 
 /**
