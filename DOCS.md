@@ -14,6 +14,7 @@ introduction and install steps, see the [README](README.md).
   - [Security: what runs where](#security-what-runs-where)
   - [`actions/checkout`](#actionscheckout)
 - [Global configuration](#global-configuration)
+- [Repository config and profiles (`secureci.yml`, `--profile`)](#repository-config-and-profiles-secureciyml---profile)
 - [Template injection checks (`validate`)](#template-injection-checks-validate)
 - [GITHUB_TOKEN permissions (`validate`)](#github_token-permissions-validate)
 - [Dangerous triggers (`pull_request_target`, `workflow_run`)](#dangerous-triggers-pull_request_target-workflow_run)
@@ -67,6 +68,7 @@ secureci run .github/workflows/ci.yml           # executes for real
 secureci run .github/workflows/ci.yml --dry-run # simulate, no execution
 secureci run .github/workflows/ci.yml --job build
 secureci run .github/workflows/test.yml --job test --matrix node:20 --matrix os:ubuntu-latest
+secureci run .github/workflows/ci.yml --profile dev  # apply a profile from secureci.yml
 
 # Validate (optionally against a pipeline contract), human or machine output
 secureci validate .github/workflows/ci.yml
@@ -167,6 +169,7 @@ multi-line values work in double quotes
 ### How container mode works
 
 - Each job (and each matrix combination) gets **one container**, started when the job begins and removed when it ends, including when a step fails or you press Ctrl-C. Every `run:` step and JavaScript action in the job runs in it via `exec`, so files, installed packages and tools from earlier steps are still there. The current directory is mounted at `/secureci-workspace`.
+- A [profile](#repository-config-and-profiles-secureciyml---profile) (`--profile`) can first rewrite the job's `runs-on`, `container:` image and service images; the order below then applies to the rewritten job.
 - The image is chosen in this order:
   1. `jobs.<id>.container` (string or object form, see [The job's `container:`](#the-jobs-container) below). With `--container-runtime host` it's ignored and the job runs on the host.
   2. `--container-image`, for every job.
@@ -210,7 +213,7 @@ multi-line values work in double quotes
 
 ## Global configuration
 
-SecureCI reads defaults from `~/.secureci/config.yml` (created on first `secureci config set`, or editable by hand). Config keys match the CLI flag names (kebab-case, minus the leading `--`). CLI flags always take precedence over the config file.
+SecureCI reads defaults from `~/.secureci/config.yml` (created on first `secureci config set`, or editable by hand). Config keys match the CLI flag names (kebab-case, minus the leading `--`). CLI flags always take precedence over the config file. A repository can add its own defaults and [profiles](#repository-config-and-profiles-secureciyml---profile) in `secureci.yml`.
 
 ```bash
 secureci config set container-runtime podman   # persist a default
@@ -218,9 +221,12 @@ secureci config get container-runtime
 secureci config list
 secureci config unset container-runtime        # revert to the built-in default (docker)
 secureci config path                           # print the config file location
+secureci config set --local parallel 2         # edit the repository's secureci.yml instead
 ```
 
-Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`, `parallel`, `isolate-workspace` and `concurrency` (see [Parallel jobs](#parallel-jobs---parallel)), `env-file`, `secret-file`, `input-file`, `var-file`, and `runner-images.<label>`.
+Supported keys: `container-runtime`, `container-image`, `container-timeout`, `container-memory`, `allow-network`, `parallel`, `isolate-workspace` and `concurrency` (see [Parallel jobs](#parallel-jobs---parallel)), `env-file`, `secret-file`, `input-file`, `var-file`, `runner-images.<label>`, and `profiles.<name>.<key>` (see [profiles](#repository-config-and-profiles-secureciyml---profile)).
+
+`secureci config set` keeps the file's comments and layout. With `--local`, `config path|list|get|set|unset` use the repository's `secureci.yml` (at the git root); `config list --local` shows only the values set there.
 
 `env-file`, `secret-file`, `input-file` and `var-file` are default files for the matching `run` flags ([Values from files](#values-from-files---env-file---secret-file---input-file---var-file)). `config set` stores one path; edit the file by hand for a list, read in order:
 
@@ -244,6 +250,69 @@ secureci config set runner-images.my-self-hosted-runner my/image:1
 runner-images:
   ubuntu-latest: node:20-bookworm
   my-self-hosted-runner: my/image:1
+```
+
+## Repository config and profiles (`secureci.yml`, `--profile`)
+
+A workflow that runs on a private self-hosted runner, or in a container image only reachable inside a private network, can't run as-is on a laptop or in another CI. A **profile** swaps those values for ones that work there, without editing the workflow (1.3.0 or later):
+
+```yaml
+# secureci.yml, at the repository root (commit it)
+container-memory: 2g # repository defaults: any config key
+profiles:
+  dev:
+    workflow:
+      runs-on: ubuntu-latest # replaces every job's runs-on
+      container-image: node:23 # replaces every jobs.<id>.container image
+    env:
+      NODE_ENV: development
+  ci:
+    parallel: 2 # any config key, for this profile only
+    vars:
+      REGION: eu-west-1
+    workflow:
+      runs-on: # a mapping replaces only what it lists
+        corp-runner: ubuntu-latest
+      container-image:
+        registry.corp.example/build:3: node:23
+      service-images:
+        registry.corp.example/postgres:16: postgres:16
+```
+
+```bash
+secureci run .github/workflows/ci.yml --profile dev
+SECURECI_PROFILE=ci secureci run .github/workflows/ci.yml   # same, from the environment
+secureci run .github/workflows/ci.yml --profile dev --dry-run  # see what it rewrites
+```
+
+**Where config is read from.** `secureci.yml` at the repository root (the nearest directory above the current one with `.git`, else the current directory), or, instead, a `"secureci"` key in the `package.json` next to it, with the same content as JSON. Having both is an error. `~/.secureci/config.yml` takes the same keys, including `profiles:`, for profiles of your own.
+
+**Selecting a profile.** `run --profile <name>` (and `run --dry-run`), else `$SECURECI_PROFILE`. Without either, no profile applies. A name no file defines is an error listing the defined ones. Profiles only affect `run`: `validate`, `inventory` and `pin` always check the workflow as written.
+
+**What a profile can hold:**
+
+| Key                        | Effect                                                                                                                                                                                                                                                                                                                                                           |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflow.runs-on`         | Each job's `runs-on`. A string replaces it in every job that has one (not reusable-workflow calls). A mapping replaces the whole `runs-on` of a job when any of its labels is a key, e.g. `corp-runner: ubuntu-latest` turns `[self-hosted, corp-runner]` into `ubuntu-latest`. The new label then picks the image as usual (built-in mapping, `runner-images`). |
+| `workflow.container-image` | The image of `jobs.<id>.container` (string or object form; its other settings are kept). A string replaces every one, a mapping only the images it lists. Jobs without a `container:` don't get one: set their image with `runner-images` or `container-image`.                                                                                                  |
+| `workflow.service-images`  | The image of each `jobs.<id>.services.<name>`, the same way.                                                                                                                                                                                                                                                                                                     |
+| `env.<NAME>`               | Env vars for every step, below `--env-file` and `--env` (which win).                                                                                                                                                                                                                                                                                             |
+| `vars.<NAME>`              | Values for the `vars` context, below `--var-file` and `--var`.                                                                                                                                                                                                                                                                                                   |
+| any config key             | e.g. `parallel`, `container-memory`, `runner-images`, for this profile.                                                                                                                                                                                                                                                                                          |
+
+Rewrites also apply to the reusable workflows a run calls. Each one is logged, e.g. `Profile "dev": jobs.build.runs-on: self-hosted, corp-runner -> ubuntu-latest`. Expressions in `runs-on` or `container:` (`${{ matrix.os }}`) are matched as written, before they're evaluated.
+
+**Precedence**, highest first: CLI flags; the active profile (the repository's over the global one, key by key; `env`, `vars`, `runner-images` and `workflow` mappings merge entry by entry); the repository's top-level keys; `~/.secureci/config.yml`.
+
+**What a repository can't set.** A cloned repository controls its `secureci.yml`, so it can't weaken the sandbox. These keys are refused there (at the top level or in a profile), and the run stops: `container-runtime` (it could run steps on your machine with `host`), `env-file`, `secret-file`, `input-file` and `var-file` (they could feed files from your machine to steps), and `allow-network: true` (`false` is allowed). Set them in `~/.secureci/config.yml`, including in a profile there, or pass the flag. Unknown keys and invalid values are errors too, so a typo doesn't silently do nothing.
+
+Profile values can be set from the command line with dotted keys:
+
+```bash
+secureci config set --local profiles.dev.workflow.runs-on ubuntu-latest
+secureci config set --local profiles.ci.workflow.container-image.registry.corp.example/build:3 node:23
+secureci config set profiles.mine.env.NODE_ENV development   # in ~/.secureci/config.yml
+secureci config unset --local profiles.dev.workflow.runs-on
 ```
 
 ## Template injection checks (`validate`)
@@ -706,7 +775,7 @@ jobs:
       security-events: write # upload SARIF to code scanning
     steps:
       - uses: actions/checkout@v4
-      - uses: secure-ci/cli@v1.2.0 # a release tag; see below
+      - uses: secure-ci/cli@v1.3.1 # a release tag; see below
         with:
           # all inputs are optional
           contract: contracts/platform-standard.yml
@@ -718,7 +787,7 @@ jobs:
 
 The job fails if any workflow is invalid or violates the contract. Inputs: `files`, `contract`, `contract-recurse`, `format`, `output`, `upload-sarif`, `inventory` (`check` to also run `secureci inventory --check` against `secureci.lock`, or GitHub's `actions.lock` when that is the only lockfile), `version` (which `@secureci/cli` to run), and `github-token`.
 
-Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v1.2.0`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; by default it runs the CLI release matching the action's tag; set the `version` input to run another one.
+Reference the action by a [release tag](https://github.com/secure-ci/cli/releases) such as `v1.3.1`. There is no moving major tag (`@v1`, `@v0`), so a ref like that won't resolve. `secureci init workflow` fills in the tag matching your installed CLI. The action runs [`@secureci/cli`](https://www.npmjs.com/package/@secureci/cli) from npm via `npx`; by default it runs the CLI release matching the action's tag; set the `version` input to run another one.
 
 ### Generate the workflow (`secureci init workflow`)
 
@@ -752,7 +821,7 @@ Auditors and assessors increasingly treat the CI pipeline as part of the softwar
 To keep a report per run, turn on the action's drift check and upload the report as a build artifact:
 
 ```yaml
-- uses: secure-ci/cli@v1.2.0 # writes secureci-results.sarif
+- uses: secure-ci/cli@v1.3.1 # writes secureci-results.sarif
   with:
     contract: contracts/standard.yml
     inventory: check # fail on drift against the committed secureci.lock

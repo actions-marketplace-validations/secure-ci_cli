@@ -24,7 +24,8 @@ CLI (cli.ts)
 ```
 src/
 ├── cli.ts                 # Entry point: commander commands (run, validate, inventory, pin, init, list, org, config, cache)
-├── config.ts              # ~/.secureci/config.yml defaults
+├── config.ts              # ~/.secureci/config.yml defaults, dotted keys (config get|set|unset)
+├── project-config.ts      # Repo secureci.yml / package.json "secureci", profiles, precedence
 ├── report.ts              # --format text/json/sarif rendering
 ├── inventory.ts           # Action inventory + lockfile drift
 ├── github-lockfile.ts     # Read GitHub's .github/workflows/actions.lock
@@ -48,6 +49,7 @@ src/
 ├── runner/
 │   ├── dry-run.ts         # Dry-run mode
 │   ├── executor.ts        # Entry point: jobs in needs: order, matrix, reusable workflows
+│   ├── workflow-overrides.ts # Profile rewrites of runs-on, container and service images
 │   ├── job-plan.ts        # Matrix expansion + needs: topological sort (pure)
 │   ├── scheduler.ts       # --parallel slots, job graph, matrix max-parallel/fail-fast, concurrency: groups (pure)
 │   ├── github-context.ts  # github context, event payload, typed inputs
@@ -181,6 +183,18 @@ values stay redacted. `key-value.ts` parses the `--input/--secret/--env/--var`
 flags; `env-file.ts` parses their `.env`-style file counterparts
 (`--env-file` etc.) and merges config defaults, files and flags in precedence
 order; `repository.ts` finds the repo root for `./` references.
+
+### Config layers (`config.ts`, `project-config.ts`)
+
+`run` resolves its settings once, in `cli.ts`: flags over the active profile
+(`--profile` / `$SECURECI_PROFILE`; the repository's over the global one) over
+the repository's `secureci.yml` (or package.json `secureci`) over
+`~/.secureci/config.yml`. The repository file is checked strictly and may not
+set keys that weaken the sandbox (`container-runtime`, `*-file`,
+`allow-network: true`), since a cloned repository controls it. The profile's
+`workflow` rewrites reach `executeWorkflow` / `dryRun` as `workflowOverrides`
+and are applied by `parseFileForRun` right after parsing, so called reusable
+workflows get them too; `validate`, `inventory` and `pin` never see them.
 
 ## Execution flow
 

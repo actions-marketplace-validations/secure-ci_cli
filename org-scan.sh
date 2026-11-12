@@ -110,11 +110,13 @@ json_str() {
 }
 
 # Run the secureci CLI (SECURECI_ENTRY is set when SECURECI is node itself).
+# `command` skips this function, which would otherwise call itself when
+# SECURECI is the default, plain `secureci`.
 secureci() {
   if [ -n "${SECURECI_ENTRY:-}" ]; then
-    "$SECURECI" "$SECURECI_ENTRY" "$@"
+    command "$SECURECI" "$SECURECI_ENTRY" "$@"
   else
-    "$SECURECI" "$@"
+    command "$SECURECI" "$@"
   fi
 }
 

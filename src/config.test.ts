@@ -297,4 +297,163 @@ describe('config', () => {
       expect(config).toEqual({});
     });
   });
+  describe('profiles.<name>.* keys', () => {
+    it('accepts profile keys and rejects malformed ones', async () => {
+      const { isValidConfigKey } = await import('./config');
+      for (const key of [
+        'profiles.dev.parallel',
+        'profiles.dev.container-image',
+        'profiles.dev.runner-images.my-runner',
+        'profiles.dev.env.NODE_ENV',
+        'profiles.dev.vars.REGION',
+        'profiles.dev.workflow.runs-on',
+        'profiles.dev.workflow.runs-on.corp-runner',
+        'profiles.ci.workflow.container-image.registry.corp/img:1',
+        'profiles.ci.workflow.service-images',
+        'profiles.ci.workflow.service-images.corp/pg:1'
+      ]) {
+        expect(isValidConfigKey(key), key).toBe(true);
+      }
+      for (const key of [
+        'profiles',
+        'profiles.dev',
+        'profiles.dev.bogus',
+        'profiles.dev.env',
+        'profiles.dev.workflow',
+        'profiles.dev.workflow.image',
+        'profiles.dev.profiles.x.parallel'
+      ]) {
+        expect(isValidConfigKey(key), key).toBe(false);
+      }
+    });
+
+    it('sets, gets and unsets profile values, dropping emptied parents', async () => {
+      const { setConfigValue, getConfigValue, unsetConfigValue } =
+        await import('./config');
+      const config = {};
+      expect(setConfigValue(config, 'profiles.dev.parallel', '2')).toBe(2);
+      setConfigValue(config, 'profiles.dev.env.NODE_ENV', 'test');
+      setConfigValue(config, 'profiles.dev.workflow.runs-on', 'ubuntu-latest');
+      setConfigValue(
+        config,
+        'profiles.dev.workflow.container-image.corp/img:1',
+        'node:23'
+      );
+      expect(config).toEqual({
+        profiles: {
+          dev: {
+            parallel: 2,
+            env: { NODE_ENV: 'test' },
+            workflow: {
+              'runs-on': 'ubuntu-latest',
+              'container-image': { 'corp/img:1': 'node:23' }
+            }
+          }
+        }
+      });
+      expect(getConfigValue(config, 'profiles.dev.env.NODE_ENV')).toBe('test');
+      expect(
+        getConfigValue(
+          config,
+          'profiles.dev.workflow.container-image.corp/img:1'
+        )
+      ).toBe('node:23');
+
+      unsetConfigValue(config, 'profiles.dev.parallel');
+      unsetConfigValue(config, 'profiles.dev.env.NODE_ENV');
+      unsetConfigValue(config, 'profiles.dev.workflow.runs-on');
+      unsetConfigValue(
+        config,
+        'profiles.dev.workflow.container-image.corp/img:1'
+      );
+      expect(config).toEqual({});
+    });
+
+    it('validates profile config values like top-level ones', async () => {
+      const { setConfigValue } = await import('./config');
+      expect(() =>
+        setConfigValue({}, 'profiles.dev.parallel', 'lots')
+      ).toThrow();
+      expect(() =>
+        setConfigValue({}, 'profiles.dev.workflow.runs-on', '')
+      ).toThrow(/must not be empty/);
+    });
+
+    it('refuses a mapping entry where the field holds a single value', async () => {
+      const { setConfigValue } = await import('./config');
+      const config = {};
+      setConfigValue(config, 'profiles.dev.workflow.runs-on', 'ubuntu-latest');
+      expect(() =>
+        setConfigValue(config, 'profiles.dev.workflow.runs-on.corp', 'x')
+      ).toThrow(/profiles\.dev\.workflow\.runs-on is a single value/);
+    });
+
+    it('a single value replaces a mapping', async () => {
+      const { setConfigValue } = await import('./config');
+      const config = {};
+      setConfigValue(config, 'profiles.dev.workflow.runs-on.corp', 'x');
+      setConfigValue(config, 'profiles.dev.workflow.runs-on', 'y');
+      expect(config).toEqual({
+        profiles: { dev: { workflow: { 'runs-on': 'y' } } }
+      });
+    });
+
+    it('updateConfigFile sets and unsets one key, keeping comments', async () => {
+      const { updateConfigFile } = await import('./config');
+      const file = path.join(tempHome, 'secureci.yml');
+      fs.writeFileSync(file, '# team defaults\nparallel: 2 # keep low\n');
+      updateConfigFile(file, 'profiles.dev.workflow.runs-on', 'ubuntu-latest');
+      let raw = fs.readFileSync(file, 'utf-8');
+      expect(raw).toContain('# team defaults');
+      expect(raw).toContain('# keep low');
+      expect(raw).toContain('runs-on: ubuntu-latest');
+      updateConfigFile(file, 'profiles.dev.workflow.runs-on', undefined);
+      raw = fs.readFileSync(file, 'utf-8');
+      expect(raw).toContain('# team defaults');
+      expect(raw).not.toContain('profiles');
+    });
+
+    it('updateConfigFile creates the file and its directory', async () => {
+      const { updateConfigFile } = await import('./config');
+      const file = path.join(tempHome, 'new', 'config.yml');
+      expect(updateConfigFile(file, 'parallel', '3')).toBe(3);
+      expect(fs.readFileSync(file, 'utf-8')).toBe('parallel: 3\n');
+    });
+
+    it('profileEntries lists every profile value as a dotted key', async () => {
+      const { profileEntries } = await import('./config');
+      expect(
+        profileEntries({
+          parallel: 2,
+          profiles: {
+            dev: {
+              parallel: 1,
+              'env-file': ['.env', '.env.dev'],
+              env: { A: 'x' },
+              workflow: {
+                'runs-on': 'ubuntu-latest',
+                'container-image': { 'corp/img:1': 'node:23' }
+              }
+            },
+            empty: {}
+          }
+        })
+      ).toEqual([
+        ['profiles.dev.parallel', '1'],
+        ['profiles.dev.env-file', '.env, .env.dev'],
+        ['profiles.dev.env.A', 'x'],
+        ['profiles.dev.workflow.runs-on', 'ubuntu-latest'],
+        ['profiles.dev.workflow.container-image.corp/img:1', 'node:23'],
+        ['profiles.empty', '(empty)']
+      ]);
+    });
+
+    it('loadConfig keeps profiles from the global file', async () => {
+      const { saveConfig, loadConfig } = await import('./config');
+      saveConfig({ profiles: { dev: { workflow: { 'runs-on': 'x' } } } });
+      expect(loadConfig().profiles).toEqual({
+        dev: { workflow: { 'runs-on': 'x' } }
+      });
+    });
+  });
 });
