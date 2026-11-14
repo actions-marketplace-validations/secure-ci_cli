@@ -423,6 +423,9 @@ export async function executeWorkflow(
                 },
                 onGateCancelled: (index: number): UnitOutcome => {
                   const { index: combinationIndex, values } = selected[index];
+                  // Cancelled while pending: report it as other cancelled
+                  // jobs are, so the failed run says why.
+                  logger.warn(`Cancelled job: ${labelOf(values)}`);
                   unitResults[combinationIndex] = {
                     job: labelOf(values),
                     success: false,

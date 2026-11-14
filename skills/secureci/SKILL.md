@@ -231,7 +231,7 @@ require a user response before continuing.
    Snippet:
 
    ```yaml
-   - uses: secure-ci/cli@<40-char-sha> # v1.3.1
+   - uses: secure-ci/cli@<40-char-sha> # v1.3.2
      with:
        inventory: check
        upload-sarif: false
