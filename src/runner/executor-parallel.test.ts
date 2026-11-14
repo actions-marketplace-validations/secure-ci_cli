@@ -20,7 +20,9 @@ import { executeWorkflow } from './executor';
 describe('executeWorkflow: parallel jobs (#49)', () => {
   let dir: string;
   let logSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
   const logged = () => logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+  const warned = () => warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
 
   const workflow = (yaml: string): string => {
     const file = path.join(dir, 'workflow.yml');
@@ -45,7 +47,7 @@ describe('executeWorkflow: parallel jobs (#49)', () => {
     resolveContainerRuntimeMock.mockReset();
     resolveContainerRuntimeMock.mockResolvedValue(null);
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
   });
   afterEach(() => {
@@ -550,6 +552,8 @@ jobs:
       expect(logged()).toContain(
         'Cancelling m (n: 2): m (n: 3) is now pending in concurrency group "shared"'
       );
+      // Reported like any other cancelled job, so the failed run says why.
+      expect(warned()).toContain('Cancelled job: m (n: 2)');
     });
 
     it('notes that workflow-level concurrency has nothing to apply to', async () => {
